@@ -7,7 +7,7 @@
 # hover, selection, focus, a download or death — is a coarse record
 # to `update`.
 #
-# State: { tabs: [{ id, url, title, state, code, hover, gen, nav, back,
+# State: { tabs: [{ id, url, title, state, code, hover, gen, nav, back, node,
 # fwd, skip }], active: the shown tab's id, next: the next tab number,
 # bookmarks: [{ url, title }], show: "" | "bookmarks" | "site", find,
 # find_nav, fgen, zoom, note }. A tab's `gen` renumbers its address
@@ -33,8 +33,18 @@ def load-home [] {
 }
 let home = (load-home)
 
-def new-tab [id, url] {
-  { id: $id, url: $url, title: "", state: (match $url { "" => "empty"; _ => "loading" }), code: 0, hover: "", gen: 0, nav: 0, back: [], fwd: [], skip: false }
+# `node` is the fabric node that hosts the tab's page (0: this machine).
+def new-tab [id, url, node] {
+  { id: $id, url: $url, title: "", state: (match $url { "" => "empty"; _ => "loading" }), code: 0, hover: "", gen: 0, nav: 0, back: [], fwd: [], skip: false, node: $node }
+}
+
+# Where new tabs render by default: the policy's `render` (a node id),
+# else this machine.
+def render-default [policy] {
+  match (int (field-or $policy "render" 0)) {
+    ok $n => $n
+    _ => 0
+  }
 }
 
 def active-tab [state] {
@@ -98,8 +108,9 @@ def save-bookmarks [marks] {
 # Scripts per site: the user's list of origins with scripts off
 # (state/browser/noscript.msh in the home) under the administrator's
 # policy (conf/app/web.msh: { scripts: "on" | "off", allow: [origins],
-# deny: [origins] }; deny wins, then allow, then the user's list, then
-# the default, which is on). The page leaf carries the verdict, and the
+# deny: [origins], render: node }; deny wins, then allow, then the
+# user's list, then the default, which is on; `render` is the fabric
+# node new tabs' pages are hosted on, 0 or absent for this machine). The page leaf carries the verdict, and the
 # page domain honours it from its next load.
 def load-noscript [] {
   match (cat ($store + "/noscript.msh")) {
@@ -207,13 +218,14 @@ def site-panel [state, tab] {
           { kind: "label", text: ("Scripts: " + (match $on { true => "on"; _ => "off" }) + (match $ruled { true => " (set by the administrator)"; _ => "" })) }
           { kind: "button", id: "toggle-scripts", label: (match $user_off { true => "Allow scripts here"; _ => "Block scripts here" }), disabled: $ruled }
         ] }
-      { kind: "label", text: ("Page domain: " + (match $info.alive { true => "alive"; _ => "gone" }) + ", " + (str $info.used_kb) + " KB of " + (str $info.limit_kb) + " KB") }
-      { kind: "label", muted: true, wrap: true, text: "The page holds one channel to this window and nothing else: no filesystem, no network of its own, no cookies yet. What it fetches goes through this window's broker." }
+      { kind: "label", text: ("Page domain: " + (match $info.alive { true => "alive"; _ => "gone" }) + (match $info.node { 0 => (", " + (str $info.used_kb) + " KB of " + (str $info.limit_kb) + " KB"); $n => (", hosted on node " + (str $n)) })) }
+      { kind: "label", muted: true, wrap: true, text: "The page holds one channel to this window and nothing else: no filesystem, no network of its own, no cookies yet. What it fetches goes through this window's broker — on another node too." }
+      { kind: "list", id: "render", key: ("render-" + (str $tab.node)), h: 160, cols: [{ title: "Render on", w: 2 } { title: "Free", w: 1 }], rows: ([{ id: "0", cells: ["This machine", ""] }] + (net-rows)), empty: "" }
     ] }
 }
 
 let final = (gui {
-    init:  { tabs: [(new-tab "t1" $home)], active: "t1", next: 2, bookmarks: (load-bookmarks), show: "", find: "", find_nav: 0, fgen: 0, zoom: 100, note: "", noscript: (load-noscript), policy: (load-policy) }
+    init:  { tabs: [(new-tab "t1" $home (render-default (load-policy)))], active: "t1", next: 2, bookmarks: (load-bookmarks), show: "", find: "", find_nav: 0, fgen: 0, zoom: 100, note: "", noscript: (load-noscript), policy: (load-policy) }
     title: "Web"
     width: 1000
     view: (fn [state] {
@@ -250,7 +262,7 @@ let final = (gui {
           })
         let policy = $state.policy
         let noscript = $state.noscript
-        let pages = ($state.tabs | map (fn [t] { { kind: "page", id: $t.id, url: $t.url, nav: $t.nav, visible: ($t.id == $state.active), h: 520, grow: true, zoom: $state.zoom, find: $state.find, find_nav: $state.find_nav, scripts: (scripts-for $policy $noscript $t.url) } }))
+        let pages = ($state.tabs | map (fn [t] { { kind: "page", id: $t.id, url: $t.url, nav: $t.nav, visible: ($t.id == $state.active), h: 520, grow: true, zoom: $state.zoom, find: $state.find, find_nav: $state.find_nav, scripts: (scripts-for $policy $noscript $t.url), node: $t.node } }))
         let status = [{ kind: "label", muted: true, text: (status-line $state $cur) }]
         # The pages share one gap-less column: a hidden tab's leaf takes no
         # room at all, so the window's height is the shown page's. (`map`
@@ -290,7 +302,7 @@ let final = (gui {
           }
           "newtab" => {
             let id = ("t" + (str $state.next))
-            $state | merge { tabs: ($state.tabs + [(new-tab $id "")]), active: $id, next: ($state.next + 1), note: "" }
+            $state | merge { tabs: ($state.tabs + [(new-tab $id "" (render-default $state.policy))]), active: $id, next: ($state.next + 1), note: "" }
           }
           "closetab" => (match ((len $state.tabs) < 2) {
               true => $state
@@ -326,6 +338,19 @@ let final = (gui {
                 })
             })
           "site" => ($state | merge { show: (match $state.show { "site" => ""; _ => "site" }) })
+          "render" => {
+            # A row names a node: the tab's page moves there (a fresh page
+            # domain on that node, this window still its broker) and the
+            # page reloads.
+            let cur = (active-tab $state)
+            match (int $ev.row) {
+              ok $n => (match ($n == $cur.node) {
+                  true => $state
+                  _ => (set-tab ($state | merge { note: "" }) $cur.id { node: $n, nav: ($cur.nav + 1), state: "loading" })
+                })
+              _ => $state
+            }
+          }
           "toggle-scripts" => {
             # Flip the site's entry in the user's list, keep it, and reload
             # the tab so the page domain takes the new word.

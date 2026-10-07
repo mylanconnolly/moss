@@ -147,8 +147,8 @@ pub fn setup(display_cap: u64, log: u64, secret: []const u8, font_cap: u64, fabr
 /// network view its broker fetches over, a view for fonts, the stores
 /// the `webpage` image is staged from); without them a page leaf shows
 /// nothing and says why.
-pub fn setupPages(spawner: u64, n: *@import("netcmds.zig").Net, view_chan: u64, view_buf: [*]u8, assets_view: bool, stores: []const ?@import("fscmds.zig").Store, log: u64) void {
-    guipage.setup(spawner, n, view_chan, view_buf, assets_view, stores, log);
+pub fn setupPages(spawner: u64, n: *@import("netcmds.zig").Net, view_chan: u64, view_buf: [*]u8, assets_view: bool, stores: []const ?@import("fscmds.zig").Store, log: u64, fabric: u64) void {
+    guipage.setup(spawner, n, view_chan, view_buf, assets_view, stores, log, fabric);
 }
 
 /// The pages' `localStorage` persists under the program's own view (a
@@ -617,10 +617,11 @@ fn containsPage(node: Value, id: []const u8) bool {
 /// The interpreter of the running `gui`, for staging the page image.
 var page_it: ?*mshl.Interp = null;
 
-/// `{ kind: "page", id, url, nav, visible, h }`: a page domain's
+/// `{ kind: "page", id, url, nav, visible, h, node }`: a page domain's
 /// viewport. The leaf takes the height offered (or `h`, 300 by
 /// default); a `visible: false` leaf takes no room and its page keeps
-/// its document without a pixel buffer. The page's pixels are blitted
+/// its document without a pixel buffer; `node` (0, the default: this
+/// machine) hosts the page on that fabric node, this window its broker. The page's pixels are blitted
 /// inside the rect and nowhere else — the chrome above it is this
 /// window's, whatever the page paints.
 fn layoutPage(rec: mshl.Record, x: usize, y: usize, avail_w: usize, avail_h: usize, paint: bool) Size {
@@ -628,14 +629,15 @@ fn layoutPage(rec: mshl.Record, x: usize, y: usize, avail_w: usize, avail_h: usi
     const visible = if (rec.get("visible")) |v| v.asBool() else true;
     const url = strField(rec, "url");
     const nav: i64 = if (rec.get("nav")) |n| (if (n == .int) n.int else 0) else 0;
+    const node: u64 = @intCast(std.math.clamp(intField(rec, "node", 0), 0, 0xffff));
     if (!visible) {
-        if (paint) if (page_it) |it| if (guipage.slotFor(it, id)) |s| guipage.sync(s, url, nav, 0, 0, boolField(rec, "scripts", true));
+        if (paint) if (page_it) |it| if (guipage.slotFor(it, id, node)) |s| guipage.sync(s, url, nav, 0, 0, boolField(rec, "scripts", true));
         return .{};
     }
     const h = @max(@as(usize, @intCast(std.math.clamp(intField(rec, "h", 300), 40, 4000))), avail_h);
     if (!paint) return .{ .w = avail_w, .h = h };
     const it = page_it orelse return .{ .w = avail_w, .h = h };
-    const s = guipage.slotFor(it, id) orelse {
+    const s = guipage.slotFor(it, id, node) orelse {
         fillRect(x, y, avail_w, h, pal.bg);
         guipage.pushFor(id, .unavailable, 0, guipage.last_refusal);
         return .{ .w = avail_w, .h = h };
@@ -1954,14 +1956,16 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
         var used: i64 = 0;
         var limit: i64 = 0;
         var alive = false;
+        var node: i64 = 0;
         if (guipage.slotById(args[0].str)) |s| {
             const inf = guipage.info(s);
             used = @intCast(inf.used_kb);
             limit = @intCast(inf.limit_kb);
             alive = inf.alive;
+            node = @intCast(inf.node);
         }
-        const keys = try it.arena.dupe([]const u8, &.{ "alive", "used_kb", "limit_kb" });
-        const vals = try it.arena.dupe(Value, &.{ .{ .bool = alive }, .{ .int = used }, .{ .int = limit } });
+        const keys = try it.arena.dupe([]const u8, &.{ "alive", "used_kb", "limit_kb", "node" });
+        const vals = try it.arena.dupe(Value, &.{ .{ .bool = alive }, .{ .int = used }, .{ .int = limit }, .{ .int = node } });
         return .{ .record = .{ .keys = keys, .vals = vals } };
     }
     if (std.mem.eql(u8, name, "display-info")) {

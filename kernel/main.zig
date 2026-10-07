@@ -447,6 +447,11 @@ export fn kmain(boot_arg: u64) noreturn {
             std.debug.panic("spawn boot-watch: {t}", .{e});
         };
     }
+    if (build_options.webfab_test) {
+        _ = sched.spawn("boot-watch", webfabTestWorker, 0, .{}) catch |e| {
+            std.debug.panic("spawn boot-watch: {t}", .{e});
+        };
+    }
 
     if (build_options.cpu_test) {
         _ = sched.spawn("cpu-test", cpuTestWorker, 0, .{}) catch @panic("spawn cpu-test");
@@ -1296,6 +1301,16 @@ fn webpageTestWorker(_: u64) void {
 
 fn browserTestWorker(_: u64) void {
     systemDrill("browser");
+}
+
+/// The two-node browser drill: node 1 (profile webfab) is the desktop
+/// with the Web app; node 2 (profile webnode) hosts the tab's page over
+/// the fabric and serves the fixtures. The runner drives node 1 and
+/// reads both logs; the PASS is node 1's clean exit at logout. Both
+/// nodes run this worker (one kernel): the deadline covers the whole
+/// drive, and node 2, which never exits, is killed by the runner first.
+fn webfabTestWorker(_: u64) void {
+    systemDrillWithin("webfab", 240);
 }
 
 fn jsrunTestWorker(_: u64) void {

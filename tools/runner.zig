@@ -16,7 +16,7 @@
 const std = @import("std");
 const Io = std.Io;
 
-const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat, gseat, comp, focus, trust, readers, gui, guilogin, gtrust, gsession, lconsole, gisession, gboom, ptr, pointer, guiclick, guishell, guishellro, display, largetext, fabgui, fabsignal, localeupd, desktop, topbar, dock, listdemo, explorer, browse, netbrowse, cascade, terminal, editor, power, restart, activity, netconf, console, nodes, nodevm, web, browser };
+const Kind = enum { plain, blk, net, cluster, shell, vmnode, login, flogin, dot, gpu, term, input, seat, gseat, comp, focus, trust, readers, gui, guilogin, gtrust, gsession, lconsole, gisession, gboom, ptr, pointer, guiclick, guishell, guishellro, display, largetext, fabgui, fabsignal, localeupd, desktop, topbar, dock, listdemo, explorer, browse, netbrowse, cascade, terminal, editor, power, restart, activity, netconf, console, nodes, nodevm, web, browser, webfab };
 
 const Spec = struct {
     name: []const u8,
@@ -131,6 +131,7 @@ const specs = [_]Spec{
     .{ .name = "acid3", .kind = .web, .pass = "acid3-test: PASS", .extra = "mshrun: script: acid3 done", .append = "profile=acid3", .timeout_s = 150 },
     .{ .name = "web", .kind = .web, .pass = "web-test: PASS", .extra = "mshrun: script: web fixtures ok", .append = "profile=web" },
     .{ .name = "browser", .kind = .browser, .pass = "browser-test: PASS", .extra = "browser: closed tabs=1", .always_extra = "page t1: load done", .extra2 = "topbar: exit note=logging out", .append = "profile=browser", .timeout_s = 180 },
+    .{ .name = "webfab", .kind = .webfab, .pass = "webfab-test: PASS", .extra = "browser: closed tabs=1", .always_extra = "page t1: hosted on node 2", .extra2 = "topbar: exit note=logging out", .append = "profile=webfab", .timeout_s = 240 },
     .{ .name = "webpage", .kind = .web, .pass = "webpage-test: PASS", .extra = "webpagecli: page domains ok", .extra2 = "webpagecli: the page that read past its arena died, as it should", .extra3 = "webpage: reclaimed ", .append = "profile=webpage", .timeout_s = 200 },
     .{
         .name = "users",
@@ -451,6 +452,7 @@ fn runSpec(spec: Spec, bin: []const u8, polls: *u64) !bool {
     if (spec.kind == .flogin) return runFlogin(spec, bin, polls);
     if (spec.kind == .fabgui) return runFabGui(spec, bin, polls);
     if (spec.kind == .netbrowse) return runNetBrowse(spec, bin, polls);
+    if (spec.kind == .webfab) return runWebFab(spec, bin, polls);
     if (spec.kind == .nodes) return runNodes(spec, bin, polls);
     if (spec.kind == .fabsignal) return runFabSignal(spec, bin, polls);
     if (spec.kind == .browse) return runBrowse(spec, bin, polls);
@@ -5020,6 +5022,141 @@ fn runNetBrowse(spec: Spec, bin: []const u8, polls: *u64) !bool {
     };
     if (rows == 0) {
         reportFailure(spec.name, "node 1's listing came back empty over the fabric", log2);
+        return false;
+    }
+    return true;
+}
+
+/// The two-node browser drill (stage 12 of the browser arc). Node 1
+/// (profile `webfab`) is the fabric seed on the hub and the desktop: the
+/// login, the Web app, the cluster network stack. Node 2 (profile
+/// `webnode`) joins the fabric, hosts pages for windows elsewhere, and
+/// serves the web fixtures on its own stack. The runner signs in on
+/// node 1, opens Web, picks node 2 in the Site panel's "Render on" list
+/// (the tab's page domain is then spawned on node 2 and polled over the
+/// fabric), loads the fixture — which node 1's broker fetches from node
+/// 2 across the hub and feeds back to the page there — and checks the
+/// heading's colour in node 1's page rect: pixels painted on node 2.
+/// Then it closes the window (node 2 reports the page closed) and logs
+/// out; the PASS is node 1's clean exit.
+fn runWebFab(spec: Spec, bin: []const u8, polls: *u64) !bool {
+    const disk1 = try std.fmt.allocPrint(gpa, "{s}/{s}-node1.img", .{ check_dir, spec.name });
+    const disk2 = try std.fmt.allocPrint(gpa, "{s}/{s}-node2.img", .{ check_dir, spec.name });
+    const log1 = try std.fmt.allocPrint(gpa, "{s}/{s}-node1.log", .{ check_dir, spec.name });
+    const log2 = try std.fmt.allocPrint(gpa, "{s}/{s}-node2.log", .{ check_dir, spec.name });
+    for ([_][]const u8{ disk1, disk2, log1, log2 }) |f| cwd.deleteFile(io, f) catch {};
+    try makeDisk(disk1);
+    try makeDisk(disk2);
+
+    // Node 1: the desktop on the hub (the fabric seed), with the
+    // graphical devices and QMP to drive it.
+    var args1: std.ArrayList([]const u8) = .empty;
+    try appendBase(&args1, log1, bin, "webfab-node1", "profile=webfab node=1");
+    try appendDisk(&args1, disk1);
+    try args1.appendSlice(gpa, &.{
+        "-netdev", "hubport,id=h1,hubid=0",
+        "-device", "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=h1",
+        "-netdev", try std.fmt.allocPrint(gpa, "socket,id=s2,listen=127.0.0.1:{d}", .{floginPort()}),
+        "-netdev", "hubport,id=h2,hubid=0,netdev=s2",
+        "-device", gpu_device,
+        "-device", "virtio-keyboard-pci,disable-legacy=on,iommu_platform=on",
+        "-device", "virtio-tablet-pci,disable-legacy=on,iommu_platform=on",
+        "-qmp",    try std.fmt.allocPrint(gpa, "tcp:127.0.0.1:{d},server=on,wait=off", .{qmpPort()}),
+    });
+    var c1 = try spawnQemu(args1.items);
+    defer c1.kill(io);
+    sleepMs(1000);
+
+    // Node 2: the page host, joining through the socket to node 1's hub.
+    var args2: std.ArrayList([]const u8) = .empty;
+    try appendBase(&args2, log2, bin, "webfab-node2", "profile=webnode node=2");
+    try appendDisk(&args2, disk2);
+    try args2.appendSlice(gpa, &.{
+        "-netdev", try std.fmt.allocPrint(gpa, "socket,id=n0,connect=127.0.0.1:{d}", .{floginPort()}),
+        "-device", "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=n0",
+    });
+    var c2 = try spawnQemu(args2.items);
+    defer c2.kill(io);
+
+    var q = qmpConnect(qmpPort()) catch {
+        reportFailure(spec.name, "could not reach QEMU's QMP port", log1);
+        return false;
+    };
+    defer q.close();
+    if (!try desktopSignIn(spec, log1, polls, &q, "alice", "alice-pass")) return false;
+    if (!try waitLogN(log1, "topbar: ready", 1, "the desktop top bar never came up", spec, polls)) return false;
+    if (!try waitLogN(log1, "dock: ready", 1, "the desktop dock never came up", spec, polls)) return false;
+    if (!try waitLogN(log2, "webnode: serving pages", 1, "node 2's page host never came up", spec, polls)) return false;
+    if (!try waitLogN(log2, "webfix: serving http", 1, "node 2's fixture server never came up", spec, polls)) return false;
+    sleepMs(500);
+    // Web is pill 5 (order 55, after Settings, Demo, Files, Terminal, Editor).
+    const pill = parseDockItem(readLog(log1), 5) orelse {
+        reportFailure(spec.name, "could not parse the dock's Web pill", log1);
+        return false;
+    };
+    if (!clickScanout(&q, pill[0], pill[1])) return sfail(spec, log1, "click the Web pill");
+    if (!try waitLogN(log1, "dock: activate browser", 1, "the Web pill did not launch the browser", spec, polls)) return false;
+    if (!try waitLogN(log1, "gui: widget url-t1-0 at", 1, "the first tab's address field never appeared", spec, polls)) return false;
+    sleepMs(500);
+    // The Site panel's "Render on" list: this machine, then the live
+    // peers. Node 2 appears once membership has gossiped; the panel is
+    // toggled until it lists two rows.
+    var tries: usize = 0;
+    while (listCount(readLog(log1), "render") < 2) : (tries += 1) {
+        if (tries >= 40) {
+            reportFailure(spec.name, "the Render-on list never listed node 2", log1);
+            return false;
+        }
+        const site = widgetCenter(readLog(log1), "site") orelse return sfail(spec, log1, "find the Site button");
+        if (!clickScanout(&q, site[0], site[1])) return sfail(spec, log1, "click Site");
+        sleepMs(1000);
+    }
+    const g = parseListGeom(readLog(log1), "render") orelse {
+        reportFailure(spec.name, "could not parse the Render-on list's geometry", log1);
+        return false;
+    };
+    // The second row is node 2.
+    if (!clickScanout(&q, g[0], g[1] + g[2] + g[2] / 2)) return sfail(spec, log1, "click node 2 in the Render-on list");
+    if (!try waitLogN(log1, "page t1: hosted on node 2", 1, "the page was not hosted on node 2", spec, polls)) return false;
+    if (!try waitLogN(log2, "webnode: page 0 spawned", 1, "node 2 never spawned the page", spec, polls)) return false;
+    // The fixture node 2 serves, typed into the tab: the page on node 2
+    // asks node 1's broker, which fetches across the hub and feeds it back.
+    const field1 = widgetCenter(readLog(log1), "url-t1-0") orelse return sfail(spec, log1, "find the address field");
+    if (!clickScanout(&q, field1[0], field1[1])) return sfail(spec, log1, "click the address field");
+    sleepMs(200);
+    if (!q.typeText("http://node2.moss.test:8080/")) return sfail(spec, log1, "type the fixture URL");
+    const go1 = widgetCenter(readLog(log1), "go") orelse return sfail(spec, log1, "find Go");
+    if (!clickScanout(&q, go1[0], go1[1])) return sfail(spec, log1, "click Go");
+    if (!try waitLogN(log1, "page t1: load done", 1, "the remote page never loaded the fixture", spec, polls)) return false;
+    if (!try waitLogN(log1, "page t1: title \"moss fixture: home\"", 1, "the remote page never reported the fixture's title", spec, polls)) return false;
+    // The rows cross the fabric in pieces behind the load; give them a moment.
+    sleepMs(2500);
+    _ = q.screendump(check_dir ++ "/webfab-front.ppm");
+    const front = readPpm(check_dir ++ "/webfab-front.ppm") orelse return sfail(spec, log1, "read the screendump");
+    const r1 = pageRect(readLog(log1), "t1") orelse {
+        reportFailure(spec.name, "could not parse the page's rect", log1);
+        return false;
+    };
+    const heading = countRgbIn(front, r1, 51, 102, 153);
+    if (heading < 20) {
+        var b: [96]u8 = undefined;
+        reportFailure(spec.name, std.fmt.bufPrint(&b, "the heading's colour is not in the page rect ({d} pixels)", .{heading}) catch "no heading", log1);
+        return false;
+    }
+    // Close the window: the remote page is reaped, and node 2 says so.
+    const c = parseDot(readLog(log1), "close=") orelse {
+        reportFailure(spec.name, "could not find the close dot", log1);
+        return false;
+    };
+    if (!clickScanout(&q, c[0], c[1])) return sfail(spec, log1, "click close");
+    if (!try waitLogN(log1, "browser: closed tabs=1", 1, "the browser never closed", spec, polls)) return false;
+    if (!try waitLogN(log1, "page t1: reaped", 1, "the window's exit did not reap its page", spec, polls)) return false;
+    if (!try waitLogN(log2, "webnode: page 0 closed by its window", 1, "node 2 never heard the page close", spec, polls)) return false;
+    sleepMs(300);
+    if (!try desktopLogout(spec, log1, polls, &q)) return false;
+    const v = watch(log1, spec, spec.extra, polls);
+    if (!v.ok) {
+        reportFailure(spec.name, v.why, log1);
         return false;
     }
     return true;

@@ -35,6 +35,9 @@ pub const Slot = struct {
     id: [64]u8 = undefined,
     id_len: usize = 0,
     page: webhost.PageId = 0,
+    /// The node hosting the page (0: this one); a leaf naming another
+    /// gets a fresh page there.
+    node: u64 = 0,
     /// The URL last commanded, and the `nav` nonce it was commanded under.
     url: [2048]u8 = undefined,
     url_len: usize = 0,
@@ -113,6 +116,8 @@ var ev_lock: webhost.Lock = .{};
 // ------------------------------------------------------------ the host
 
 var spawner: u64 = 0;
+/// The fabric, for pages hosted on other nodes (0: none).
+var fab: u64 = 0;
 var net: ?*netcmds.Net = null;
 var view: u64 = 0;
 var view_buf: [*]u8 = undefined;
@@ -143,8 +148,9 @@ pub fn stackHighWater() usize {
     return thread_stack.len - i;
 }
 
-pub fn setup(spawner_cap: u64, n: *netcmds.Net, view_chan: u64, buf: [*]u8, assets_view: bool, s: []const ?fscmds.Store, log: u64) void {
+pub fn setup(spawner_cap: u64, n: *netcmds.Net, view_chan: u64, buf: [*]u8, assets_view: bool, s: []const ?fscmds.Store, log: u64, fabric: u64) void {
     spawner = spawner_cap;
+    fab = fabric;
     net = n;
     view = view_chan;
     view_buf = buf;
@@ -332,29 +338,46 @@ pub fn slotById(id: []const u8) ?*Slot {
     return null;
 }
 
-/// The slot for a leaf id: the one it has, or a fresh page. Null when
-/// the id is already in this tree (a duplicate), when no page can be
-/// hosted, or when the table is full.
-pub fn slotFor(it: *mshl.Interp, id: []const u8) ?*Slot {
+/// The slot for a leaf id: the one it has, or a fresh page — on this
+/// node, or hosted by `node`'s relay over the fabric (a leaf whose
+/// node changed gets a fresh page there, reloaded). Null when the id
+/// is already in this tree (a duplicate), when no page can be hosted,
+/// or when the table is full.
+pub fn slotFor(it: *mshl.Interp, id: []const u8, node: u64) ?*Slot {
     if (slotById(id)) |s| {
         if (s.seen) {
             last_refusal = "the same page id twice in one tree";
             return null;
         }
-        s.seen = true;
-        return s;
+        if (s.node == node) {
+            s.seen = true;
+            return s;
+        }
+        webhost.logf(log_h, "page {s}: moving from node {d} to node {d}", .{ s.idText(), s.node, node });
+        host.destroy(s.page);
+        s.* = .{};
     }
     if (!ensureHost(it)) {
         last_refusal = unavailableReason();
         return null;
     }
     for (&slots) |*s| if (!s.used) {
-        const page = host.spawn(stage.?.handle, 0, 0) orelse {
+        const page = if (node == 0) host.spawn(stage.?.handle, 0, 0) orelse {
             last_refusal = "the page domain could not be spawned";
             return null;
+        } else blk: {
+            if (fab == 0) {
+                last_refusal = "this program holds no fabric";
+                return null;
+            }
+            break :blk host.spawnRemote(fab, node, 0, 0) orelse {
+                last_refusal = "the page could not be hosted on that node";
+                return null;
+            };
         };
-        s.* = .{ .used = true, .seen = true, .page = page, .id_len = @min(id.len, s.id.len) };
+        s.* = .{ .used = true, .seen = true, .page = page, .node = node, .id_len = @min(id.len, s.id.len) };
         @memcpy(s.id[0..s.id_len], id[0..s.id_len]);
+        if (node != 0) webhost.logf(log_h, "page {s}: hosted on node {d}", .{ s.idText(), node });
         return s;
     };
     last_refusal = "too many pages at once";
@@ -422,13 +445,17 @@ pub fn selectionOf(s: *Slot) []const u8 {
 
 /// What the page domain holds, for a "Site" view: its memory against
 /// its budget, in KB, and whether it is alive.
-pub const Info = struct { used_kb: u64 = 0, limit_kb: u64 = 0, alive: bool = false };
+pub const Info = struct { used_kb: u64 = 0, limit_kb: u64 = 0, alive: bool = false, node: u64 = 0 };
 
 pub fn info(s: *Slot) Info {
     host.lock.acquire();
     defer host.lock.release();
     const p = host.page(s.page);
-    if (!p.used or p.dead or p.ctl == 0) return .{};
+    if (!p.used or p.dead) return .{ .node = s.node };
+    // A remote page's memory is its node's business; it is alive while
+    // its relay answers.
+    if (p.remote != null) return .{ .alive = true, .node = s.node };
+    if (p.ctl == 0) return .{};
     const st = usys.domainStat(p.ctl);
     if (st.err != .ok) return .{};
     return .{ .used_kb = st.data[3] >> 32, .limit_kb = st.data[3] & 0xffff_ffff, .alive = st.data[0] != @intFromEnum(shared.DomainState.dead) };

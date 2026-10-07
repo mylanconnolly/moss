@@ -7930,6 +7930,81 @@ could not hold Acid3's six frame realms (24 MB now, the page's size).
 root); a frame's `location` is only its `href`; the HTML tree builder
 still builds an XHTML document.
 
+**Stage 12, a page on another node (as built, 2026-10-06).** The
+fabric decided the shape before a line was written: a remote channel
+carries four words and one attached buffer of at most eight pages,
+shipped as a byte diff against a shadow each way per call; shared
+memory never crosses; a forwarded call parked past three seconds fails
+and drops the peer link; channel caps cross but a remote spawn makes
+its child a *server* under an 8 MB manifest, and a page is a *client*
+that needs 116. So the page is spawned on its node by a durable native
+service there, `webnode` (`user/webnode.zig`, reached by `dial NODE
+"webnode"` through that node's init like the file browser's `browse`),
+which embeds the ordinary host (`webhost.Host`) in a *relay mode*
+(`Host.relay`): the page's buffers are local, its `next` parks there,
+its fonts are the node's own, but an `open`, a `read` or a `storage`
+call is held (`Page.pending`, the reply token kept) and recorded for
+the window, and an event is recorded too (`Page.out`, a 16 KB FIFO of
+records), a `commit` becoming damage (`Page.dmg`) and a `dumped` event
+holding the page's call until the text has streamed. The window dials,
+says `hello` with its session buffer (the fabric makes the twin and
+hands it to the relay with that call: `relayAttach` maps it and mints
+the page's key), and *polls*: `pump` carries the queued commands and
+the broker's answers down in the buffer and brings the page's records
+up (`relayPump` = `relayApply` then `relayDrain`), with `more` when the
+buffer filled first; nothing ever parks, and an idle window asks every
+30 ms. The protocol is `shared/web.zig`'s `RelayReq`/`RelayResp` and
+the `Rec` records with a writer and reader both ends share (`shrink`
+for a chunk whose length is known only after the broker read into it).
+Pixels: the page commits its whole viewport, so the relay keeps a
+shadow of the frame the window last got and ships runs of rows that
+differ (`relayDrain`, step 3), each run gathered and LZ4-packed into
+the room left — halving the run until it fits, raw when a single row
+packs worse than it is — and the window decodes into its own pixel
+buffer and bumps the page's commit count. The first frame of a 938×520
+fixture crossed in two polls, 45 KB of 1.95 MB. On the window's side a
+remote page is a `Page` with `remote` set (`spawnRemote`): the same
+queue and `send`, the same `resize` (a fresh local buffer and a queued
+command), the same `destroy` (a `bye`, under the lock throughout). One
+pump thread per host (`pumpMain`, on a 256 KB stack of the host's own,
+since the broker's TLS handshakes run on it) polls every remote page in
+turn: `packCommand` turns the queue into records, the owed `Feed` goes
+first, a `read` the page asked for is answered by `brokerRead` straight
+into the record, the call is made with the lock released, and what came
+back is played by `remoteRecord` — `open` through `brokerOpenFrom`
+(under the lock, as the serving thread brokers), `storage` through
+`storageOp` (the page's path and the relay's now share it), pixels into
+the buffer. Events were the lesson of the first run: the pump cannot
+call the host's channel as the page would — the kernel answers
+`self_call` to a call on a channel the caller's own domain serves — so
+it notes the event on the record under the lock and posts it
+(`postEvent`), ringing a notification bound to the serving thread,
+whose `recvMsg` returns `interrupted` and `step` hands the posted event
+over exactly as a local page's (`takePosted` first, every step). A
+relay whose window stops polling destroys the page after 15 s
+(`relayStale`, a clock thread in `webnode`); a window whose relay stops
+answering marks the page dead and the host program hears a death. The
+GUI side is small: the `page` leaf's `node:` (a leaf whose node changed
+gets a fresh page there, `guipage.slotFor`), `page-info`'s `node`, and
+the Web app's "Render on" list in the Site panel over `net-rows`, with
+the policy's `render:` as the default. The `webfab` drill is the proof
+the roadmap asked for, with a twist that proves the broker stayed home:
+node 2 serves the fixtures on its own stack, and the page on node 2
+reaches them only through node 1's broker across the hub. What the
+run found beyond the self-call: the boot-watch worker is in the one
+kernel both nodes boot, so a two-node drill's hang deadline covers the
+whole drive (`systemDrillWithin("webfab", 240)`); an `echo` in a GUI's
+`update` is not a log line; a list must be tall enough for its second
+row before a drill can click it. And the full gate found the first
+cut's cost: the relay FIFOs, the LZ4 scratch and the pump's stack were
+statics of the host, two hosts live in every mshrun, and the image
+grew from 7.3 to 8.3 MB — past the 8 MB a script unit and the fabric's
+remote stage spawn under, so seven unrelated drills failed on
+`QuotaExceeded`. They are mapped on demand now (`mapPages`: when a
+window attaches to a relay's page, when a host first hosts a remote
+page), and an mshrun that does neither pays 77 KB. Residuals are in
+ROADMAP's stage 12 entry; the exit-node broker is the open half.
+
 ## JavaScript
 
 The decision row "JavaScript" (2026-09-24) fixes the shape: `lib/js/` is

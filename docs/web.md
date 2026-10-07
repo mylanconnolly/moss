@@ -312,6 +312,24 @@ dialog; answers with the chosen name), `page-info ID` (a page
 domain's memory and whether it is alive) and `log TEXT` (a line to the
 log from inside `update`, where `echo` waits for the window to close).
 
+### A page on another node
+
+A tab's page can be hosted by another machine on the fabric: in the
+Site panel, "Render on" lists this machine and the live peers, and
+picking one moves the tab's page there — a fresh page domain on that
+node, reloaded, with this window still its broker. The administrator's
+policy can make it the default for new tabs (`render: 2` in
+`conf/app/web.msh`). What crosses the fabric is what the page protocol
+already made explicit: the window's commands and the bytes its broker
+fetched go to the page, the page's events and the viewport rows it
+repainted come back (LZ4-packed runs of changed rows, in a 32 KB
+session buffer the window polls). The page there holds one channel to
+the node's `webnode` service and nothing else; `webnode` holds no
+network; the fetching, the storage, the clock and the trust roots stay
+with the window. A node offers this by running the `webnode` unit
+(profile `webnode`; the `webfab` drill is the two-node proof). The
+`page` leaf's `node:` is the knob for any mshl GUI.
+
 ### What is not built
 
 Very large pages outgrow the page's 40 MB for a document
@@ -329,7 +347,10 @@ Hangul come from the fallback face); bold is synthesized and there is
 no italic; no cache, no cookie jar, and one parked connection per
 page rather than a pool (the session's `webfetch` unit of the plan); no content coding in the page;
 no stop button; a select cycles its options rather than opening a
-list; binary downloads wait for a bytes save in the picker. Menus
+list; binary downloads wait for a bytes save in the picker. A page on
+another node streams a resource one 32 KB chunk per poll and shows no
+memory figure in the Site panel; a broker on another node (an exit
+node) is not built. Menus
 are the generic window menu until client-defined menus exist. The
 `page` leaf does not yet follow a window resize with a fresh buffer of
 the new size in one step: the leaf's rect changes on the next render

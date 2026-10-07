@@ -277,6 +277,11 @@ pub fn build(b: *std.Build) void {
         "netbrowse-test",
         "Run the networked-explorer drill: node 2's GUI explorer browses node 1's files over the fabric",
     ) orelse false;
+    const webfab_test = b.option(
+        bool,
+        "webfab-test",
+        "Run the two-node browser drill: node 1's Web app hosts a tab's page on node 2's webnode over the fabric",
+    ) orelse false;
     const cascade_test = b.option(
         bool,
         "cascade-test",
@@ -514,6 +519,7 @@ pub fn build(b: *std.Build) void {
     build_opts.addOption(bool, "netconf_test", netconf_test);
     build_opts.addOption(bool, "browse_test", browse_test);
     build_opts.addOption(bool, "netbrowse_test", netbrowse_test);
+    build_opts.addOption(bool, "webfab_test", webfab_test);
     build_opts.addOption(bool, "cascade_test", cascade_test);
     build_opts.addOption(bool, "terminal_test", terminal_test);
     build_opts.addOption(bool, "editor_test", editor_test);
@@ -605,6 +611,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "chooser", .src = "user/chooser.zig" },
         .{ .name = "webpage", .src = "user/webpage.zig" },
         .{ .name = "webpagecli", .src = "user/webpagecli.zig" },
+        .{ .name = "webnode", .src = "user/webnode.zig" },
         .{ .name = "jsrun", .src = "user/jsrun.zig" },
     };
     // The boot archive is packed at build time by tools/mkmarc from the
@@ -802,6 +809,8 @@ pub fn build(b: *std.Build) void {
         "conf/sessiongui/nodes.msh",        "conf/units/vmnode.msh",
         "conf/units/gui-nodevm.msh",        "conf/units/browse-client.msh",
         "scripts/browse-cli.msh",           "conf/units/gui-netbrowse.msh",
+        "conf/units/webnode.msh",           "conf/units/usersvc-webfab.msh",
+        "conf/units/gui-webfab.msh",        "conf/units/webfix-cluster.msh",
         "conf/units/cascade-a.msh",         "scripts/win-mid.msh",
         "conf/units/cascade-b.msh",         "conf/units/gui-term.msh",
         "conf/units/gui-tshell.msh",        "conf/units/gui-login.msh",
@@ -985,7 +994,7 @@ pub fn build(b: *std.Build) void {
             "browse_test",     "netbrowse_test", "cascade_test",    "terminal_test",
             "editor_test",     "activity_test",  "netconf_test",    "console_test",
             "nodes_test",      "nodevm_test",    "web_test",        "webpage_test",
-            "browser_test",    "jsrun_test",     "acid3_test",
+            "browser_test",    "jsrun_test",     "acid3_test",      "webfab_test",
         }) |on| gopts.addOption(bool, on, false);
         gopts.addOption(bool, "guest_kernel", true);
         const gmod = b.createModule(.{
@@ -1519,7 +1528,7 @@ pub fn build(b: *std.Build) void {
         "browse_test",     "netbrowse_test", "cascade_test",    "terminal_test",
         "editor_test",     "activity_test",  "netconf_test",    "console_test",
         "nodes_test",      "nodevm_test",    "web_test",        "webpage_test",
-        "browser_test",    "jsrun_test",     "acid3_test",
+        "browser_test",    "jsrun_test",     "acid3_test",      "webfab_test",
     };
     const variants = [_][]const u8{
         "panic",     "fault",     "sched",     "domain",   "ipc",        "init",
@@ -1534,7 +1543,7 @@ pub fn build(b: *std.Build) void {
         "localeupd", "desktop",   "topbar",    "dock",     "listdemo",   "explorer",
         "browse",    "netbrowse", "cascade",   "terminal", "editor",     "activity",
         "netconf",   "console",   "nodes",     "nodevm",   "web",        "webpage",
-        "browser",   "jsrun",     "acid3",
+        "browser",   "jsrun",     "acid3",     "webfab",
     };
     // The same drills once more under a ReleaseSafe kernel (the `+rs`
     // rows): the optimizer reorders and merges what a Debug build leaves

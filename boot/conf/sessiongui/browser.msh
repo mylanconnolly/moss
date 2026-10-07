@@ -7,8 +7,10 @@
 # the window itself. The picker is for downloads: a download is a grant
 # the user makes in the Save dialog, never a write to the home by this
 # app. The conf view (read-only, optional) is for the administrator's
-# script policy in conf/app/web.msh. Non-essential: closing its window
-# ends only this.
+# script policy in conf/app/web.msh. The fabric (optional) lets a tab's
+# page be hosted on another node — its `webnode` — with this window
+# still the page's broker. Non-essential: closing its window ends only
+# this.
 {
   app:       { name: "Web", description: "Browse the web in sandboxed pages", icon: network, window: "Web", dock: true, order: 55 }
   image:     mshrun
@@ -27,5 +29,6 @@
     { tag: store, session: true }
     { tag: view, fs: "", ro: false }
     { tag: conf, session: true, optional: true }
+    { tag: fabric, session: true, optional: true }
   ]
 }

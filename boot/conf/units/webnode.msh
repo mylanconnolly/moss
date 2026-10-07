@@ -1,0 +1,21 @@
+# The page host for windows on other nodes (profile webnode): a durable
+# native service reached by name over the fabric (`dial NODE "webnode"`
+# through this node's init). A window elsewhere asks it for a page; it
+# spawns the page domain here (the `webpage` image from the boot
+# archive, the fonts from this node's assets) and relays between them:
+# the window's commands and the bytes the window's broker fetched come
+# down, the page's events and repainted rows go up. It holds no network
+# of its own. Giving `fabric` pulls fabsvc up so this node joins the
+# mesh and is reachable by name. The budget hosts two pages at 116 MB
+# beside the host. Essential + never exits, so the node stays up.
+{
+  image:     webnode
+  grant:     [log, spawner, bootfs]
+  budget:    { user: 256mb, kobj: 8mb }
+  profiles:  [webnode]
+  essential: true
+  give: [
+    { tag: fabric, unit: fabsvc }
+    { tag: assets, fs: assets, ro: true }
+  ]
+}

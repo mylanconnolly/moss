@@ -1,0 +1,30 @@
+# The session manager for the two-node browser drill (profile webfab,
+# node 1): usersvc-browser with the fabric — the session's Web app hosts
+# a tab's page on node 2's `webnode` through it. The session's network
+# is the cluster stack (one NIC, on the hub): the page on node 2 asks
+# this window's broker for the fixture node 2 itself serves, so the
+# bytes come here over the hub and go back to the page — the proof that
+# a remote page holds no network. Giving `fabric` pulls fabsvc up.
+{
+  image:    users
+  arg:      1
+  budget:   { kobj: 8mb, user: 360mb }
+  grant:    [log, spawner, bootfs]
+  profiles: [webfab]
+  after:    apply
+  give: [
+    { tag: view, fs: conf/users, ro: false, mkdir: true }
+    { tag: home, fs: home, ro: false }
+    { tag: shares, fs: conf/shares, ro: false, mkdir: true }
+    { tag: conf, fs: conf/app, ro: false, mkdir: true }
+    { tag: store, fs: img, ro: true }
+    { tag: display, unit: compositor-ptr }
+    { tag: display_control, unit: compositor-ptr, control: true }
+    { tag: font, unit: fontsvc }
+    { tag: locale, unit: localesvc }
+    { tag: net, netview: net-cluster }
+    { tag: fabric, unit: fabsvc }
+    { tag: assets, fs: assets, ro: true }
+    { tag: init, self: true }
+  ]
+}

@@ -345,7 +345,7 @@ export fn umain(log_h: u64, chan_h: u64, arg: u64, blob_va: u64, blob_len: u64) 
     jscmds.setup(worker_spawner, &stores, view_chan, view_buf, log_h);
     if (net) |*n| {
         webrender.setup(worker_spawner, n, view_chan, view_buf, &stores, log_h);
-        guicmds.setupPages(worker_spawner, n, if (assets_chan != 0) assets_chan else view_chan, if (assets_chan != 0) assets_buf else view_buf, assets_chan != 0, &stores, log_h);
+        guicmds.setupPages(worker_spawner, n, if (assets_chan != 0) assets_chan else view_chan, if (assets_chan != 0) assets_buf else view_buf, assets_chan != 0, &stores, log_h, fab_chan);
         // The pages' storage persists under this program's own view when
         // it has one (a session app's home).
         if (view_chan != 0) guicmds.setStorageView(view_chan, view_buf);

@@ -1172,13 +1172,72 @@ supervises), and memory history per unit beside the CPU one.
       name leaks the duplicated name; the reclaim mark is a per-node
       walk to the root (fine at thousands of wrappers, to watch at
       hundreds of thousands).
-    - **(12) The fabric.** A page domain placed on another node (the
-      viewport buffer over the bulk transport, the broker's channel
-      proxied — a heavy site rendered where the memory is); a broker on
-      another node (browse through a peer's network: an exit node is a
-      unit file there); the window itself remote is `gui { node }`
-      already. *Exit:* a two-node drill renders a page on node 2 into a
-      tab on node 1.
+    - **(12) The fabric.** ✅ *A page on another node* (landed
+      2026-10-06). Node 2 runs `webnode`, a durable native service
+      reached by name through its init (`dial NODE "webnode"`, the
+      `browse` unit's shape): it spawns the page domain there — the
+      `webpage` image from its boot archive, fonts from its own assets —
+      and serves it with the host code's new *relay mode*, in which a
+      page's open, read and storage calls are held and recorded for the
+      window instead of fetched, and its events and repainted rows are
+      recorded too. The window on node 1 dials it, says `hello` with an
+      8-page session buffer, and *polls* (`pump`): the fabric's
+      constraints decided the shape — a remote call is four words and
+      one 32 KB buffer shipped as a byte diff, shared memory never
+      crosses, and a call parked past 3 s drops the peer link, so
+      nothing parks and the window asks every 30 ms when idle, at once
+      while the relay says more waits. Both directions are records in
+      the buffer (`shared/web.zig`: `RelayReq`/`RelayResp`, `Rec`, a
+      writer and reader): commands and the broker's answers go down,
+      events, the page's requests and pixel pieces come up — runs of
+      viewport rows that differ from a shadow of the frame the window
+      last got (the page commits its whole viewport; a hover ships a few
+      rows), LZ4-packed when that fits, raw when it does not. To the
+      window's host a remote page is a page like any other (`Page.remote`:
+      the session, the buffer, the broker's answer owed): commands queue
+      for it, the pump thread carries the queue and plays what comes
+      back, and its events reach the host program through `step` from a
+      posted queue the pump rings a bound notification for — the kernel
+      refuses a call on a channel the caller's own domain serves
+      (`self_call`), so the pump could not speak as the page would, which
+      the first run found. The broker, the storage, the clock, the trust
+      roots and the policy stay on node 1: the page on node 2 holds one
+      channel to the relay and the relay holds no network. The `page`
+      leaf takes `node:`; the Web app's Site panel lists "Render on"
+      (this machine and the live peers via `net-rows`) and a tab's page
+      moves with a fresh domain there; the policy's `render:` picks the
+      default for new tabs. The `webfab` drill: node 1 the desktop on the
+      cluster stack, node 2 the page host serving the fixtures on its
+      own stack; the runner picks node 2 in the panel, loads
+      `http://node2.moss.test:8080/` — the page on node 2 asks node 1's
+      broker, which fetches across the hub from node 2 and feeds the
+      bytes back — and finds the heading's colour in node 1's page rect:
+      pixels painted on node 2 (283 ms on node 2; the first frame of a
+      938×520 viewport crossed in two polls, 45 KB packed of 1.95 MB
+      raw). Closing the window says goodbye (node 2 reports the page
+      closed); a window that stops polling for 15 s loses its page.
+      Found on the way: the kernel's boot-watch worker runs on both
+      nodes of a two-node drill, so its hang deadline must cover the
+      whole drive (node 2 never exits); an `echo` inside a GUI's
+      `update` does not reach the log; a list 72 px tall clips its
+      second row; and static buffers in a host are paid twice by every
+      mshrun — the first cut's FIFOs, LZ4 scratch and pump stack took
+      the image from 7.3 to 8.3 MB, past the 8 MB a script unit spawns
+      under, and seven drills fell to `QuotaExceeded` (mapped on demand
+      now; "when a resource limit fails, log the chain" paid off at
+      once: the refusal named the quota). Residuals: one poll in flight per session, so a
+      resource streams one chunk per round trip (32 KB) and a
+      photo-heavy frame takes many polls — raising `fab_bulk_pages` is
+      the lever, measured first; a remote page's memory is not shown in
+      the Site panel (its node's business); the page key is a nonce, not
+      a secret, so another certified member could command a page it did
+      not open; the pump brokers under the host lock, so a slow fetch
+      for a remote page stalls the window's commands to local ones as a
+      local fetch does today. Still open: *a broker on another node*
+      (browse through a peer's network: an exit node is a unit file
+      there) — the symmetric case, a synchronous open/read RPC behind
+      `brokerOpenFrom`; the window itself remote is `gui { node }`
+      already.
     - **Track F — what the browser asks of the network** (as a stage
       asks): TLS session resumption and HSTS; certificate errors as an
       interstitial that names the failure and is never bypassed

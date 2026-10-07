@@ -1,0 +1,19 @@
+# The GUI front door for the two-node browser drill (profile webfab,
+# node 1): the login form, handing the session to usersvc-webfab.
+{
+  image:     mshrun
+  script:    scripts/gui-session.msh
+  grant:     [log, bootfs]
+  budget:    { user: 24mb }
+  profiles:  [webfab]
+  essential: true
+  after:     apply
+  give: [
+    { tag: display, unit: compositor-ptr }
+    { tag: font, unit: fontsvc }
+    { tag: sess, unit: usersvc-webfab }
+    { tag: buf, shm: 1 }
+    { tag: locale, unit: localesvc }
+    { secret: conf/trust.token }
+  ]
+}

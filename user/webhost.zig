@@ -59,6 +59,19 @@ pub const page_kobj_kb: u64 = 2 << 10;
 /// The storage buffer per host and each origin's share of it.
 pub const storage_bytes: usize = 128 << 10;
 pub const storage_quota: usize = 32 << 10;
+/// Relay mode: the records a page produces between the window's polls
+/// (events, its fetch and storage requests) wait here.
+const out_bytes: usize = 16 << 10;
+/// The most raw pixel bytes in one shipped piece (LZ4's input cap, and
+/// the scratch each side keeps for it).
+const lz_max: usize = 60_000;
+/// How often the window polls a remote page that has nothing in flight.
+const pump_idle_ms: u64 = 30;
+/// The pump thread's stack (the broker's TLS handshakes run on it).
+const pump_stack_pages: u64 = 64;
+/// A remote page the window has not polled for this long is dead to
+/// the relay (the window's node went away without a `bye`).
+pub const relay_stale_ms: u64 = 15_000;
 
 const stall_ms: u64 = 10_000;
 const max_redirects = 10;
@@ -250,6 +263,28 @@ pub const Page = struct {
     focus_rect: u64 = 0,
     /// When the page asked to be woken (its next timer), or null.
     wake_at: ?u64 = null,
+    // Relay mode: this host serves the page for a window on another
+    // node (stage 12). The request the page is parked on until the
+    // window's broker answers it; the records the window has not taken;
+    // the viewport rows it has not seen (against a shadow of the frame
+    // it last got, so a hover ships a few rows, not the page); a dump
+    // on its way; the window's session buffer (the fabric's twin here).
+    pending: Pending = .none,
+    pending_token: u64 = 0,
+    /// The records FIFO, `out_bytes` mapped when the window attaches.
+    out_va: u64 = 0,
+    out_len: usize = 0,
+    dmg: ?Rect = null,
+    dmg_row: u32 = 0,
+    dump_off: usize = 0,
+    twin_va: u64 = 0,
+    twin_len: usize = 0,
+    shadow_va: u64 = 0,
+    shadow_len: usize = 0,
+    key: u64 = 0,
+    last_pump_ms: u64 = 0,
+    /// Window side: the page lives on another node.
+    remote: ?Remote = null,
 
     pub fn titleText(p: *const Page) []const u8 {
         return p.title[0..p.title_len];
@@ -282,6 +317,60 @@ pub const Page = struct {
     fn data(p: *const Page) []u8 {
         return @as([*]u8, @ptrFromInt(p.data_va))[0..p.data_len];
     }
+    fn outBuf(p: *const Page) []u8 {
+        if (p.out_va == 0) return &.{};
+        return @as([*]u8, @ptrFromInt(p.out_va))[0..out_bytes];
+    }
+};
+
+/// A viewport rect.
+pub const Rect = struct { x: u32, y: u32, w: u32, h: u32 };
+
+/// Relay mode: the call of the page's that waits for the window's
+/// answer (its broker opens and reads, its storage; a dump streams out
+/// before the page may overwrite its buffer).
+pub const Pending = enum { none, open, read, storage, dump };
+
+/// Window side: the broker's answer owed to the relay's page, carried
+/// in the next poll.
+const Feed = union(enum) {
+    none,
+    /// The final URL then the content type, in `feed_text`.
+    opened: struct { status: u64, url_len: usize, ct_len: usize },
+    refused: wire.RefuseCode,
+    s_ok,
+    s_none,
+    s_count: u64,
+    /// A storage value or key, `len` bytes in `feed_text`.
+    s_text: usize,
+    s_refused: wire.RefuseCode,
+};
+
+/// Window side: a page hosted on another node — the dialed session and
+/// its buffer, and what the broker owes the page.
+pub const Remote = struct {
+    chan: u64 = 0,
+    node: u64 = 0,
+    buf_va: u64 = 0,
+    buf_len: usize = 0,
+    page_id: u64 = 0,
+    key: u64 = 0,
+    feed: Feed = .none,
+    feed_text: [4096]u8 = undefined,
+    /// The page asked for a chunk of this many bytes.
+    want_read: ?u64 = null,
+    /// The relay said more waits: poll again at once.
+    more: bool = false,
+    /// The pump is between the call and its reply: a destroy then waits
+    /// for it (`closing`), since two calls on one session would race on
+    /// its buffer.
+    in_call: bool = false,
+    closing: bool = false,
+    dead: bool = false,
+
+    fn buf(r: *const Remote) []u8 {
+        return @as([*]u8, @ptrFromInt(r.buf_va))[0..r.buf_len];
+    }
 };
 
 /// A broker client's state: the resource it has open and the
@@ -300,6 +389,10 @@ pub const Client = struct {
     kept_key_len: usize = 0,
     kept_ms: u64 = 0,
 };
+
+/// An event of a remote page, posted by the pump for `step`; `kind`
+/// null means the page died.
+const Posted = struct { page: PageId, kind: ?wire.Event, a: u64, b: u64 };
 
 /// What one served message amounted to, for the host program's loop.
 pub const Step = union(enum) {
@@ -358,6 +451,34 @@ pub const Host = struct {
     n_loaded: usize = 0,
     lock: Lock = .{},
     scratch: [head_max + request_max]u8 = undefined,
+    /// Relay mode: pages are served here for windows on other nodes
+    /// (the `webnode` service); their opens, reads and storage are
+    /// recorded for the window's broker instead of fetched.
+    relay: bool = false,
+    next_key: u64 = 0x5eed_0f_a_b1e,
+    /// LZ4 scratch for the pixel pieces (rows gathered or decoded, then
+    /// the packed bytes), mapped when a host first relays or hosts a
+    /// remote page — never static: every mshrun carries two hosts, and
+    /// the statics of the first cut took the image past the 8 MB a
+    /// script unit spawns under (2026-10-06). Pieces are made and taken
+    /// under the lock, so one set per host.
+    lz_tbl: mosslib.lz4.EncTable = undefined,
+    lz_va: u64 = 0,
+    /// Window side: the thread that polls the remote pages, started
+    /// with the first one, on a stack mapped then (the broker's TLS
+    /// handshakes run on it: over 120 KB) and kept for the host's life.
+    pump_up: bool = false,
+    pump_stack_va: u64 = 0,
+    /// What the pump heard from the remote pages, for `step` to hand to
+    /// the host program as it hands a local page's events (a thread
+    /// cannot call a channel its own domain serves, so the pump cannot
+    /// speak as the page would): a queue, and a notification bound to
+    /// the serving thread that interrupts its receive.
+    notif: u64 = 0,
+    bound: bool = false,
+    posted: [64]Posted = undefined,
+    posted_head: usize = 0,
+    posted_tail: usize = 0,
 
     /// Set up in place: a Host is a few hundred KB (each page keeps a
     /// receive stash), so it lives in a program's static memory, never
@@ -371,6 +492,8 @@ pub const Host = struct {
         if (ch.err != .ok) return false;
         h.chan = ch.data[0];
         h.chan_b = ch.data[1];
+        const n = usys.notifyCreate();
+        if (n.err == .ok) h.notif = n.data[0];
         return true;
     }
 
@@ -531,57 +654,32 @@ pub const Host = struct {
             return null;
         }
         p.* = .{ .used = true, .badge = badge, .ctl = sp.data[0], .w = w, .h = height };
-        const d = usys.shmCreate(wire.data_pages);
-        if (d.err != .ok) {
-            h.destroy(@intCast(idx));
+        if (!h.pageBuffers(p)) {
+            h.destroyLocked(@intCast(idx));
             return null;
-        }
-        const dm = usys.shmMap(d.data[0]);
-        if (dm.err != .ok) {
-            _ = usys.capDrop(d.data[0]);
-            h.destroy(@intCast(idx));
-            return null;
-        }
-        p.data_shm = d.data[0];
-        p.data_va = dm.data[0];
-        p.data_len = dm.data[1] * 4096;
-        if (w > 0 and height > 0) {
-            const pages = (@as(u64, w) * height * 4 + 4095) / 4096;
-            const s = usys.shmCreate(pages);
-            if (s.err != .ok) {
-                h.destroy(@intCast(idx));
-                return null;
-            }
-            const m = usys.shmMap(s.data[0]);
-            if (m.err != .ok) {
-                _ = usys.capDrop(s.data[0]);
-                h.destroy(@intCast(idx));
-                return null;
-            }
-            p.px_shm = s.data[0];
-            p.px_va = m.data[0];
         }
         return @intCast(idx);
     }
 
-    /// Give a page a new viewport: a fresh pixel buffer of `w` × `h`
-    /// (none for 0 × 0, a hidden page), the old one let go here — the
-    /// page unmaps its side when it takes the `resize` command and asks
-    /// for the new buffer.
-    pub fn resize(h: *Host, id: PageId, w: u32, height: u32) bool {
-        h.lock.acquire();
-        defer h.lock.release();
-        const p = &h.pages[id];
-        if (!p.used or p.dead) return false;
-        if (p.w == w and p.h == height) return true;
-        if (p.px_va != 0) _ = usys.shmUnmap(p.px_va);
-        if (p.px_shm != 0) _ = usys.capDrop(p.px_shm);
-        p.px_va = 0;
-        p.px_shm = 0;
-        p.w = w;
-        p.h = height;
-        if (w > 0 and height > 0) {
-            const pages = (@as(u64, w) * height * 4 + 4095) / 4096;
+    /// A page's data buffer and, for a `w` × `h` viewport, its pixel
+    /// buffer (and in relay mode the shadow of the frame the window last
+    /// got). False when memory refused; what was made is the caller's to
+    /// drop with the page.
+    fn pageBuffers(h: *Host, p: *Page) bool {
+        if (p.data_va == 0) {
+            const d = usys.shmCreate(wire.data_pages);
+            if (d.err != .ok) return false;
+            const dm = usys.shmMap(d.data[0]);
+            if (dm.err != .ok) {
+                _ = usys.capDrop(d.data[0]);
+                return false;
+            }
+            p.data_shm = d.data[0];
+            p.data_va = dm.data[0];
+            p.data_len = dm.data[1] * 4096;
+        }
+        if (p.w > 0 and p.h > 0) {
+            const pages = (@as(u64, p.w) * p.h * 4 + 4095) / 4096;
             const s = usys.shmCreate(pages);
             if (s.err != .ok) return false;
             const m = usys.shmMap(s.data[0]);
@@ -591,7 +689,44 @@ pub const Host = struct {
             }
             p.px_shm = s.data[0];
             p.px_va = m.data[0];
+            if (h.relay) {
+                const sh = usys.shmCreate(pages);
+                if (sh.err != .ok) return false;
+                const sm = usys.shmMap(sh.data[0]);
+                _ = usys.capDrop(sh.data[0]); // the mapping keeps its own ref
+                if (sm.err != .ok) return false;
+                p.shadow_va = sm.data[0];
+                p.shadow_len = pages * 4096;
+            }
         }
+        return true;
+    }
+
+    /// Give a page a new viewport: a fresh pixel buffer of `w` × `h`
+    /// (none for 0 × 0, a hidden page), the old one let go here — the
+    /// page unmaps its side when it takes the `resize` command and asks
+    /// for the new buffer.
+    pub fn resize(h: *Host, id: PageId, w: u32, height: u32) bool {
+        h.lock.acquire();
+        defer h.lock.release();
+        return h.resizeLocked(id, w, height);
+    }
+
+    fn resizeLocked(h: *Host, id: PageId, w: u32, height: u32) bool {
+        const p = &h.pages[id];
+        if (!p.used or p.dead) return false;
+        if (p.w == w and p.h == height) return true;
+        if (p.px_va != 0) _ = usys.shmUnmap(p.px_va);
+        if (p.px_shm != 0) _ = usys.capDrop(p.px_shm);
+        if (p.shadow_va != 0) _ = usys.shmUnmap(p.shadow_va);
+        p.px_va = 0;
+        p.px_shm = 0;
+        p.shadow_va = 0;
+        p.shadow_len = 0;
+        p.dmg = null;
+        p.w = w;
+        p.h = height;
+        if (!h.pageBuffers(p)) return false;
         return h.sendLocked(id, .{ .resize = .{ .w = w, .h = height } });
     }
 
@@ -607,6 +742,16 @@ pub const Host = struct {
         if (!p.used) return;
         h.brokerCancel(&p.client);
         h.dropParked(&p.client);
+        if (p.remote) |*r| {
+            // The pump is mid-call on the session: it closes the page
+            // when the reply comes (the slot stays taken until then).
+            if (r.in_call) {
+                r.closing = true;
+                return;
+            }
+            h.remoteClose(id);
+            return;
+        }
         if (p.ctl != 0) {
             _ = usys.domainDestroy(p.ctl);
             // Its memory comes back when the kernel reaps it, which is
@@ -624,6 +769,9 @@ pub const Host = struct {
         if (p.data_shm != 0) _ = usys.capDrop(p.data_shm);
         if (p.px_va != 0) _ = usys.shmUnmap(p.px_va);
         if (p.px_shm != 0) _ = usys.capDrop(p.px_shm);
+        if (p.shadow_va != 0) _ = usys.shmUnmap(p.shadow_va);
+        if (p.twin_va != 0) _ = usys.shmUnmap(p.twin_va);
+        if (p.out_va != 0) _ = usys.shmUnmap(p.out_va);
         if (p.ctl != 0) _ = usys.capDrop(p.ctl);
         p.* = .{};
     }
@@ -634,13 +782,37 @@ pub const Host = struct {
         h.lock.release();
         if (h.fonts_va != 0) _ = usys.shmUnmap(h.fonts_va);
         if (h.fonts_shm != 0) _ = usys.capDrop(h.fonts_shm);
+        if (h.lz_va != 0) _ = usys.shmUnmap(h.lz_va);
+        h.lz_va = 0;
+        // The pump's stack stays: its thread may be running on it.
         if (h.chan_b != 0) _ = usys.capDrop(h.chan_b);
         if (h.chan != 0) _ = usys.capDrop(h.chan);
+        if (h.notif != 0) _ = usys.capDrop(h.notif);
         h.* = .{ .log = h.log, .spawner = h.spawner, .net = h.net };
     }
 
     pub fn page(h: *Host, id: PageId) *Page {
         return &h.pages[id];
+    }
+
+    /// Map `pages` pages for the host's life (a buffer, a stack).
+    fn mapPages(pages: u64) u64 {
+        const sh = usys.shmCreate(pages);
+        if (sh.err != .ok) return 0;
+        const m = usys.shmMap(sh.data[0]);
+        _ = usys.capDrop(sh.data[0]); // the mapping keeps its own ref
+        return if (m.err == .ok) m.data[0] else 0;
+    }
+
+    fn ensureLz(h: *Host) bool {
+        if (h.lz_va == 0) h.lz_va = mapPages((2 * lz_max + 4095) / 4096);
+        return h.lz_va != 0;
+    }
+    fn lzIn(h: *Host) []u8 {
+        return @as([*]u8, @ptrFromInt(h.lz_va))[0..lz_max];
+    }
+    fn lzOut(h: *Host) []u8 {
+        return @as([*]u8, @ptrFromInt(h.lz_va))[lz_max .. 2 * lz_max];
     }
 
     fn byBadge(h: *Host, badge: u64) ?PageId {
@@ -764,14 +936,25 @@ pub const Host = struct {
         _ = usys.replyTypedTo(wire.HostResp, h.chan, rep, cap, h.cur_token);
     }
 
-    /// Serve one message from any page.
+    /// Serve one message from any page — or hand over what the pump
+    /// posted for a remote page, which the pump's notification wakes
+    /// this thread for.
     pub fn step(h: *Host) Step {
+        if (h.takePosted()) |e| return e;
         var live = false;
         for (h.pages) |p| if (p.used and !p.dead) {
             live = true;
         };
         if (!live) return .idle;
+        if (!h.bound and h.notif != 0) {
+            // Bound to this thread, the serving one: `step` runs here only.
+            h.bound = usys.notifyBind(h.notif) == .ok;
+        }
         const r = usys.recvMsg(h.chan);
+        if (r.err == .interrupted) {
+            _ = usys.notifyWait(h.notif); // take the bits
+            return h.takePosted() orelse .{ .served = 0 };
+        }
         h.lock.acquire();
         defer h.lock.release();
         if (r.err == .client_dead) {
@@ -805,20 +988,22 @@ pub const Host = struct {
             .next => {
                 if (p.qlen > 0) h.answerNext(id, r.token) else p.parked = r.token;
             },
-            .open => |o| h.open(id, o.off, o.len, o.flags),
-            .read => |rd| h.read(id, rd.max),
+            .open => |o| if (h.relay) h.relayOpen(id, o.off, o.len, o.flags) else h.open(id, o.off, o.len, o.flags),
+            .read => |rd| if (h.relay) h.relayRead(p, rd.max) else h.read(id, rd.max),
             .cancel => {
-                h.brokerCancel(&p.client);
+                if (h.relay) _ = h.outPut(p, .cancel, "", "") else h.brokerCancel(&p.client);
                 h.reply(.ok, 0);
             },
-            .storage => |s| h.storageReq(p, s.op, s.key_len, s.value_len),
+            .storage => |s| if (h.relay) h.relayStorage(p, s.op, s.key_len, s.value_len) else h.storageReq(p, s.op, s.key_len, s.value_len),
             .event => |e| {
                 const kind = std.enums.fromInt(wire.Event, e.kind) orelse {
                     h.reply(.ok, 0);
                     return .{ .served = id };
                 };
                 h.noteEvent(p, kind, e.a, e.b);
-                h.reply(.ok, 0);
+                // In relay mode a dump holds the page's call until the
+                // text has streamed to the window.
+                if (!(h.relay and h.relayEvent(p, kind, e.a, e.b))) h.reply(.ok, 0);
                 return .{ .event = .{ .page = id, .kind = kind, .a = e.a, .b = e.b } };
             },
         }
@@ -911,36 +1096,54 @@ pub const Host = struct {
     fn storageReq(h: *Host, p: *Page, op_raw: u64, key_len_raw: u64, value_len_raw: u64) void {
         const d = p.data();
         var obuf: [1024]u8 = undefined;
-        const origin = pageOrigin(p, &obuf) orelse return h.refuse(.policy);
-        const op = std.enums.fromInt(wire.StorageOp, op_raw) orelse return h.refuse(.bad_url);
-        h.storageLoad(origin);
+        const origin = pageOrigin(p, &obuf);
         const key_len: usize = @intCast(@min(key_len_raw, d.len));
         const value_len: usize = @intCast(@min(value_len_raw, d.len - key_len));
+        const key_at = op_raw == @intFromEnum(wire.StorageOp.key_at);
         // The key and value are copied out: the buffer carries the answer.
         var kv: [4096]u8 = undefined;
-        if (op != .key_at and key_len + value_len > kv.len) return h.refuse(.quota);
-        const key: []const u8 = if (op == .key_at) "" else blk: {
+        if (!key_at and key_len + value_len > kv.len) return h.refuse(.quota);
+        const key: []const u8 = if (key_at) "" else blk: {
             @memcpy(kv[0..key_len], d[0..key_len]);
             break :blk kv[0..key_len];
         };
-        const value: []const u8 = if (op == .key_at) "" else blk: {
+        const value: []const u8 = if (key_at) "" else blk: {
             @memcpy(kv[key_len .. key_len + value_len], d[key_len .. key_len + value_len]);
             break :blk kv[key_len .. key_len + value_len];
         };
+        switch (h.storageOp(origin, op_raw, key_len_raw, key, value, d)) {
+            .ok => h.reply(.ok, 0),
+            .none => h.reply(.none, 0),
+            .count => |n| h.reply(.{ .count = .{ .n = n } }, 0),
+            .text => |n| h.reply(.{ .text = .{ .len = n } }, 0),
+            .refused => |code| h.refuse(code),
+        }
+    }
+
+    pub const StorageOut = union(enum) { ok, none, count: u64, text: usize, refused: wire.RefuseCode };
+
+    /// One `localStorage` operation for `origin` (null: no origin, so
+    /// refused): the answer, with a value or key written to `out`. The
+    /// page's path and the relay's share it (a remote page's storage is
+    /// the window's, like its network).
+    fn storageOp(h: *Host, origin_opt: ?[]const u8, op_raw: u64, key_len_raw: u64, key: []const u8, value: []const u8, out: []u8) StorageOut {
+        const origin = origin_opt orelse return .{ .refused = .policy };
+        const op = std.enums.fromInt(wire.StorageOp, op_raw) orelse return .{ .refused = .bad_url };
+        h.storageLoad(origin);
         switch (op) {
             .get => {
-                const at = h.storageFind(origin, key) orelse return h.reply(.none, 0);
+                const at = h.storageFind(origin, key) orelse return .none;
                 const v = Rec.value(h.storage[at..h.storage_len]);
-                const n = @min(v.len, d.len);
-                @memcpy(d[0..n], v[0..n]);
-                h.reply(.{ .text = .{ .len = n } }, 0);
+                const n = @min(v.len, out.len);
+                @memcpy(out[0..n], v[0..n]);
+                return .{ .text = n };
             },
             .set => {
-                if (origin.len > 0xffff or key.len > 0xffff) return h.refuse(.quota);
+                if (origin.len > 0xffff or key.len > 0xffff) return .{ .refused = .quota };
                 if (h.storageFind(origin, key)) |at| h.storageDrop(at);
-                if (h.storageUsed(origin) + key.len + value.len > storage_quota) return h.refuse(.quota);
+                if (h.storageUsed(origin) + key.len + value.len > storage_quota) return .{ .refused = .quota };
                 const size = Rec.head + origin.len + key.len + value.len;
-                if (h.storage_len + size > h.storage.len) return h.refuse(.quota);
+                if (h.storage_len + size > h.storage.len) return .{ .refused = .quota };
                 const r = h.storage[h.storage_len .. h.storage_len + size];
                 std.mem.writeInt(u16, r[0..2], @intCast(origin.len), .little);
                 std.mem.writeInt(u16, r[2..4], @intCast(key.len), .little);
@@ -950,14 +1153,14 @@ pub const Host = struct {
                 @memcpy(r[Rec.head + origin.len + key.len ..], value);
                 h.storage_len += size;
                 h.storageSave(origin);
-                h.reply(.ok, 0);
+                return .ok;
             },
             .remove => {
                 if (h.storageFind(origin, key)) |at| {
                     h.storageDrop(at);
                     h.storageSave(origin);
                 }
-                h.reply(.ok, 0);
+                return .ok;
             },
             .clear => {
                 var at: usize = 0;
@@ -966,13 +1169,13 @@ pub const Host = struct {
                     if (std.mem.eql(u8, Rec.origin(r), origin)) h.storageDrop(at) else at += Rec.size(r);
                 }
                 h.storageSave(origin);
-                h.reply(.ok, 0);
+                return .ok;
             },
             .key_at => {
-                const k = h.storageKeyAt(origin, @intCast(key_len_raw)) orelse return h.reply(.none, 0);
-                const n = @min(k.len, d.len);
-                @memcpy(d[0..n], k[0..n]);
-                h.reply(.{ .text = .{ .len = n } }, 0);
+                const k = h.storageKeyAt(origin, @intCast(key_len_raw)) orelse return .none;
+                const n = @min(k.len, out.len);
+                @memcpy(out[0..n], k[0..n]);
+                return .{ .text = n };
             },
             .length => {
                 var n: u64 = 0;
@@ -982,7 +1185,7 @@ pub const Host = struct {
                     if (std.mem.eql(u8, Rec.origin(r), origin)) n += 1;
                     at += Rec.size(r);
                 }
-                h.reply(.{ .count = .{ .n = n } }, 0);
+                return .{ .count = n };
             },
         }
     }
@@ -1056,6 +1259,798 @@ pub const Host = struct {
         const at = h.pages[id].wake_at orelse return null;
         const now = usys.nowMs();
         return if (at > now) at - now else 0;
+    }
+
+    // ------------------------------------------------- the relay (node 2)
+    //
+    // Relay mode: this host runs pages for a window on another node.
+    // The page's calls are served as ever — its buffers are local, its
+    // `next` parks here — but an open, a read or a storage operation is
+    // recorded for the window's broker and the page's call is held
+    // until the window answers; events and repainted rows are recorded
+    // too, and the window's polls take them (`relayPump`).
+
+    fn outPut(h: *Host, p: *Page, tag: wire.Rec, a: []const u8, b: []const u8) bool {
+        _ = h;
+        var w: wire.RecWriter = .{ .buf = p.outBuf(), .len = p.out_len };
+        if (!w.put2(tag, a, b)) return false;
+        p.out_len = w.len;
+        return true;
+    }
+
+    fn relayOpen(h: *Host, id: PageId, off: u64, len: u64, flags: u64) void {
+        const p = &h.pages[id];
+        const d = p.data();
+        if (off > d.len or len > d.len - off or len == 0 or len > 0xffff) return h.refuse(.bad_url);
+        const body_len: usize = @intCast(@min((flags >> 8) & 0xffffff, h.body.len));
+        const origin_len: usize = @intCast(@min((flags >> 32) & 0xffff, h.origin_buf.len));
+        if (off + len + body_len + origin_len > d.len) return h.refuse(.bad_url);
+        var head: [12]u8 = undefined;
+        wire.putU64(head[0..8], flags);
+        wire.putU16(head[8..10], len);
+        wire.putU16(head[10..12], body_len);
+        if (!h.outPut(p, .open, &head, d[off .. off + len + body_len + origin_len])) return h.refuse(.busy);
+        p.pending = .open;
+        p.pending_token = h.cur_token;
+    }
+
+    fn relayRead(h: *Host, p: *Page, max: u64) void {
+        var head: [4]u8 = undefined;
+        wire.putU32(&head, @min(max, p.data_len));
+        if (!h.outPut(p, .read, &head, "")) return h.chunkReply(0, .failed);
+        p.pending = .read;
+        p.pending_token = h.cur_token;
+    }
+
+    fn relayStorage(h: *Host, p: *Page, op_raw: u64, key_len_raw: u64, value_len_raw: u64) void {
+        const d = p.data();
+        const key_at = op_raw == @intFromEnum(wire.StorageOp.key_at);
+        const key_len: usize = if (key_at) 0 else @intCast(@min(key_len_raw, d.len));
+        const value_len: usize = if (key_at) 0 else @intCast(@min(value_len_raw, d.len - key_len));
+        var head: [7]u8 = undefined;
+        head[0] = @intCast(op_raw & 0xff);
+        wire.putU32(head[1..5], key_len_raw);
+        wire.putU16(head[5..7], key_len);
+        if (!h.outPut(p, .storage, &head, d[0 .. key_len + value_len])) return h.refuse(.busy);
+        p.pending = .storage;
+        p.pending_token = h.cur_token;
+    }
+
+    /// Relay mode: what the page reported, as a record for the window.
+    /// True when the page's call stays open (a dump streams first).
+    fn relayEvent(h: *Host, p: *Page, kind: wire.Event, a: u64, b: u64) bool {
+        const d = p.data();
+        switch (kind) {
+            .commit => {
+                // The page commits its whole viewport; the rows that
+                // changed are found against the shadow as they ship.
+                p.dmg = .{ .x = 0, .y = 0, .w = p.w, .h = p.h };
+                p.dmg_row = 0;
+                return false;
+            },
+            .dumped => {
+                p.dump_off = 0;
+                p.pending = .dump;
+                p.pending_token = h.cur_token;
+                return true;
+            },
+            else => {},
+        }
+        const n: usize = switch (kind) {
+            .title, .url, .hover, .selection, .focus => @intCast(@min(a, d.len)),
+            .download => @intCast(@min(a + b, d.len)),
+            else => 0,
+        };
+        var head: [17]u8 = undefined;
+        head[0] = @intCast(@intFromEnum(kind));
+        wire.putU64(head[1..9], a);
+        wire.putU64(head[9..17], b);
+        if (!h.outPut(p, .event, &head, d[0..n])) logf(h.log, "webhost: page {d}: event {s} dropped (the window has not polled)", .{ p.badge, @tagName(kind) });
+        return false;
+    }
+
+    /// The window's session buffer arrived with its `hello`: map it as
+    /// the page's twin and mint the page's key. False: the page dies.
+    pub fn relayAttach(h: *Host, id: PageId, twin_cap: u64) ?u64 {
+        h.lock.acquire();
+        defer h.lock.release();
+        const p = &h.pages[id];
+        const m = usys.shmMap(twin_cap);
+        _ = usys.capDrop(twin_cap);
+        if (m.err != .ok) return null;
+        p.twin_va = m.data[0];
+        p.twin_len = m.data[1] * 4096;
+        if (p.out_va == 0) p.out_va = mapPages(out_bytes / 4096);
+        if (p.out_va == 0 or !h.ensureLz()) return null;
+        h.next_key = (h.next_key ^ usys.nowMs()) *% 0x9E37_79B9_7F4A_7C15 +% p.badge;
+        p.key = h.next_key | 1;
+        p.last_pump_ms = usys.nowMs();
+        return p.key;
+    }
+
+    /// Relay mode: one poll from the window — its records applied (the
+    /// commands, the broker's answers), then the twin filled with what
+    /// the page produced. Null for a page that is not this window's.
+    pub const Drained = struct { len: usize, more: bool };
+
+    pub fn relayPump(h: *Host, id: PageId, key: u64, in_len: u64) ?Drained {
+        h.lock.acquire();
+        defer h.lock.release();
+        if (id >= max_pages) return null;
+        const p = &h.pages[id];
+        if (!p.used or p.key != key or p.twin_va == 0) return null;
+        p.last_pump_ms = usys.nowMs();
+        const twin = @as([*]u8, @ptrFromInt(p.twin_va))[0..p.twin_len];
+        h.relayApply(id, twin[0..@min(in_len, twin.len)]);
+        if (p.dead) {
+            // The page died: the window hears it as an event and reaps.
+            var head: [17]u8 = undefined;
+            head[0] = @intFromEnum(wire.Event.load);
+            wire.putU64(head[1..9], @intFromEnum(wire.LoadState.failed));
+            wire.putU64(head[9..17], @intFromEnum(wire.RefuseCode.memory));
+            var w: wire.RecWriter = .{ .buf = twin };
+            _ = w.put(.event, &head);
+            return .{ .len = w.len, .more = false };
+        }
+        return h.relayDrain(id);
+    }
+
+    pub fn relayBye(h: *Host, id: PageId, key: u64) bool {
+        h.lock.acquire();
+        defer h.lock.release();
+        if (id >= max_pages) return false;
+        const p = &h.pages[id];
+        if (!p.used or p.key != key) return false;
+        h.destroyLocked(id);
+        return true;
+    }
+
+    /// Relay mode: pages whose window stopped polling are destroyed; the
+    /// count destroyed.
+    pub fn relayStale(h: *Host) usize {
+        h.lock.acquire();
+        defer h.lock.release();
+        const now = usys.nowMs();
+        var n: usize = 0;
+        for (&h.pages, 0..) |*p, i| {
+            if (!p.used or p.twin_va == 0) continue;
+            if (now - p.last_pump_ms < relay_stale_ms) continue;
+            logf(h.log, "webhost: page {d}: its window stopped polling; destroyed", .{i});
+            h.destroyLocked(@intCast(i));
+            n += 1;
+        }
+        return n;
+    }
+
+    /// Relay mode: the window's records — commands for the page, and the
+    /// broker's answers to what the page asked (which release its call).
+    fn relayApply(h: *Host, id: PageId, bytes: []const u8) void {
+        const p = &h.pages[id];
+        var r: wire.RecReader = .{ .buf = bytes };
+        while (r.next()) |rec| {
+            const pl = rec.payload;
+            switch (rec.tag) {
+                .load => _ = h.sendLocked(id, .{ .load = pl }),
+                .scroll => if (pl.len >= 8) {
+                    _ = h.sendLocked(id, .{ .scroll = @bitCast(wire.getU64(pl)) });
+                },
+                .pointer => if (pl.len >= 5) {
+                    _ = h.sendLocked(id, .{ .pointer = .{ .kind = std.enums.fromInt(wire.PointerKind, pl[0]) orelse .move, .x = @intCast(wire.getU16(pl[1..])), .y = @intCast(wire.getU16(pl[3..])) } });
+                },
+                .key => if (pl.len >= 8) {
+                    _ = h.sendLocked(id, .{ .key = .{ .code = @intCast(wire.getU32(pl)), .ch = @intCast(wire.getU32(pl[4..])) } });
+                },
+                .dump => if (pl.len >= 1) {
+                    _ = h.sendLocked(id, .{ .dump = .{ .what = std.enums.fromInt(wire.Dump, pl[0]) orelse .html, .select = pl[1..] } });
+                },
+                .resize => if (pl.len >= 4) {
+                    _ = h.resizeLocked(id, @intCast(wire.getU16(pl)), @intCast(wire.getU16(pl[2..])));
+                },
+                .find => if (pl.len >= 4) {
+                    _ = h.sendLocked(id, .{ .find = .{ .text = pl[4..], .index = @intCast(wire.getU32(pl)) } });
+                },
+                .zoom => if (pl.len >= 2) {
+                    _ = h.sendLocked(id, .{ .zoom = @intCast(wire.getU16(pl)) });
+                },
+                .theme => if (pl.len >= 8) {
+                    _ = h.sendLocked(id, .{ .theme = wire.getU64(pl) });
+                },
+                .idle => _ = h.sendLocked(id, .idle),
+                .tick => _ = h.sendLocked(id, .tick),
+                .scripts => if (pl.len >= 1) {
+                    _ = h.sendLocked(id, .{ .scripts = pl[0] != 0 });
+                },
+                .stop => _ = h.sendLocked(id, .stop),
+                .opened => if (p.pending == .open and pl.len >= 4) {
+                    const d = p.data();
+                    const status = wire.getU16(pl);
+                    const url_len: usize = @intCast(@min(wire.getU16(pl[2..]), pl.len - 4));
+                    const url = pl[4 .. 4 + url_len];
+                    const ct = pl[4 + url_len ..];
+                    const un = @min(url.len, d.len);
+                    @memcpy(d[0..un], url[0..un]);
+                    const cn = @min(ct.len, d.len - un);
+                    @memcpy(d[un .. un + cn], ct[0..cn]);
+                    h.relayAnswer(p, .{ .opened = .{ .status = status, .url_len = un, .type_len = cn } });
+                },
+                .refused => if ((p.pending == .open or p.pending == .read) and pl.len >= 1) {
+                    h.relayAnswer(p, .{ .refused = .{ .code = pl[0] } });
+                },
+                .chunk => if (p.pending == .read and pl.len >= 1) {
+                    const d = p.data();
+                    const n = @min(pl.len - 1, d.len);
+                    @memcpy(d[0..n], pl[1 .. 1 + n]);
+                    h.relayAnswer(p, .{ .chunk = .{ .len = n, .done = pl[0] } });
+                },
+                .s_ok => if (p.pending == .storage) h.relayAnswer(p, .ok),
+                .s_none => if (p.pending == .storage) h.relayAnswer(p, .none),
+                .s_count => if (p.pending == .storage and pl.len >= 4) h.relayAnswer(p, .{ .count = .{ .n = wire.getU32(pl) } }),
+                .s_text => if (p.pending == .storage) {
+                    const d = p.data();
+                    const n = @min(pl.len, d.len);
+                    @memcpy(d[0..n], pl[0..n]);
+                    h.relayAnswer(p, .{ .text = .{ .len = n } });
+                },
+                .s_refused => if (p.pending == .storage and pl.len >= 1) h.relayAnswer(p, .{ .refused = .{ .code = pl[0] } }),
+                else => {},
+            }
+        }
+    }
+
+    fn relayAnswer(h: *Host, p: *Page, rep: wire.HostResp) void {
+        p.pending = .none;
+        _ = usys.replyTypedTo(wire.HostResp, h.chan, rep, 0, p.pending_token);
+    }
+
+    /// Relay mode: fill the window's twin with what the page produced —
+    /// its records in order, a dump's text, then the viewport rows that
+    /// differ from the frame the window last got, LZ4-packed. `more`
+    /// when the twin filled before it all went.
+    fn relayDrain(h: *Host, id: PageId) Drained {
+        const p = &h.pages[id];
+        var w: wire.RecWriter = .{ .buf = @as([*]u8, @ptrFromInt(p.twin_va))[0..p.twin_len] };
+        // 1. The records, whole ones, in order.
+        const fifo = p.outBuf();
+        var r: wire.RecReader = .{ .buf = fifo[0..p.out_len] };
+        var taken: usize = 0;
+        while (r.next()) |rec| {
+            if (!w.put(rec.tag, rec.payload)) break;
+            taken = r.at;
+        }
+        if (taken > 0) {
+            std.mem.copyForwards(u8, fifo[0 .. p.out_len - taken], fifo[taken..p.out_len]);
+            p.out_len -= taken;
+        }
+        if (p.out_len > 0) return .{ .len = w.len, .more = true };
+        // 2. A dump on its way: parts into the window's buffer, then the
+        // event; the page's call is released when the last part went.
+        if (p.pending == .dump) {
+            const d = p.data();
+            const total = @min(p.dumped_len, d.len);
+            while (p.dump_off < total) {
+                const n = @min(total - p.dump_off, w.room() -| 4);
+                if (n == 0) return .{ .len = w.len, .more = true };
+                const out = w.begin(.dump_part, 4 + n).?;
+                wire.putU32(out[0..4], p.dump_off);
+                @memcpy(out[4..], d[p.dump_off .. p.dump_off + n]);
+                p.dump_off += n;
+            }
+            var head: [17]u8 = undefined;
+            head[0] = @intFromEnum(wire.Event.dumped);
+            wire.putU64(head[1..9], total);
+            wire.putU64(head[9..17], if (p.dumped_cut) 1 else 0);
+            if (!w.put(.event, &head)) return .{ .len = w.len, .more = true };
+            h.relayAnswer(p, .ok);
+        }
+        // 3. The pixels: runs of rows that differ from the shadow.
+        if (p.dmg) |dmg| {
+            if (p.px_va == 0 or p.shadow_va == 0 or h.lz_va == 0 or dmg.w == 0 or dmg.x + dmg.w > p.w or dmg.y + dmg.h > p.h) {
+                p.dmg = null;
+            } else {
+                const lz_in = h.lzIn();
+                const lz_out = h.lzOut();
+                const px = @as([*]const u8, @ptrFromInt(p.px_va));
+                const sh = @as([*]u8, @ptrFromInt(p.shadow_va));
+                const row_bytes: usize = @as(usize, dmg.w) * 4;
+                const max_rows: u32 = @intCast(@max(1, lz_max / row_bytes));
+                while (p.dmg_row < dmg.h) {
+                    const y0: usize = dmg.y + p.dmg_row;
+                    const at0 = (y0 * p.w + dmg.x) * 4;
+                    if (std.mem.eql(u8, px[at0 .. at0 + row_bytes], sh[at0 .. at0 + row_bytes])) {
+                        p.dmg_row += 1;
+                        continue;
+                    }
+                    // The run of changed rows from here, up to a piece.
+                    var n: u32 = 1;
+                    while (n < max_rows and p.dmg_row + n < dmg.h) : (n += 1) {
+                        const at = ((y0 + n) * p.w + dmg.x) * 4;
+                        if (std.mem.eql(u8, px[at .. at + row_bytes], sh[at .. at + row_bytes])) break;
+                    }
+                    while (true) {
+                        const raw = n * row_bytes;
+                        for (0..n) |i| {
+                            const at = ((y0 + i) * p.w + dmg.x) * 4;
+                            @memcpy(lz_in[i * row_bytes .. (i + 1) * row_bytes], px[at .. at + row_bytes]);
+                        }
+                        const room = w.room() -| 12;
+                        if (room == 0) return .{ .len = w.len, .more = true };
+                        const packed_len = mosslib.lz4.compress(lz_in[0..raw], lz_out[0..@min(room, lz_out.len)], &h.lz_tbl);
+                        const payload: ?[]const u8 = if (packed_len) |pl| lz_out[0..pl] else if (raw <= room) lz_in[0..raw] else null;
+                        if (payload) |pl| {
+                            const out = w.begin(.pixels, 12 + pl.len).?;
+                            wire.putU16(out[0..2], dmg.x);
+                            wire.putU16(out[2..4], y0);
+                            wire.putU16(out[4..6], dmg.w);
+                            wire.putU16(out[6..8], n);
+                            wire.putU32(out[8..12], raw);
+                            @memcpy(out[12..], pl);
+                            for (0..n) |i| {
+                                const at = ((y0 + i) * p.w + dmg.x) * 4;
+                                @memcpy(sh[at .. at + row_bytes], lz_in[i * row_bytes .. (i + 1) * row_bytes]);
+                            }
+                            p.dmg_row += n;
+                            break;
+                        }
+                        if (n == 1) return .{ .len = w.len, .more = true };
+                        n = (n + 1) / 2;
+                    }
+                }
+                p.dmg = null;
+            }
+        }
+        return .{ .len = w.len, .more = false };
+    }
+
+    // ------------------------------------------- remote pages (node 1)
+    //
+    // Window side: a page hosted by a `webnode` relay on another node.
+    // To this host it is a page like any other — commands queue for it,
+    // its events reach the host program through `step`, its pixels sit
+    // in a buffer here — except that a pump thread carries the queue to
+    // the relay in polls and plays what comes back as the page would
+    // have: events noted and posted for the serving thread, pixel rows
+    // into the buffer, and the page's opens and reads through this
+    // host's broker (the relay's node sees no network, only pixels out
+    // and bytes in).
+
+    /// Dial `node`'s relay through `fab` and spawn a page there with a
+    /// `w` × `h` viewport; null with why in the log.
+    pub fn spawnRemote(h: *Host, fab: u64, node: u64, w: u32, height: u32) ?PageId {
+        const words = shared.strToWords(wire.relay_name);
+        const chan: u64 = switch (usys.callTypedCap(shared.FabReq, shared.FabResp, fab, .{ .remote_connect = .{ .node = node, .a = words[0], .b = words[1] } }, 0)) {
+            .ok => |ok| switch (ok.rep) {
+                .found => ok.cap,
+                .fab_err => |e| {
+                    logf(h.log, "webhost: node {d}: dialing {s} refused: {s}", .{ node, wire.relay_name, @tagName(std.enums.fromInt(shared.FabErr, e.code) orelse .refused) });
+                    return null;
+                },
+                else => return null,
+            },
+            .err => |e| {
+                logf(h.log, "webhost: node {d}: the fabric did not answer: {s}", .{ node, @tagName(e) });
+                return null;
+            },
+        };
+        if (chan == 0) return null;
+        const sh = usys.shmCreate(shared.fab_bulk_pages);
+        if (sh.err != .ok) {
+            _ = usys.capDrop(chan);
+            return null;
+        }
+        const m = usys.shmMap(sh.data[0]);
+        if (m.err != .ok) {
+            _ = usys.capDrop(sh.data[0]);
+            _ = usys.capDrop(chan);
+            return null;
+        }
+        // The cap goes with the hello (the fabric makes its twin on the
+        // relay's node and keeps its own reference); the mapping is ours.
+        const hello = usys.callTyped(wire.RelayReq, wire.RelayResp, chan, .{ .hello = .{ .w = w, .h = height, .flags = 0 } }, sh.data[0]);
+        const page_rep = switch (hello) {
+            .ok => |rep| switch (rep) {
+                .page => |pg| pg,
+                .refused => |rf| {
+                    logf(h.log, "webhost: node {d}: the relay refused a page: {s}", .{ node, @tagName(std.enums.fromInt(wire.RelayRefuse, rf.code) orelse .full) });
+                    _ = usys.shmUnmap(m.data[0]);
+                    _ = usys.capDrop(chan);
+                    return null;
+                },
+                else => {
+                    _ = usys.shmUnmap(m.data[0]);
+                    _ = usys.capDrop(chan);
+                    return null;
+                },
+            },
+            .err => |e| {
+                logf(h.log, "webhost: node {d}: the relay did not answer the hello: {s}", .{ node, @tagName(e) });
+                _ = usys.shmUnmap(m.data[0]);
+                _ = usys.capDrop(chan);
+                return null;
+            },
+        };
+        h.lock.acquire();
+        defer h.lock.release();
+        var idx: usize = 0;
+        while (idx < max_pages and h.pages[idx].used) idx += 1;
+        if (idx == max_pages) {
+            h.lock.release();
+            _ = usys.callTyped(wire.RelayReq, wire.RelayResp, chan, .{ .bye = .{ .page = page_rep.id, .key = page_rep.key } }, 0);
+            h.lock.acquire();
+            _ = usys.shmUnmap(m.data[0]);
+            _ = usys.capDrop(chan);
+            return null;
+        }
+        const p = &h.pages[idx];
+        const badge = h.next_badge;
+        h.next_badge += 1;
+        p.* = .{ .used = true, .badge = badge, .w = w, .h = height, .remote = .{
+            .chan = chan,
+            .node = node,
+            .buf_va = m.data[0],
+            .buf_len = @intCast(m.data[1] * 4096),
+            .page_id = page_rep.id,
+            .key = page_rep.key,
+        } };
+        if (!h.pageBuffers(p)) {
+            h.destroyLocked(@intCast(idx));
+            return null;
+        }
+        if (!h.ensureLz()) {
+            h.destroyLocked(@intCast(idx));
+            return null;
+        }
+        if (!h.pump_up) {
+            if (h.pump_stack_va == 0) h.pump_stack_va = mapPages(pump_stack_pages);
+            const stack: []u8 = if (h.pump_stack_va != 0) @as([*]u8, @ptrFromInt(h.pump_stack_va))[0 .. pump_stack_pages * 4096] else &.{};
+            if (stack.len == 0 or usys.threadCreate(pumpMain, @intFromPtr(h), stack) != .ok) {
+                logf(h.log, "webhost: no thread for the remote pages", .{});
+                h.destroyLocked(@intCast(idx));
+                return null;
+            }
+            h.pump_up = true;
+        }
+        logf(h.log, "webhost: page {d}: hosted on node {d} (remote page {d})", .{ idx, node, page_rep.id });
+        return @intCast(idx);
+    }
+
+    /// Which node hosts the page (0: this one).
+    pub fn nodeOf(h: *Host, id: PageId) u64 {
+        h.lock.acquire();
+        defer h.lock.release();
+        const p = &h.pages[id];
+        if (!p.used) return 0;
+        return if (p.remote) |r| r.node else 0;
+    }
+
+    /// Window side: say goodbye to the relay and drop everything held
+    /// for a remote page. Under the lock throughout, the goodbye too: a
+    /// pump poll slipping in between would race the session's buffer
+    /// and find the page gone (it did, 2026-10-06).
+    fn remoteClose(h: *Host, id: PageId) void {
+        const p = &h.pages[id];
+        if (p.remote == null) return;
+        const r = &p.remote.?;
+        if (!r.dead) _ = usys.callTyped(wire.RelayReq, wire.RelayResp, r.chan, .{ .bye = .{ .page = r.page_id, .key = r.key } }, 0);
+        if (r.chan != 0) _ = usys.capDrop(r.chan);
+        if (r.buf_va != 0) _ = usys.shmUnmap(r.buf_va);
+        if (p.data_va != 0) _ = usys.shmUnmap(p.data_va);
+        if (p.data_shm != 0) _ = usys.capDrop(p.data_shm);
+        if (p.px_va != 0) _ = usys.shmUnmap(p.px_va);
+        if (p.px_shm != 0) _ = usys.capDrop(p.px_shm);
+        p.* = .{};
+    }
+
+    fn pumpMain(arg: u64) callconv(.c) void {
+        const h: *Host = @ptrFromInt(arg);
+        while (true) {
+            var busy = false;
+            for (0..max_pages) |i| {
+                if (h.pumpOne(@intCast(i))) busy = true;
+            }
+            if (!busy) usys.sleepMs(pump_idle_ms);
+        }
+    }
+
+    /// One poll of a remote page: the queue and the broker's answers go
+    /// down, what came back is played. True when something moved (the
+    /// next poll follows at once).
+    fn pumpOne(h: *Host, id: PageId) bool {
+        h.lock.acquire();
+        const p = &h.pages[id];
+        if (!p.used or p.remote == null) {
+            h.lock.release();
+            return false;
+        }
+        const r = &p.remote.?;
+        if (r.dead) {
+            h.lock.release();
+            return false;
+        }
+        if (r.closing) {
+            h.remoteClose(id);
+            h.lock.release();
+            return false;
+        }
+        var w: wire.RecWriter = .{ .buf = r.buf() };
+        while (p.qlen > 0) {
+            if (!h.packCommand(p, &w)) break;
+        }
+        var tag_buf: [24]u8 = undefined;
+        const tag = std.fmt.bufPrint(&tag_buf, "page {d}", .{id}) catch "page";
+        switch (r.feed) {
+            .none => {},
+            .opened => |o| {
+                var head: [4]u8 = undefined;
+                wire.putU16(head[0..2], o.status);
+                wire.putU16(head[2..4], o.url_len);
+                if (w.put2(.opened, &head, r.feed_text[0 .. o.url_len + o.ct_len])) r.feed = .none;
+            },
+            .refused => |code| if (w.put(.refused, &[_]u8{@intCast(@intFromEnum(code))})) {
+                r.feed = .none;
+            },
+            .s_ok => if (w.put(.s_ok, "")) {
+                r.feed = .none;
+            },
+            .s_none => if (w.put(.s_none, "")) {
+                r.feed = .none;
+            },
+            .s_count => |n| {
+                var head: [4]u8 = undefined;
+                wire.putU32(&head, n);
+                if (w.put(.s_count, &head)) r.feed = .none;
+            },
+            .s_text => |n| if (w.put(.s_text, r.feed_text[0..n])) {
+                r.feed = .none;
+            },
+            .s_refused => |code| if (w.put(.s_refused, &[_]u8{@intCast(@intFromEnum(code))})) {
+                r.feed = .none;
+            },
+        }
+        if (r.want_read) |max| if (r.feed == .none) {
+            const n: usize = @intCast(@min(max, w.room() -| 1));
+            if (n >= 1024 or n >= max) {
+                const out = w.begin(.chunk, 1 + n).?;
+                const rd = h.brokerRead(&p.client, out[1..], tag);
+                out[0] = @intCast(@intFromEnum(rd.end));
+                w.shrink(1 + rd.len);
+                r.want_read = null;
+            }
+        };
+        const sent = w.len;
+        const had_more = r.more;
+        r.in_call = true;
+        h.lock.release();
+        const res = usys.callTyped(wire.RelayReq, wire.RelayResp, r.chan, .{ .pump = .{ .page = r.page_id, .len = sent, .key = r.key } }, 0);
+        h.lock.acquire();
+        r.in_call = false;
+        if (r.closing) {
+            h.remoteClose(id);
+            h.lock.release();
+            return false;
+        }
+        const out = switch (res) {
+            .ok => |rep| switch (rep) {
+                .out => |o| o,
+                .refused => |rf| blk: {
+                    logf(h.log, "webhost: page {d}: the relay refused the poll: {s}", .{ id, @tagName(std.enums.fromInt(wire.RelayRefuse, rf.code) orelse .unknown) });
+                    break :blk null;
+                },
+                else => null,
+            },
+            .err => |e| blk: {
+                logf(h.log, "webhost: page {d}: the relay on node {d} is gone: {s}", .{ id, r.node, @tagName(e) });
+                break :blk null;
+            },
+        } orelse {
+            // The page is dead to us; the host program hears it as it
+            // would a local page's death.
+            r.dead = true;
+            p.dead = true;
+            h.postEvent(id, null, 0, 0);
+            h.lock.release();
+            return false;
+        };
+        r.more = out.more != 0;
+        const got = r.buf()[0..@min(out.len, r.buf_len)];
+        h.lock.release();
+        // The records, without the lock: the buffer is ours between
+        // calls, and an event goes through the serving thread, which
+        // takes the lock itself.
+        var rd: wire.RecReader = .{ .buf = got };
+        var played = false;
+        while (rd.next()) |rec| {
+            played = true;
+            h.remoteRecord(id, rec);
+        }
+        return sent > 0 or had_more or played or r.more;
+    }
+
+    /// Pack the page's first queued command as a record; false when it
+    /// does not fit (it stays queued).
+    fn packCommand(h: *Host, p: *Page, w: *wire.RecWriter) bool {
+        _ = h;
+        const q = &p.queue[0];
+        const ok = switch (q.cmd) {
+            .load => w.put(.load, p.texts[0][0..p.text_len[0]]),
+            .scroll => |dy| blk: {
+                var b: [8]u8 = undefined;
+                wire.putU64(&b, @bitCast(dy));
+                break :blk w.put(.scroll, &b);
+            },
+            .pointer => |pt| blk: {
+                var b: [5]u8 = undefined;
+                b[0] = @intCast(@intFromEnum(pt.kind));
+                wire.putU16(b[1..3], pt.x);
+                wire.putU16(b[3..5], pt.y);
+                break :blk w.put(.pointer, &b);
+            },
+            .key => |k| blk: {
+                var b: [8]u8 = undefined;
+                wire.putU32(b[0..4], k.code);
+                wire.putU32(b[4..8], k.ch);
+                break :blk w.put(.key, &b);
+            },
+            .dump => |d| w.put2(.dump, &[_]u8{@intCast(@intFromEnum(d.what))}, p.texts[2][0..p.text_len[2]]),
+            .resize => |rs| blk: {
+                var b: [4]u8 = undefined;
+                wire.putU16(b[0..2], rs.w);
+                wire.putU16(b[2..4], rs.h);
+                break :blk w.put(.resize, &b);
+            },
+            .find => |f| blk: {
+                var b: [4]u8 = undefined;
+                wire.putU32(&b, f.index);
+                break :blk w.put2(.find, &b, p.texts[1][0..p.text_len[1]]);
+            },
+            .zoom => |z| blk: {
+                var b: [2]u8 = undefined;
+                wire.putU16(&b, z);
+                break :blk w.put(.zoom, &b);
+            },
+            .theme => |t| blk: {
+                var b: [8]u8 = undefined;
+                wire.putU64(&b, t);
+                break :blk w.put(.theme, &b);
+            },
+            .idle => w.put(.idle, ""),
+            .tick => w.put(.tick, ""),
+            .scripts => |on| w.put(.scripts, &[_]u8{if (on) 1 else 0}),
+            .stop => w.put(.stop, ""),
+        };
+        if (!ok) return false;
+        for (1..p.qlen) |i| p.queue[i - 1] = p.queue[i];
+        p.qlen -= 1;
+        return true;
+    }
+
+    /// Play one record from the relay as the page would have acted.
+    fn remoteRecord(h: *Host, id: PageId, rec: wire.Record) void {
+        const p = &h.pages[id];
+        if (p.remote == null) return;
+        const r = &p.remote.?;
+        const pl = rec.payload;
+        var tag_buf: [24]u8 = undefined;
+        const tag = std.fmt.bufPrint(&tag_buf, "page {d}", .{id}) catch "page";
+        switch (rec.tag) {
+            .event => if (pl.len >= 17) {
+                const kind = std.enums.fromInt(wire.Event, pl[0]) orelse return;
+                const d = p.data();
+                const text = pl[17..];
+                const n = @min(text.len, d.len);
+                h.lock.acquire();
+                defer h.lock.release();
+                @memcpy(d[0..n], text[0..n]);
+                h.postEvent(id, kind, wire.getU64(pl[1..]), wire.getU64(pl[9..]));
+            },
+            .dump_part => if (pl.len >= 4) {
+                const d = p.data();
+                const off: usize = @intCast(wire.getU32(pl));
+                const bytes = pl[4..];
+                if (off < d.len) {
+                    const n = @min(bytes.len, d.len - off);
+                    @memcpy(d[off .. off + n], bytes[0..n]);
+                }
+            },
+            .pixels => if (pl.len >= 12) {
+                const x: usize = @intCast(wire.getU16(pl));
+                const y: usize = @intCast(wire.getU16(pl[2..]));
+                const w: usize = @intCast(wire.getU16(pl[4..]));
+                const rows: usize = @intCast(wire.getU16(pl[6..]));
+                const raw: usize = @intCast(wire.getU32(pl[8..]));
+                const packed_bytes = pl[12..];
+                if (raw == 0 or raw > lz_max or w == 0 or h.lz_va == 0) return;
+                h.lock.acquire();
+                const lz_in = h.lzIn();
+                const got: usize = if (packed_bytes.len == raw) blk: {
+                    @memcpy(lz_in[0..raw], packed_bytes);
+                    break :blk raw;
+                } else mosslib.lz4.decompress(packed_bytes, lz_in[0..raw]) catch 0;
+                if (got == raw and p.px_va != 0 and x + w <= p.w and y + rows <= p.h and rows * w * 4 == raw) {
+                    const px = @as([*]u8, @ptrFromInt(p.px_va));
+                    for (0..rows) |i| {
+                        const at = ((y + i) * p.w + x) * 4;
+                        @memcpy(px[at .. at + w * 4], lz_in[i * w * 4 .. (i + 1) * w * 4]);
+                    }
+                    h.postEvent(id, .commit, shared.packPair(@intCast(x), @intCast(y)), shared.packPair(@intCast(w), @intCast(rows)));
+                }
+                h.lock.release();
+            },
+            .open => if (pl.len >= 12) {
+                const flags = wire.getU64(pl);
+                const url_len: usize = @intCast(@min(wire.getU16(pl[8..]), pl.len - 12));
+                const body_len: usize = @intCast(@min(wire.getU16(pl[10..]), pl.len - 12 - url_len));
+                const url = pl[12 .. 12 + url_len];
+                const body = pl[12 + url_len .. 12 + url_len + body_len];
+                const origin = pl[12 + url_len + body_len ..];
+                h.lock.acquire();
+                defer h.lock.release();
+                switch (h.brokerOpenFrom(&p.client, url, flags & 1 != 0, body, origin, tag)) {
+                    .refused => |code| r.feed = .{ .refused = code },
+                    .opened => |op| {
+                        const un = @min(op.url.len, r.feed_text.len);
+                        @memcpy(r.feed_text[0..un], op.url[0..un]);
+                        const cn = @min(op.ct.len, r.feed_text.len - un);
+                        @memcpy(r.feed_text[un .. un + cn], op.ct[0..cn]);
+                        r.feed = .{ .opened = .{ .status = op.status, .url_len = un, .ct_len = cn } };
+                    },
+                }
+            },
+            .read => if (pl.len >= 4) {
+                h.lock.acquire();
+                r.want_read = wire.getU32(pl);
+                h.lock.release();
+            },
+            .cancel => {
+                h.lock.acquire();
+                h.brokerCancel(&p.client);
+                r.want_read = null;
+                h.lock.release();
+            },
+            .storage => if (pl.len >= 7) {
+                const op_raw: u64 = pl[0];
+                const klen_raw = wire.getU32(pl[1..]);
+                const klen: usize = @intCast(@min(wire.getU16(pl[5..]), pl.len - 7));
+                const key = pl[7 .. 7 + klen];
+                const value = pl[7 + klen ..];
+                h.lock.acquire();
+                defer h.lock.release();
+                var obuf: [1024]u8 = undefined;
+                const origin = pageOrigin(p, &obuf);
+                r.feed = switch (h.storageOp(origin, op_raw, klen_raw, key, value, &r.feed_text)) {
+                    .ok => .s_ok,
+                    .none => .s_none,
+                    .count => |n| .{ .s_count = n },
+                    .text => |n| .{ .s_text = n },
+                    .refused => |code| .{ .s_refused = code },
+                };
+            },
+            else => {},
+        }
+    }
+
+    /// A remote page's event, as the page's own would have been served:
+    /// noted on the record (under the lock, by the pump) and posted for
+    /// `step` to hand over; the serving thread is woken.
+    fn postEvent(h: *Host, id: PageId, kind: ?wire.Event, a: u64, b: u64) void {
+        const p = &h.pages[id];
+        if (kind) |k| h.noteEvent(p, k, a, b);
+        if (h.posted_tail -% h.posted_head == h.posted.len) {
+            logf(h.log, "webhost: page {d}: event queue full; {s} dropped", .{ id, if (kind) |k| @tagName(k) else "death" });
+            return;
+        }
+        h.posted[h.posted_tail % h.posted.len] = .{ .page = id, .kind = kind, .a = a, .b = b };
+        h.posted_tail +%= 1;
+        if (h.notif != 0) _ = usys.notifySignal(h.notif, 1);
+    }
+
+    fn takePosted(h: *Host) ?Step {
+        h.lock.acquire();
+        defer h.lock.release();
+        if (h.posted_head == h.posted_tail) return null;
+        const e = h.posted[h.posted_head % h.posted.len];
+        h.posted_head +%= 1;
+        if (e.kind) |k| return .{ .event = .{ .page = e.page, .kind = k, .a = e.a, .b = e.b } };
+        return .{ .dead = e.page };
     }
 
     // ------------------------------------------------------- the broker
