@@ -428,7 +428,7 @@ fn runScripts(doc: *dom.Document) void {
     // The bindings cascade a frame's document themselves (the page lays
     // out only its own): they need the user-agent sheet, parsed once.
     _ = uaSheet(env());
-    scripts.init(&vm, doc, js_meta.allocator(), .{ .ctx = @ptrCast(&page), .log = scriptLog, .fetch = scriptFetch, .release = scriptRelease, .roots = scriptRoots, .swept = scriptSwept, .rect = scriptRect, .computed = scriptComputed, .scroll = scriptScroll, .request = scriptRequest, .storage = scriptStorage, .navigate = scriptNavigate, .changed = scriptChanged, .submit = scriptSubmit, .activate = scriptActivate, .ua_sheet = &ua_sheet.?, .scratch = scriptScratch }) catch {
+    scripts.init(&vm, doc, js_meta.allocator(), .{ .ctx = @ptrCast(&page), .log = scriptLog, .fetch = scriptFetch, .release = scriptRelease, .roots = scriptRoots, .swept = scriptSwept, .rect = scriptRect, .computed = scriptComputed, .scroll = scriptScroll, .element_scroll = scriptElementScroll, .request = scriptRequest, .storage = scriptStorage, .navigate = scriptNavigate, .changed = scriptChanged, .submit = scriptSubmit, .activate = scriptActivate, .ua_sheet = &ua_sheet.?, .scratch = scriptScratch }) catch {
         _ = usys.log(glog, "webpage: the bindings did not fit");
         return;
     };
@@ -643,6 +643,9 @@ const Background = struct {
     bm: web.layout.Bitmap = .{ .w = 0, .h = 0, .rgba = &.{} },
 };
 
+const max_scrolls = 32;
+const ContainerScroll = struct { node: dom.NodeId, top: f64 };
+
 const Page = struct {
     doc: ?*dom.Document = null,
     sheets: []const web.style.Sheet = &.{},
@@ -651,6 +654,14 @@ const Page = struct {
     base: ?web.url.Url = null,
     scroll_y: f64 = 0,
     extent: f64 = 0,
+    /// Scroll containers' offsets, by node: kept across layouts and set
+    /// on their boxes after each (`applyContainerScrolls`).
+    scrolls: [max_scrolls]ContainerScroll = undefined,
+    n_scrolls: usize = 0,
+    /// Where the pointer last was (viewport pixels): a wheel goes to the
+    /// scroll container under it.
+    ptr_x: u64 = 0,
+    ptr_y: u64 = 0,
     url_buf: [2048]u8 = undefined,
     url_len: usize = 0,
     type_buf: [256]u8 = undefined,
@@ -1331,6 +1342,7 @@ fn relayout(recollect: bool) void {
     page.styles = styles;
     const l = web.layout.layoutDocumentWith(a, doc, styles, page_fonts.fonts(), imagesProvider(), @floatFromInt(vw), @floatFromInt(vh)) catch outOfMemory();
     page.layout = l;
+    applyContainerScrolls();
     page.extent = l.get(l.root).h;
     const max_y = @max(0, page.extent - @as(f64, @floatFromInt(vh)));
     page.scroll_y = @min(page.scroll_y, max_y);
@@ -1402,14 +1414,95 @@ fn paintAll() void {
 /// the band that came into view is painted (a whole viewport a wheel
 /// notch was 50 ms under emulation, and the pictures it fetched 700).
 /// Pictures wait for `idle`.
+/// A wheel: the innermost scroll container under the pointer takes it
+/// while it can move that way; else the page scrolls.
+fn scrollWheel(dy: f64) void {
+    if (page.layout) |l| if (hitNode(page.ptr_x, page.ptr_y)) |hit| {
+        const doc = page.doc.?;
+        var cur: ?dom.NodeId = hit;
+        while (cur) |n| : (cur = doc.get(n).parent) {
+            const bid = boxOfNode(l, n) orelse continue;
+            const b = l.get(bid);
+            if (!web.layout.isScrollContainer(b)) continue;
+            const max = web.layout.scrollMax(l, bid);
+            if (max <= 0) continue;
+            const top = containerScroll(n);
+            const want = @floor(@min(max, @max(0, top + dy)));
+            if (want == top) continue; // at its end: the wheel goes on up
+            setContainerScroll(n, want);
+            applyContainerScrolls();
+            paintAll();
+            return;
+        }
+    };
+    scrollBy(dy);
+}
+
+/// The box of an element (its principal one), if laid out.
+fn boxOfNode(l: *const web.layout.Layout, node: dom.NodeId) ?web.layout.BoxId {
+    var bi: usize = 0;
+    while (bi < l.boxes.len) {
+        const run = l.boxes.slice(bi);
+        const base = bi;
+        bi += run.len;
+        for (run, 0..) |*b, k| if (b.node == node and b.kind != .text and b.kind != .inline_box and b.laid_out) return @intCast(base + k);
+    }
+    return null;
+}
+
+fn containerScroll(node: dom.NodeId) f64 {
+    for (page.scrolls[0..page.n_scrolls]) |s| if (s.node == node) return s.top;
+    return 0;
+}
+
+fn setContainerScroll(node: dom.NodeId, top: f64) void {
+    for (page.scrolls[0..page.n_scrolls]) |*s| if (s.node == node) {
+        s.top = top;
+        return;
+    };
+    if (page.n_scrolls == max_scrolls) return;
+    page.scrolls[page.n_scrolls] = .{ .node = node, .top = top };
+    page.n_scrolls += 1;
+}
+
+/// Set every kept container offset on its box, clamped to what the
+/// layout of the moment allows.
+fn applyContainerScrolls() void {
+    const l = page.layout orelse return;
+    l.has_scrolled = false;
+    for (page.scrolls[0..page.n_scrolls]) |*s| {
+        const bid = boxOfNode(l, s.node) orelse continue;
+        const max = web.layout.scrollMax(l, bid);
+        s.top = @min(s.top, max);
+        l.box(bid).scroll_top = s.top;
+        if (s.top > 0) l.has_scrolled = true;
+    }
+}
+
+/// A script's `element.scrollTop`: read, or set and repaint.
+fn scriptElementScroll(_: *anyopaque, id: dom.NodeId, set: ?f64) f64 {
+    if (set) |v| {
+        const l = page.layout orelse return 0;
+        const bid = boxOfNode(l, id) orelse return 0;
+        if (!web.layout.isScrollContainer(l.get(bid))) return 0;
+        const want = @floor(@min(web.layout.scrollMax(l, bid), @max(0, v)));
+        if (want != containerScroll(id)) {
+            setContainerScroll(id, want);
+            applyContainerScrolls();
+            paintAll();
+        }
+    }
+    return containerScroll(id);
+}
+
 fn scrollBy(dy: f64) void {
     const before = page.scroll_y;
     if (!scrollTo(page.scroll_y + dy)) return;
     if (scripts_up) scripts.setScroll(0, page.scroll_y / zoomScale());
     const moved: i64 = @intFromFloat(@round(page.scroll_y - before));
-    // A fixed box stays put while the rows move: the viewport is
-    // painted whole rather than shifted and banded.
-    const rigid = if (page.layout) |l| !l.has_fixed else true;
+    // A fixed or sticky box stays put while the rows move: the viewport
+    // is painted whole rather than shifted and banded.
+    const rigid = if (page.layout) |l| !l.has_fixed and !l.has_sticky else true;
     if (!has_pixels or moved == 0 or !rigid or @abs(moved) >= @as(i64, @intCast(vh))) {
         paintAll();
     } else {
@@ -1913,6 +2006,8 @@ fn selectionText(out: []u8) usize {
 }
 
 fn pointer(kind: wire.PointerKind, x: u64, y: u64) void {
+    page.ptr_x = x;
+    page.ptr_y = y;
     switch (kind) {
         .move => {
             if (page.dragging) {
@@ -2060,7 +2155,7 @@ fn serve() noreturn {
                 const len = @min(c.len, data_len - off);
                 load(data[off .. off + len], false, "");
             },
-            .scroll => |s| scrollBy(@floatFromInt(@as(i64, @bitCast(s.dy)))),
+            .scroll => |s| scrollWheel(@floatFromInt(@as(i64, @bitCast(s.dy)))),
             .pointer => |p| pointer(std.enums.fromInt(wire.PointerKind, p.kind) orelse .move, p.x, p.y),
             .key => |k| key(@truncate(k.ch)),
             .dump => |d| {

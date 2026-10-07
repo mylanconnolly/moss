@@ -1,0 +1,9 @@
+<!DOCTYPE html>
+<title>An overflow: hidden box clips the absolutely positioned boxes whose containing block it is or holds</title>
+<style>
+  body { margin: 0; }
+  .box { position: relative; width: 100px; height: 100px; overflow: hidden; background: #eee; }
+  .abs { position: absolute; top: 80px; left: 20px; width: 40px; height: 40px; background: red; }
+  .free { position: absolute; top: 150px; left: 0; width: 40px; height: 40px; background: green; }
+</style>
+<div class="box"><div class="abs"></div></div><div class="free"></div>

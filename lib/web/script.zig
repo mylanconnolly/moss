@@ -57,6 +57,9 @@ pub const Host = struct {
     computed: ?*const fn (ctx: *anyopaque, id: NodeId, name: []const u8, buf: []u8) ?[]const u8 = null,
     /// Scroll the viewport to a document position (CSS pixels).
     scroll: ?*const fn (ctx: *anyopaque, x: f64, y: f64) void = null,
+    /// An element's own scroll offset (a scroll container's): read it
+    /// (`set` null), or set it; the offset after.
+    element_scroll: ?*const fn (ctx: *anyopaque, id: NodeId, set: ?f64) f64 = null,
     /// A script's own request (`fetch`, XMLHttpRequest): the whole
     /// resource through the host's broker into `a`; false when refused,
     /// with `out.refused` saying why. `origin` is the page's for a
@@ -355,7 +358,7 @@ pub const interfaces = [_]Iface{
         .{ .name = "clientHeight", .get = getClientHeight },
         .{ .name = "clientTop", .get = getZero },
         .{ .name = "clientLeft", .get = getZero },
-        .{ .name = "scrollTop", .get = getZero, .set = setIgnored },
+        .{ .name = "scrollTop", .get = getScrollTop, .set = setScrollTop },
         .{ .name = "scrollLeft", .get = getZero, .set = setIgnored },
         .{ .name = "scrollWidth", .get = getClientWidth },
         .{ .name = "scrollHeight", .get = getClientHeight },
@@ -6292,6 +6295,22 @@ fn getClientWidth(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value 
     const id = try thisElement(vm, this);
     const r = rectOf(p, id) orelse return Value.fromInt(0);
     return Value.fromF64(@round(r[2]));
+}
+
+fn getScrollTop(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const id = try thisElement(vm, this);
+    const f = p.host.element_scroll orelse return Value.fromInt(0);
+    return Value.fromF64(f(p.host.ctx, id, null));
+}
+
+fn setScrollTop(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
+    const p = pageOf(vm);
+    const id = try thisElement(vm, this);
+    const f = p.host.element_scroll orelse return Value.undefined_;
+    const v = if (args.len > 0) (vm.toNumber(args[0]) catch 0) else 0;
+    _ = f(p.host.ctx, id, if (std.math.isNan(v)) 0 else v);
+    return Value.undefined_;
 }
 
 fn getClientHeight(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value {

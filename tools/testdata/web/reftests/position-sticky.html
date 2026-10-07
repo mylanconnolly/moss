@@ -1,0 +1,9 @@
+<!DOCTYPE html>
+<title>position: sticky holds its top inset of the viewport while its containing block has room</title>
+<style>
+  body { margin: 0; }
+  .cb { height: 200px; width: 100px; background: #ddd; }
+  .s { position: sticky; top: 30px; height: 20px; width: 100px; background: navy; }
+  .tail { height: 20px; width: 100px; background: green; }
+</style>
+<div class="cb"><div class="s"></div><div class="tail"></div></div>

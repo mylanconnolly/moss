@@ -8080,6 +8080,40 @@ attribute value, and `m\argin` (a hex escape, U+000A) an unknown
 property, which is what Acid2's parser line checks. Seven reftests
 vendor the fixes; Acid2 itself is fetched.
 
+**Stage 9, sticky, scroll containers and the positioned layer (as
+built, 2026-10-07).** Layout leaves a sticky box where the flow put it
+(`relative` alone moves at layout now) and sets `Layout.has_sticky`;
+`stickyOffset(l, id, scroll_y)` is the offset of the moment: the
+scrollport is the viewport or the nearest scroll container ancestor
+(`isScrollContainer`: `overflow-y` scroll or auto, not the root), the
+box is held at its `top` inset of it, no further than its containing
+block's content bottom leaves room for its margin box, and `bottom`
+symmetrically; `flowOffset` sums a box's and its ancestors' sticky
+offsets less the scroll of every container above, which the hit test
+subtracts beside the fixed subtree's scroll. A container's offset is
+`Box.scroll_top`: the page host keeps them by node (`Page.scrolls`, a
+small table) and sets them on the boxes after every layout, clamped to
+`scrollMax` — the scrollable extent (`scrollExtent`, the lowest
+descendant box, fixed ones aside) past the padding box; the wheel
+(`scrollWheel`) walks up from the element under the pointer's last
+position and the innermost container that can still move takes it, the
+page scrolls otherwise; a script's `scrollTop` goes through the new
+`element_scroll` host hook. The painter paints a box's content as a
+unit (`paintContent`): the positioned layer collected first
+(`collectLayer`: relatively positioned and sticky block-level boxes of
+the unit's flow, not entering a float, a clipping box or another
+positioned box, plus the absolutes the unit clips — `clipAncestor`, the
+first overflow box between an absolute and its containing block — or
+every unclipped one for the root), sorted by z-index then box id (build
+order is tree order), the negative ones painted before the flow's three
+phases and the rest after, the scroll offset applied to all of it, and
+a 6px thumb for a scroll container. The global absolutes loop is gone:
+`paintWith` paints the root. A clipping box in the flow paints its whole
+content at the backgrounds phase (nothing of it can interleave with its
+surroundings). `scrollBy` repaints whole when a sticky box exists, as
+for a fixed one. Residuals are in ROADMAP's stage 9 entry: one offset
+axis in the painter, so containers scroll vertically only.
+
 ## JavaScript
 
 The decision row "JavaScript" (2026-09-24) fixes the shape: `lib/js/` is

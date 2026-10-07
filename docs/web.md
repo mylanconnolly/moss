@@ -350,9 +350,10 @@ Very large pages outgrow the page's 40 MB for a document
 and its layout and die (a 1.2 MB Wikipedia article takes 29 MB: the
 DOM is ~7 MB and the layout ~17 MB, 1.1 KB a box); scripts run, with
 the simple CORS case and no cookies, so a site whose API wants
-credentials shows what its markup carried; no `position: sticky` beyond relative, no scaling or rotating
+credentials shows what its markup carried; scroll containers and sticky
+boxes work vertically only; no scaling or rotating
 transforms (translations only), no merged `border-collapse` borders,
-no `overflow` scroll containers, no subgrid or masonry, no WebP,
+no subgrid or masonry, no WebP,
 animated GIF (the first frame shows) or `srcset`; SVG draws its shapes,
 paths, strokes and `use`s but not gradients (their mean colour), clips,
 masks, filters or text; the scripts that need shaping or bidi (Arabic,

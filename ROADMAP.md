@@ -933,12 +933,42 @@ supervises), and memory history per unit beside the CPU one.
       declaration invalid; and identifiers serialized with their escapes,
       since a selector is re-parsed from its prelude's text (`\.parser`
       had become a class, `second\ two` two words — the test's "parser
-      line" and its second line). Remaining for the stage: sticky,
-      scaling and rotating transforms and opacity at paint time, clip
-      paths, stacking contexts (a relative box still paints in flow),
-      `overflow` scroll containers, then transitions and animations on
-      the page's tick; shaping and bidi for the scripts that need them.
-      *Exit:* WPT reftest subsets per module with counts.
+      line" and its second line). ✅ *Sticky,
+      scroll containers, and the positioned layer* (2026-10-07): a
+      `position: sticky` box stays where the flow put it and is held at
+      its `top`/`bottom` inset of its scrollport — the viewport, or the
+      nearest scroll container — while its containing block has room,
+      the offset computed at paint and at hit-test time from the scroll
+      of the moment (`layout.stickyOffset`); an `overflow: scroll`/`auto`
+      box scrolls vertically, its offset owned by the page host across
+      layouts by node and set on the box after each (`scroll_top`), the
+      wheel going to the innermost container under the pointer until it
+      reaches its end and to the page after, scripts reading and setting
+      `scrollTop` through a host hook, a 6px thumb at the padding box's
+      right edge sized by the scrollable extent; absolutely positioned
+      boxes paint inside the overflow box that clips them (between them
+      and their containing block), scrolled and clipped with it, no
+      longer from the global list; and every box's content is a unit
+      with a positioned layer — relatively positioned and sticky boxes,
+      and the absolutes the unit clips (every unclipped one for the
+      root) — sorted by z-index, the negative ones beneath the flow,
+      the rest above, ties in tree order (a relative box painted in flow
+      order until now, under the sibling after it). Three reftests
+      (sticky at scroll 0, a scrolled box's clip and thumb, absolutes
+      clipped by an overflow box) and a step of the `webpage` drill (a
+      fixture with a container and a sticky header: the wheel over the
+      container reaches its tail, the page scrolls after, the header
+      sticks and then leaves with its block). Residuals: containers
+      scroll vertically only (the painter has one offset axis; a
+      horizontal one touches every primitive); `left`/`right` sticky
+      likewise; `scrollHeight` is still the client height; a sticky
+      inside an inline-block or a float is placed, not held; the
+      scrollbar is a thumb without a track or a drag. Remaining for the
+      stage: scaling and rotating transforms and opacity at paint time,
+      clip paths, stacking contexts for them, then transitions and
+      animations on the page's tick; shaping and bidi for the scripts
+      that need them. *Exit:* WPT reftest subsets per module with
+      counts.
     - **(10) JavaScript, the engine** (decision row "JavaScript",
       2026-09-24). `lib/js/`, in stages, each with its test262 numbers
       and a DESIGN entry: (a) lexer, parser and AST for ES2023 — ASI,

@@ -210,6 +210,9 @@ pub const Box = struct {
     /// where the flow placed it: what follows in the flow ignores it.
     rel_dx: f64 = 0,
     rel_dy: f64 = 0,
+    /// A scroll container's offset (the host keeps it across layouts
+    /// and sets it after each): its content paints that much higher.
+    scroll_top: f64 = 0,
     /// Used margins, and the content box's inset from the border box.
     margin: [4]f64 = .{ 0, 0, 0, 0 },
     padding: [4]f64 = .{ 0, 0, 0, 0 },
@@ -271,6 +274,10 @@ pub const Layout = struct {
     /// A `position: fixed` box exists: the viewport's rows no longer
     /// move rigidly with a scroll (a host repaints whole).
     has_fixed: bool = false,
+    /// A `position: sticky` box exists (the same consequence).
+    has_sticky: bool = false,
+    /// Some container is scrolled (the host set a `scroll_top`).
+    has_scrolled: bool = false,
     /// Chunked lists (`store`): an append never moves a box or a
     /// fragment, and a bump arena never pays for a doubling.
     boxes: store.Chunked(Box, 8) = .{},
@@ -1188,13 +1195,14 @@ fn layoutBlockContents(l: *Layout, id: BoxId, bfc: *Bfc, cb_w: f64) Error!void {
         const size = replacedSizeAtWidth(l, id, cb_w, b.contentW());
         b.h = size + verticalExtras(b);
         b.laid_out = true;
-        if (st.position == .relative or st.position == .sticky) {
+        if (st.position == .relative) {
             const dx: f64 = resolveLA(st.inset[3], cb_w) orelse -(resolveLA(st.inset[1], cb_w) orelse 0);
             const dy: f64 = resolveLA(st.inset[0], 0) orelse -(resolveLA(st.inset[2], 0) orelse 0);
             try moveBox(l, id, dx, dy);
             l.box(id).rel_dx += dx;
             l.box(id).rel_dy += dy;
         }
+        if (st.position == .sticky) l.has_sticky = true;
         try translateBox(l, id);
         return;
     } else if (isTableBox(b)) {
@@ -1252,13 +1260,16 @@ fn layoutBlockContents(l: *Layout, id: BoxId, bfc: *Bfc, cb_w: f64) Error!void {
     // Relative positioning shifts the box after layout — the flow it
     // sits in does not move (Acid2's smile: a child moved down by
     // `bottom: -1em` once made its parent 12px taller, 2026-10-07).
-    if (st.position == .relative or st.position == .sticky) {
+    if (st.position == .relative) {
         const dx: f64 = resolveLA(st.inset[3], cb_w) orelse -(resolveLA(st.inset[1], cb_w) orelse 0);
         const dy: f64 = resolveLA(st.inset[0], 0) orelse -(resolveLA(st.inset[2], 0) orelse 0);
         try moveBox(l, id, dx, dy);
         l.box(id).rel_dx += dx;
         l.box(id).rel_dy += dy;
     }
+    // A sticky box stays where the flow put it; its stuck offset is the
+    // painter's and the hit test's, from the scroll of the moment.
+    if (st.position == .sticky) l.has_sticky = true;
     try translateBox(l, id);
 }
 
@@ -3778,6 +3789,123 @@ test "layout: lines wrap, floats intrude, inline-block sits on the baseline" {
 /// border box holds the point, text counting for its parent element;
 /// null over the canvas alone. A host's click or hover starts here and
 /// walks the DOM up to what it wants (a link, a control).
+// ------------------------------------------------- scrolling and sticky
+
+/// A box whose vertical overflow scrolls (`scroll` or `auto`), the root
+/// aside (the viewport scrolls the root).
+pub fn isScrollContainer(b: *const Box) bool {
+    return b.kind != .root and b.kind != .text and (b.style.overflow_y == .scroll or b.style.overflow_y == .auto);
+}
+
+/// A box that clips its content (any non-visible overflow).
+pub fn clipsOverflow(b: *const Box) bool {
+    return b.kind != .root and b.kind != .text and (b.style.overflow_x != .visible or b.style.overflow_y != .visible);
+}
+
+/// The scrollable overflow of a container: how far its content reaches
+/// below its padding box's top, from every descendant box (floats and
+/// positioned ones included, a fixed one not).
+pub fn scrollExtent(l: *const Layout, id: BoxId) f64 {
+    const b = l.get(id);
+    const top = b.y + b.border[0];
+    var bottom = top + b.h - b.border[0] - b.border[2];
+    var stack: [64]BoxId = undefined;
+    var n: usize = 0;
+    for (b.children.items) |c| if (n < stack.len) {
+        stack[n] = c;
+        n += 1;
+    };
+    while (n > 0) {
+        n -= 1;
+        const cid = stack[n];
+        const cb = l.get(cid);
+        if (cb.kind == .text or cb.style.position == .fixed) continue;
+        if (cb.laid_out) bottom = @max(bottom, cb.y + cb.h + cb.margin[2]);
+        for (cb.children.items) |c| if (n < stack.len) {
+            stack[n] = c;
+            n += 1;
+        };
+    }
+    return bottom - top;
+}
+
+/// How far a container can scroll: its extent past its padding box.
+pub fn scrollMax(l: *const Layout, id: BoxId) f64 {
+    const b = l.get(id);
+    const inner = b.h - b.border[0] - b.border[2];
+    return @max(0, scrollExtent(l, id) - inner);
+}
+
+/// The nearest ancestor that clips an absolutely positioned box — an
+/// overflow box between it and its containing block (inclusive); none
+/// past the containing block, and none for a fixed box.
+pub fn clipAncestor(l: *const Layout, id: BoxId) ?BoxId {
+    const b = l.get(id);
+    if (b.style.position == .fixed) return null;
+    const cb = containingBlockFor(l, id);
+    var p = b.parent;
+    while (p) |pid| : (p = l.get(pid).parent) {
+        const pb = l.get(pid);
+        if (clipsOverflow(pb)) return pid;
+        if (pid == cb) return null;
+    }
+    return null;
+}
+
+/// A sticky box's offset at this scroll: it is held at its `top` (or
+/// `bottom`) inset of the scrollport — the viewport, or the nearest
+/// scroll container — while its containing block's content box has room
+/// for it (CSS Positioned Layout §3.4).
+pub fn stickyOffset(l: *const Layout, id: BoxId, scroll_y: f64) f64 {
+    const b = l.get(id);
+    if (b.style.position != .sticky) return 0;
+    // The scrollport, in the coordinates the box was laid out in.
+    var view_top = scroll_y;
+    var view_bottom = scroll_y + l.viewport_h;
+    var p = b.parent;
+    while (p) |pid| : (p = l.get(pid).parent) {
+        const pb = l.get(pid);
+        if (isScrollContainer(pb)) {
+            view_top = pb.y + pb.border[0] + pb.scroll_top;
+            view_bottom = view_top + pb.h - pb.border[0] - pb.border[2];
+            break;
+        }
+    }
+    const parent = l.get(b.parent orelse return 0);
+    const cb_top = parent.contentY();
+    const cb_bottom = parent.contentY() + parent.contentH();
+    const outer_top = b.y - b.margin[0];
+    const outer_bottom = b.y + b.h + b.margin[2];
+    var dy: f64 = 0;
+    if (resolveLA(b.style.inset[0], l.viewport_h)) |t| {
+        dy = @max(0, view_top + t - outer_top);
+        dy = @min(dy, @max(0, cb_bottom - outer_bottom));
+    }
+    if (resolveLA(b.style.inset[2], l.viewport_h)) |bt| {
+        var up = @min(0, view_bottom - bt - outer_bottom);
+        up = @max(up, @min(0, cb_top - outer_top));
+        if (dy == 0) dy = up;
+    }
+    return dy;
+}
+
+/// How far the painter moves a box from where the flow put it, at this
+/// scroll: the sticky offsets of the box and its ancestors, less the
+/// scroll of every container above it.
+pub fn flowOffset(l: *const Layout, id: BoxId, scroll_y: f64) f64 {
+    if (!l.has_sticky and !l.has_scrolled) return 0;
+    var off: f64 = 0;
+    var cur: ?BoxId = id;
+    var first = true;
+    while (cur) |c| : (cur = l.get(c).parent) {
+        const b = l.get(c);
+        if (b.style.position == .sticky) off += stickyOffset(l, c, scroll_y);
+        if (!first and isScrollContainer(b)) off -= b.scroll_top;
+        first = false;
+    }
+    return off;
+}
+
 /// Whether a box is inside a `position: fixed` subtree: laid out in
 /// viewport coordinates, painted without the scroll.
 pub fn inFixed(l: *const Layout, id: BoxId) bool {
@@ -3804,7 +3932,7 @@ pub fn hitTest(l: *const Layout, x: f64, y: f64, scroll_y: f64) ?NodeId {
         i += run.len;
         for (run) |*f| {
             if (f.dead or !(x >= f.x and x < f.x + f.w)) continue;
-            const yy = if (inFixed(l, f.box)) y - scroll_y else y;
+            const yy = (if (inFixed(l, f.box)) y - scroll_y else y) - flowOffset(l, f.box, scroll_y);
             if (!(yy >= f.y and yy < f.y + f.h)) continue;
             const depth = boxDepth(l, f.box);
             if (best == null or depth >= best_depth) {
@@ -3822,7 +3950,7 @@ pub fn hitTest(l: *const Layout, x: f64, y: f64, scroll_y: f64) ?NodeId {
             if (b.kind == .root or b.kind == .text or b.kind == .inline_box) continue;
             if (!(b.laid_out and x >= b.x and x < b.x + b.w)) continue;
             const id: BoxId = @intCast(base + k);
-            const yy = if (inFixed(l, id)) y - scroll_y else y;
+            const yy = (if (inFixed(l, id)) y - scroll_y else y) - flowOffset(l, id, scroll_y);
             if (!(yy >= b.y and yy < b.y + b.h)) continue;
             const depth = boxDepth(l, id);
             if (best == null or depth >= best_depth) {

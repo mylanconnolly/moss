@@ -258,6 +258,22 @@ export fn umain(log_h: u64, chan_h: u64, _: u64, blob_va: u64, blob_len: u64) ca
     scrollAndCommit(a, 40);
     scrollAndCommit(a, -40);
 
+    // 4. A scroll container takes the wheel over it until its end, then
+    // the page scrolls; a sticky header holds the top of the viewport
+    // while its containing block has room, and goes with it after.
+    loadPage(a, "http://www.moss.test:8080/scroll.html");
+    demand(countColour(a, 0xff0000) == 0, "the container's tail shows before any scroll", 61);
+    demand(host.send(a, .{ .pointer = .{ .kind = .move, .x = 50, .y = 30 } }), "send move over the container", 62);
+    scrollAndCommit(a, 340);
+    demand(countColour(a, 0xff0000) > 0, "the container did not scroll to its tail", 63);
+    demand(countColour(a, 0x000080) > 0, "the sticky header is not at the top", 64);
+    scrollAndCommit(a, 340);
+    demand(countColour(a, 0x000080) > 0, "the sticky header did not stick while the page scrolled", 65);
+    demand(countColour(a, 0xff0000) == 0, "the container did not scroll away with the page", 66);
+    scrollAndCommit(a, 400);
+    demand(countColour(a, 0x000080) == 0, "the sticky header outlived its containing block", 67);
+    _ = usys.log(glog, "webpagecli: the container scrolled and the header stuck");
+
     _ = usys.log(glog, "webpagecli: page domains ok");
     host.deinit();
     usys.exit(0);

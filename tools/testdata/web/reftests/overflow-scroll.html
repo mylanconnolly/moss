@@ -1,0 +1,8 @@
+<!DOCTYPE html>
+<title>An overflow: auto box clips, and shows a scrollbar thumb sized by its extent</title>
+<style>
+  body { margin: 0; }
+  .box { width: 100px; height: 100px; overflow: auto; background: #eee; }
+  .tall { height: 400px; width: 50px; background: blue; }
+</style>
+<div class="box"><div class="tall"></div></div>

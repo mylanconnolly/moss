@@ -52,15 +52,10 @@ pub fn paintWith(l: *const Layout, canvas: *const Canvas, scroll_y: f64, opts: O
     // filled the whole viewport erased the rows a scroll had just moved
     // (the page went page-background grey as it scrolled, 2026-09-24).
     if (rootBackground(l)) |bg| p.canvas.fillRect(0, 0, p.canvas.w, p.canvas.h, bg);
-    // Positioned boxes paint in z-index order around the flow: the
-    // negative ones beneath it, the rest (auto counting as 0) above,
-    // ties in document order.
-    const order = try p.l.a.dupe(layout.Absolute, l.absolutes.items);
-    std.mem.sort(layout.Absolute, order, l, zBelow);
-    var i: usize = 0;
-    while (i < order.len and zOf(l, order[i].box) < 0) : (i += 1) try p.paintPositioned(order[i].box);
+    // The root's content paints the positioned boxes around its flow
+    // (`paintContent`): the negative z-index ones beneath it, the rest
+    // above, in tree order within a z-index.
     try p.paintBox(l.root);
-    while (i < order.len) : (i += 1) try p.paintPositioned(order[i].box);
     for (opts.highlights) |h| p.tint(h);
     if (opts.focus) |f| p.focusRing(f);
 }
@@ -69,8 +64,13 @@ fn zOf(l: *const Layout, id: BoxId) i32 {
     return l.get(id).style.z_index orelse 0;
 }
 
-fn zBelow(l: *const Layout, a: layout.Absolute, b: layout.Absolute) bool {
-    return zOf(l, a.box) < zOf(l, b.box);
+/// A positioned box of a unit's layer, with its z-index; ties keep
+/// tree order (box ids are build order, which is tree order).
+const Layered = struct { box: BoxId, z: i32 };
+
+fn layerBelow(_: void, a: Layered, b: Layered) bool {
+    if (a.z != b.z) return a.z < b.z;
+    return a.box < b.box;
 }
 
 fn rootBackground(l: *const Layout) ?u32 {
@@ -159,6 +159,10 @@ const Painter = struct {
         // so a float covers the blocks beside it and text and atomics
         // paint over the float (Acid2's eyes: an object in a line sits
         // on a float, 2026-10-07).
+        // A sticky box paints at its stuck offset, everything in it too.
+        const saved_scroll = p.scroll;
+        defer p.scroll = saved_scroll;
+        if (b.style.position == .sticky) p.scroll -= layout.stickyOffset(p.l, id, p.scroll);
         if (b.kind != .root and (b.kind != .inline_box or picture_bm != null) and b.kind != .anon_block) p.paintSelf(b, id);
         if (picture_bm) |bm| {
             p.picture(b, bm);
@@ -167,10 +171,73 @@ const Painter = struct {
         const saved = p.canvas;
         p.clipTo(b);
         defer p.canvas = saved;
+        try p.paintContent(id);
+    }
+
+    /// A box's content, as a unit: its positioned layer's negative
+    /// z-indexes, its flow in the three phases, then the rest of the
+    /// layer (CSS 2.1 Appendix E) — scrolled by its offset when it is a
+    /// scroll container — then its scrollbar. The layer holds the
+    /// relatively positioned and sticky boxes in its flow (each a unit
+    /// of its own, not descended into), and the absolutely positioned
+    /// boxes this box clips, or every unclipped one for the root.
+    fn paintContent(p: *Painter, id: BoxId) Error!void {
+        const b = p.l.get(id);
+        const saved_scroll = p.scroll;
+        defer p.scroll = saved_scroll;
+        p.scroll += b.scroll_top;
+        var layer: std.ArrayList(Layered) = .empty;
+        try p.collectLayer(id, &layer);
+        if (b.kind == .root) {
+            for (p.l.absolutes.items) |ab| if (layout.clipAncestor(p.l, ab.box) == null) try layer.append(p.l.a, .{ .box = ab.box, .z = zOf(p.l, ab.box) });
+        } else if (layout.clipsOverflow(b)) {
+            for (p.l.absolutes.items) |ab| if (layout.clipAncestor(p.l, ab.box) == id) try layer.append(p.l.a, .{ .box = ab.box, .z = zOf(p.l, ab.box) });
+        }
+        std.mem.sort(Layered, layer.items, {}, layerBelow);
+        var i: usize = 0;
+        while (i < layer.items.len and layer.items[i].z < 0) : (i += 1) try p.paintPositioned(layer.items[i].box);
         try p.paintFlow(id, .backgrounds);
         try p.paintFlow(id, .floats);
         try p.paintFlow(id, .inlines);
+        while (i < layer.items.len) : (i += 1) try p.paintPositioned(layer.items[i].box);
+        p.scroll = saved_scroll;
+        if (layout.isScrollContainer(b)) p.scrollbar(b, id);
     }
+
+    /// The relatively positioned and sticky block-level boxes of a
+    /// unit's flow: the subtree, not entering another unit (a float, a
+    /// clipping box, or a positioned box, each painting its own).
+    fn collectLayer(p: *Painter, id: BoxId, out: *std.ArrayList(Layered)) Error!void {
+        for (p.l.get(id).children.items) |c| {
+            const cb = p.l.get(c);
+            if (cb.isOutOfFlow() or !cb.isBlockLevel()) continue;
+            if (cb.style.position == .relative or cb.style.position == .sticky) {
+                try out.append(p.l.a, .{ .box = c, .z = zOf(p.l, c) });
+                continue;
+            }
+            if (layout.clipsOverflow(cb)) continue;
+            try p.collectLayer(c, out);
+        }
+    }
+
+    /// A scroll container's vertical scrollbar: a thumb at the right
+    /// edge of its padding box, when there is anything to scroll.
+    fn scrollbar(p: *Painter, b: *const Box, id: BoxId) void {
+        const max = layout.scrollMax(p.l, id);
+        if (max <= 0) return;
+        const inner_h = b.h - b.border[0] - b.border[2];
+        const extent = layout.scrollExtent(p.l, id);
+        if (extent <= 0 or inner_h <= 0) return;
+        const thumb_h = @max(scrollbar_min, @floor(inner_h * inner_h / extent));
+        const track_y = b.y + b.border[0];
+        const thumb_y = track_y + @floor((inner_h - thumb_h) * (b.scroll_top / max));
+        const x = b.x + b.w - b.border[1] - scrollbar_w;
+        p.fill(x, thumb_y, scrollbar_w, thumb_h, scrollbar_color);
+    }
+
+    const scrollbar_w: f64 = 6;
+    const scrollbar_min: f64 = 12;
+    const scrollbar_color: u32 = 0x888888;
 
     /// A box's own background and borders.
     fn paintSelf(p: *Painter, b: *const Box, id: BoxId) void {
@@ -227,15 +294,28 @@ const Painter = struct {
             if (cb.isOutOfFlow()) continue;
             if (!cb.isBlockLevel()) continue;
             if (cb.style.visibility != .visible or cb.style.opacity == 0 or cb.style.display == .none) continue;
+            // A relatively positioned or sticky box is in the unit's
+            // positioned layer, painted whole after the flow.
+            if (cb.style.position == .relative or cb.style.position == .sticky) continue;
             if (p.isAtomicBlock(cb)) {
                 if (phase == .backgrounds) try p.paintBox(c);
                 continue;
             }
+            const saved_scroll = p.scroll;
             if (phase == .backgrounds and cb.kind != .anon_block) p.paintSelf(cb, c);
             const saved = p.canvas;
             p.clipTo(cb);
-            try p.paintFlow(c, phase);
+            if (layout.clipsOverflow(cb)) {
+                // Its content is a unit of its own: scrolled, clipped,
+                // with the positioned boxes it clips — painted whole at
+                // the backgrounds phase, since nothing of it may escape
+                // to interleave with what is around it.
+                if (phase == .backgrounds) try p.paintContent(c);
+            } else {
+                try p.paintFlow(c, phase);
+            }
             p.canvas = saved;
+            p.scroll = saved_scroll;
         }
         if (phase != .inlines) return;
         // Lines: inline backgrounds, then text and atomics in order — a
