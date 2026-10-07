@@ -8037,6 +8037,49 @@ window's bottom and took nothing. The exit is a trusted proxy by
 construction: it does the TLS handshake with its own roots and the
 window takes its word, which is what a unit file on that node means.
 
+**Stage 9, fixed positioning and Acid2 (as built, 2026-10-07).** Fixed
+boxes: the containing block is the root (`containingBlockFor`), whose
+height is the viewport's for an absolute, so a fixed box is laid out in
+viewport coordinates and `Layout.has_fixed` is set; the painter paints
+every positioned box from the global list through `paintPositioned`,
+which drops the scroll for a fixed subtree (`layout.inFixed`); the hit
+test takes the scroll and tests a fixed subtree against the viewport;
+and the page host repaints the viewport whole on a scroll when a fixed
+box exists, since its rows no longer move rigidly. `background-attachment`
+is a property now, and a layer's positioning area (`Painter.Area`) is
+the viewport for `fixed` — the tiles start from the viewport's origin
+and the gradient's geometry is the viewport's — painted inside the box
+as before. An `<object>` is replaced only once its picture decoded
+(`isReplaced` asks the host's images; the page host fetches an object's
+`data` as it does an `img`'s `src`), and falls back to its content
+otherwise, which Acid2's nested objects rely on. The harness grew
+`renderForTestWith` (pictures through `TestImages`, which decodes `data:`
+URLs; `scroll_to` an id, whole pixels) and the Acid2 test, which prints
+the differing pixel count and writes both renders as PPMs under zig-out
+when they differ — the loop that found every item below, with the
+reference's pixels as the spec. The paint order became CSS 2.1 Appendix
+E's (`paintFlow` in three phases per stacking box: block backgrounds,
+floats, inline content; a control or a picture is atomic at the
+backgrounds phase). Layout: `max-height` before `min-height`; margins
+collapsing through an empty block carry its descendants' collapsed
+bottoms (`collapsedBottom` after `positionEmptyBlock`), a percentage
+height against an auto-height parent is auto for collapsing
+(`heightIsAuto`), and clearance follows §9.5.2 — the hypothetical border
+edge with every margin collapsed is held against the floats, and the
+box's own top margin is spent inside the clearance, which may be
+negative; `Box.rel_dx/rel_dy` record what relative positioning and
+`transform` moved, and the flow's cursor ignores them; a float's
+shrink-to-fit width subtracts its own extras from the border-box
+preferred widths (the absolute path already did); an empty block
+places its floats by its own width. Style: a `data:` stylesheet link
+decodes without a loader; a second colour in a `background` layer makes
+the declaration invalid; transparent borders paint nothing; and
+`css.serializeIdent` escapes identifiers when a prelude becomes text
+again — `\.parser` is a type selector named `.parser`, `second\ two` one
+attribute value, and `m\argin` (a hex escape, U+000A) an unknown
+property, which is what Acid2's parser line checks. Seven reftests
+vendor the fixes; Acid2 itself is fetched.
+
 ## JavaScript
 
 The decision row "JavaScript" (2026-09-24) fixes the shape: `lib/js/` is

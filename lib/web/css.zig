@@ -1038,6 +1038,28 @@ pub const Parser = struct {
 // ------------------------------------------------------ text of values
 
 /// Component values back as CSS text (the tokens' own form: a name's
+/// An identifier as CSS text (CSSOM's "serialize an identifier"): what
+/// is not a name character is escaped, so `\.parser` and `second\ two`
+/// survive a round trip through text (a selector re-parsed from a
+/// prelude once read them as a class and as two words — Acid2's
+/// parser line and its second line, 2026-10-07).
+pub fn serializeIdent(a: std.mem.Allocator, out: *std.ArrayList(u8), s: []const u8) Error!void {
+    for (s, 0..) |c, i| {
+        if (c == 0) {
+            try out.appendSlice(a, "\u{fffd}");
+        } else if (c < 0x20 or c == 0x7f or (i == 0 and std.ascii.isDigit(c)) or (i == 1 and std.ascii.isDigit(c) and s[0] == '-')) {
+            try out.print(a, "\\{x} ", .{c});
+        } else if (c == '-' and s.len == 1) {
+            try out.appendSlice(a, "\\-");
+        } else if (c >= 0x80 or c == '-' or c == '_' or std.ascii.isAlphanumeric(c)) {
+            try out.append(a, c);
+        } else {
+            try out.append(a, '\\');
+            try out.append(a, c);
+        }
+    }
+}
+
 /// escapes undone, a number's original spelling), for a consumer that
 /// wants a selector's text or a value as written.
 pub fn writeValues(a: std.mem.Allocator, values: []const Value, out: *std.ArrayList(u8)) Error!void {
@@ -1063,7 +1085,7 @@ pub fn writeValue(a: std.mem.Allocator, v: Value, out: *std.ArrayList(u8)) Error
             try out.append(a, ')');
         },
         .token => |t| switch (t) {
-            .ident => |s| try out.appendSlice(a, s),
+            .ident => |s| try serializeIdent(a, out, s),
             .at_keyword => |s| {
                 try out.append(a, '@');
                 try out.appendSlice(a, s);
@@ -1135,6 +1157,29 @@ test "css: tokens and a stylesheet" {
     try std.testing.expectEqualStrings("1.5em 0", try valuesText(a, decls[1].declaration.value));
     try std.testing.expectEqualStrings("media", rules[2].at.name);
     try std.testing.expectEqualStrings("(max-width: 600px)", try valuesText(a, rules[2].at.prelude));
+}
+
+// Acid2's parser line: escapes in a selector and a property name, and a
+// stray `;` at the top level, which begins a qualified rule whose
+// prelude is nonsense — the rule after it is lost, per the standard.
+test "css: escapes and a stray top-level semicolon" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var p = try Parser.init(a, "\\.parser { padding: 2em } .parser { m\\argin: 2em; }; .parser { height: 3em; }", false);
+    const rules = try p.parseStylesheet();
+    try std.testing.expectEqual(@as(usize, 3), rules.len);
+    try std.testing.expect(rules[0].qualified.prelude[0] == .token and rules[0].qualified.prelude[0].token == .ident);
+    try std.testing.expectEqualStrings(".parser", rules[0].qualified.prelude[0].token.ident);
+    // `\a` is a hex escape (U+000A), so `m\argin` is not `margin`: the
+    // declaration is one of an unknown property.
+    var inner = try Parser.init(a, "m\\argin: 2em", false);
+    const decls = try inner.parseBlockContents();
+    try std.testing.expectEqualStrings("m\nrgin", decls[0].declaration.name);
+    var vt: std.ArrayList(u8) = .empty;
+    try serializeIdent(a, &vt, "second two");
+    try std.testing.expectEqualStrings("second\\ two", vt.items);
+    try std.testing.expect(rules[2] == .err or (rules[2] == .qualified and rules[2].qualified.prelude[0] == .token and rules[2].qualified.prelude[0].token == .semicolon));
 }
 
 // The css-parsing-tests corpus: each file is one entry point; inputs and

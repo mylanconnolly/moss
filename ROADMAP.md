@@ -905,11 +905,40 @@ supervises), and memory history per unit beside the CPU one.
       Then grid (Level 1's core), `calc()`/`min()`/`max()`/`clamp()`,
       cascade layers, masks, translations, logical properties, and a
       cascade 50× faster (rule buckets, an ancestor Bloom filter).
-      Remaining for the stage: fixed and sticky, scaling and rotating
-      transforms and opacity at paint time, clip paths, `overflow`
-      scroll containers, then transitions and animations on the page's
-      tick; shaping and bidi for the scripts that need them. *Exit:* WPT reftest
-      subsets per module with counts; Acid2 paints as its reference.
+      ✅ *Fixed positioning, and Acid2* (2026-10-07): `position: fixed`
+      takes the viewport as its containing block, is laid out in
+      viewport coordinates and painted without the scroll (a page with
+      one repaints whole on a scroll instead of shifting its rows; the
+      hit test knows), `background-attachment: fixed` anchors a layer's
+      tiles or gradient to the viewport, and an `<object>` whose data is
+      not a picture that decoded shows its fallback content. Acid2 is
+      fetched like Acid3 (`tools/fetch-acid2.sh`, WPT's copy with its
+      pixel-for-pixel CSS reference) and the host harness renders the
+      test scrolled to its "Hello World!" anchor on the wrapper's
+      400×300 canvas beside the reference, with `data:` pictures
+      decoded: it agrees, pixel for pixel, and the test asserts it. What
+      it took, each with a vendored reftest: the paint order of CSS 2.1
+      Appendix E (every block's background, then the floats, then the
+      inline content — an object in a line had been painted under the
+      float beside it); `min-height` over `max-height`; margins that
+      collapse through an empty block carrying its descendants' bottoms
+      (a `-6em` the smile needed), a percentage height against an
+      auto-height parent counting as auto, and clearance computed from
+      the hypothetical position so it may be negative (§9.5.2); a
+      relatively positioned (or translated) child no longer moving the
+      flow below it; a float's shrink-to-fit width counting its own
+      borders once; an empty block placing its floats by its own width;
+      transparent borders painting nothing; a `data:` stylesheet link
+      needing no loader; a second colour making a `background`
+      declaration invalid; and identifiers serialized with their escapes,
+      since a selector is re-parsed from its prelude's text (`\.parser`
+      had become a class, `second\ two` two words — the test's "parser
+      line" and its second line). Remaining for the stage: sticky,
+      scaling and rotating transforms and opacity at paint time, clip
+      paths, stacking contexts (a relative box still paints in flow),
+      `overflow` scroll containers, then transitions and animations on
+      the page's tick; shaping and bidi for the scripts that need them.
+      *Exit:* WPT reftest subsets per module with counts.
     - **(10) JavaScript, the engine** (decision row "JavaScript",
       2026-09-24). `lib/js/`, in stages, each with its test262 numbers
       and a DESIGN entry: (a) lexer, parser and AST for ES2023 — ASI,

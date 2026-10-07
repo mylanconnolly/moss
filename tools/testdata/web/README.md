@@ -40,5 +40,15 @@ other switches). The pin is what makes the count mean the same on every
 machine; to move it, change `PIN` in the script and re-run it. Not part of
 `zig build check` (like `bench`).
 
+## Acid2
+
+Fetched, not vendored, like test262: `tools/fetch-acid2.sh` puts WPT's
+`acid/acid2/` (the test, its pixel-for-pixel CSS reference and the 404
+page it probes) under `acid2/` at the pin in the script. The reftest
+harness renders the test scrolled to `#top` on a 400×300 canvas beside
+`px-reference.html`, with the `data:` pictures decoded, and asserts the
+pixels agree (`acid2 (host): agrees with its reference`); without the
+files it says so and skips.
+
 Still to vendor, with the stage that first reads them: WPT reftest
 subsets per layout module (stages 4 and 9).

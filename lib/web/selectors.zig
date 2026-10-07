@@ -851,6 +851,15 @@ test "selectors: simple, attribute, structural, combinators" {
     try std.testing.expectEqual(@as(usize, 1), try count(a, doc, "[href$=\".HTML\" i]"));
     try std.testing.expectEqual(@as(usize, 1), try count(a, doc, "[lang|=en]"));
     try std.testing.expectEqual(@as(usize, 1), try count(a, doc, "[class~=big]"));
+    try std.testing.expectEqual(@as(usize, 1), try count(a, doc, "[class=box\\ big]"));
+    try std.testing.expectEqual(@as(usize, 1), try count(a, doc, "[class=\"box big\"]"));
+    // Acid2's second line: an escaped space in an attribute value, under
+    // an ancestor named by two attribute selectors.
+    const doc2 = try html.parse(a, "<blockquote class=\"first one\"><address class=\"second two\"></address></blockquote>", .{});
+    try std.testing.expectEqual(@as(usize, 1), try count(a, doc2, "[class~=one].first.one"));
+    try std.testing.expectEqual(@as(usize, 1), try count(a, doc2, "[class~=one][class~=first] address"));
+    try std.testing.expectEqual(@as(usize, 1), try count(a, doc2, "[class=second\\ two]"));
+    try std.testing.expectEqual(@as(usize, 1), try count(a, doc2, "[class~=one][class~=first] [class=second\\ two][class=\"second two\"]"));
     try std.testing.expectEqual(@as(usize, 2), try count(a, doc, "div > p"));
     try std.testing.expectEqual(@as(usize, 1), try count(a, doc, "p + p"));
     try std.testing.expectEqual(@as(usize, 3), try count(a, doc, "p.x ~ *"));

@@ -1,0 +1,11 @@
+<!DOCTYPE html>
+<title>Paint order (CSS 2.1 Appendix E): block backgrounds, then floats, then inline content</title>
+<style>
+  body { margin: 0; }
+  .wrap { width: 400px; }
+  .block { height: 60px; width: 400px; background: red; }
+  .float { float: left; width: 200px; height: 60px; background: blue; margin-top: -60px; }
+  .line { margin-top: -60px; height: 60px; }
+  .inline { display: inline-block; width: 40px; height: 40px; background: yellow; position: relative; left: -200px; vertical-align: top; }
+</style>
+<div class="wrap"><div class="block"></div><div class="float"></div><div class="line"><span class="inline"></span></div></div>

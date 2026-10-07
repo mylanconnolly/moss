@@ -1,0 +1,9 @@
+<!DOCTYPE html>
+<title>A float's shrink-to-fit width is its content's, its borders once</title>
+<style>
+  body { margin: 0; }
+  .f { float: right; border: solid 10px black; background: yellow; }
+  .in { display: block; width: 60px; height: 20px; }
+  .wrap { width: 200px; }
+</style>
+<div class="wrap"><div class="f"><div class="in"></div></div></div>

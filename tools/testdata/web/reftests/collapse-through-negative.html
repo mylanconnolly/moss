@@ -1,0 +1,11 @@
+<!DOCTYPE html>
+<title>Margins collapse through an empty block, its child's negative bottom margin included; clearance may be negative</title>
+<style>
+  body { margin: 0; }
+  .a { height: 20px; width: 100px; background: #888; margin-bottom: 40px; }
+  .empty { margin: 60px 0; height: 10%; }
+  .empty div { margin-bottom: -50px; }
+  .nose { float: left; width: 50px; height: 60px; margin-top: -10px; margin-bottom: -10px; background: red; }
+  .smile { clear: both; margin-top: 50px; height: 20px; width: 100px; background: blue; }
+</style>
+<div class="a"></div><div class="nose"></div><div class="empty"><div></div></div><div class="smile"></div>

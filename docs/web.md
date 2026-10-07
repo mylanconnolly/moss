@@ -155,7 +155,12 @@ with `insertRule`/`deleteRule`. `MutationObserver` reports the tree,
 attributes and text changing, delivered as a microtask; `onclick="…"`
 attributes and `el.onclick = f` properties run; `document.write` under
 a parser-inserted script inserts after it; `localStorage.foo` reads
-and writes items. The Acid3 score is measured by the `acid3` drill
+and writes items. Acid2 is a host reftest: `tools/fetch-acid2.sh` fetches
+WPT's copy with its pixel-for-pixel CSS reference, and `zig build test`
+renders the test scrolled to its anchor beside the reference and asserts
+they agree (fixed positioning, viewport-anchored backgrounds, object
+fallback, the paint order and the margin arithmetic it checks landed
+2026-10-07). The Acid3 score is measured by the `acid3` drill
 (`tools/fetch-acid3.sh` first): 99/100 on the host, 99/100 on
 the target within its settle, as of 2026-09-28. An iframe's or object's
 `contentDocument` is a document of its own (fetched on first touch,
@@ -345,7 +350,7 @@ Very large pages outgrow the page's 40 MB for a document
 and its layout and die (a 1.2 MB Wikipedia article takes 29 MB: the
 DOM is ~7 MB and the layout ~17 MB, 1.1 KB a box); scripts run, with
 the simple CORS case and no cookies, so a site whose API wants
-credentials shows what its markup carried; no `position: fixed`/`sticky` beyond relative, no scaling or rotating
+credentials shows what its markup carried; no `position: sticky` beyond relative, no scaling or rotating
 transforms (translations only), no merged `border-collapse` borders,
 no `overflow` scroll containers, no subgrid or masonry, no WebP,
 animated GIF (the first frame shows) or `srcset`; SVG draws its shapes,

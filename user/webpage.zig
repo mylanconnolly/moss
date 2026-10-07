@@ -1174,13 +1174,16 @@ fn loadPictures(budget: usize) void {
                 }
                 continue;
             }
-            if (!doc.isHtml(node, "img")) continue;
+            // An `<object>` whose data is a picture is one; one whose
+            // data is not (or does not load) shows its fallback content.
+            const is_object = doc.isHtml(node, "object");
+            if (!doc.isHtml(node, "img") and !is_object) continue;
             if (pictureOf(node) != null) continue;
             if (page.n_pictures == max_pictures) continue;
             const slot = &page.pictures[page.n_pictures];
             slot.* = .{ .node = node, .state = .failed, .bm = .{ .w = 0, .h = 0, .rgba = &.{} } };
             page.n_pictures += 1;
-            const src = doc.getAttr(node, "src") orelse continue;
+            const src = doc.getAttr(node, if (is_object) "data" else "src") orelse continue;
             fetched += 1;
             // The file and the decoder's working memory in the scratch,
             // reset per picture; only the pixels are kept, in the store.
@@ -1404,7 +1407,10 @@ fn scrollBy(dy: f64) void {
     if (!scrollTo(page.scroll_y + dy)) return;
     if (scripts_up) scripts.setScroll(0, page.scroll_y / zoomScale());
     const moved: i64 = @intFromFloat(@round(page.scroll_y - before));
-    if (!has_pixels or moved == 0 or @abs(moved) >= @as(i64, @intCast(vh))) {
+    // A fixed box stays put while the rows move: the viewport is
+    // painted whole rather than shifted and banded.
+    const rigid = if (page.layout) |l| !l.has_fixed else true;
+    if (!has_pixels or moved == 0 or !rigid or @abs(moved) >= @as(i64, @intCast(vh))) {
         paintAll();
     } else {
         const n: usize = @intCast(@abs(moved));
@@ -1510,7 +1516,7 @@ fn union4(a: [4]f64, b: [4]f64) [4]f64 {
 
 fn hitNode(x: u64, y: u64) ?dom.NodeId {
     const l = page.layout orelse return null;
-    return web.layout.hitTest(l, @floatFromInt(x), @as(f64, @floatFromInt(y)) + page.scroll_y);
+    return web.layout.hitTest(l, @floatFromInt(x), @as(f64, @floatFromInt(y)) + page.scroll_y, page.scroll_y);
 }
 
 /// The text fragment under a viewport point, else the nearest by line.

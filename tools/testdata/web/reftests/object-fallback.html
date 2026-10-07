@@ -1,0 +1,8 @@
+<!DOCTYPE html>
+<title>An object whose data is not a picture shows its fallback content, inline</title>
+<style>
+  body { margin: 0; font: 20px sans-serif; }
+  .box { display: inline-block; width: 60px; height: 30px; background: green; vertical-align: top; }
+  object { width: 200px; height: 100px; }
+</style>
+<div><object data="data:application/x-unknown,ERROR"><object data="missing.html" type="text/html"><span class="box"></span></object></object></div>

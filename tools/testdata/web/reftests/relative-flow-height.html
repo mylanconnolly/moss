@@ -1,0 +1,9 @@
+<!DOCTYPE html>
+<title>A relatively positioned child does not move the flow: the parent's height is the static one</title>
+<style>
+  body { margin: 0; }
+  .parent { width: 100px; background: #ccc; }
+  .child { height: 30px; width: 50px; background: blue; position: relative; top: 20px; }
+  .next { height: 20px; width: 50px; margin-left: 50px; background: green; }
+</style>
+<div class="parent"><div class="child"></div></div><div class="next"></div>

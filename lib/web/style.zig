@@ -23,6 +23,7 @@
 //! check, the user origin, `revert`, and animations.
 const std = @import("std");
 const css = @import("css.zig");
+const weburl = @import("url.zig");
 const color = @import("color.zig");
 const media = @import("media.zig");
 const selectors = @import("selectors.zig");
@@ -109,6 +110,9 @@ pub const WhiteSpace = enum { normal, nowrap, pre, pre_wrap, pre_line, break_spa
 pub const ListStyleType = enum { disc, circle, square, decimal, lower_alpha, upper_alpha, lower_roman, upper_roman, none };
 pub const ListStylePosition = enum { inside, outside };
 pub const Overflow = enum { visible, hidden, scroll, auto, clip };
+/// `background-attachment`: `fixed` anchors the image to the viewport
+/// (its positioning area), the others to the box.
+pub const BackgroundAttachment = enum { scroll, fixed, local };
 pub const Visibility = enum { visible, hidden, collapse };
 pub const Cursor = enum { auto, default, none, context_menu, help, pointer, progress, wait, cell, crosshair, text, vertical_text, alias, copy, move, no_drop, not_allowed, grab, grabbing, e_resize, n_resize, ne_resize, nw_resize, s_resize, se_resize, sw_resize, w_resize, ew_resize, ns_resize, nesw_resize, nwse_resize, col_resize, row_resize, all_scroll, zoom_in, zoom_out };
 pub const BoxSizing = enum { content_box, border_box };
@@ -208,6 +212,7 @@ pub const Computed = struct {
     background_position: [2]LengthPercent = .{ .{ .percent = 0 }, .{ .percent = 0 } },
     background_size: BackgroundSize = .auto,
     background_repeat: [2]bool = .{ true, true },
+    background_attachment: BackgroundAttachment = .scroll,
     /// SVG's `fill` as page CSS gives it to an inline `<svg>` (inherited):
     /// null when no rule sets it; `current` is `currentColor`.
     fill: ?FillPaint = null,
@@ -344,6 +349,7 @@ pub const Prop = enum {
     background_position_y,
     background_size,
     background_repeat,
+    background_attachment,
     border_top_left_radius,
     border_top_right_radius,
     border_bottom_right_radius,
@@ -1087,7 +1093,7 @@ fn expand(a: std.mem.Allocator, d: css.Declaration, decls: *std.ArrayList(Declar
         return;
     };
     if (eq(name, "background")) {
-        const bg_props = [_]Prop{ .background_color, .background_image, .background_position_x, .background_position_y, .background_size, .background_repeat };
+        const bg_props = [_]Prop{ .background_color, .background_image, .background_position_x, .background_position_y, .background_size, .background_repeat, .background_attachment };
         if (wide) {
             for (bg_props) |p| try push(a, decls, p, vals, d.important);
             return;
@@ -1111,14 +1117,20 @@ fn expand(a: std.mem.Allocator, d: css.Declaration, decls: *std.ArrayList(Declar
         };
         const last = layers.items[layers.items.len - 1];
         var col: []const css.Value = &.{};
+        var ncol: usize = 0;
         for (last) |v| if (color.parseValue(v) != null and urlOf(v) == null) {
             col = try single(a, v);
+            ncol += 1;
         };
+        // Two colours in a layer (`red pink`) make the whole declaration
+        // invalid (Acid2's parser line).
+        if (ncol > 1) return;
         try push(a, decls, .background_color, col, d.important);
         var image: []const css.Value = &.{};
         var pos: std.ArrayList(css.Value) = .empty;
         var size: []const css.Value = &.{};
         var repeat: std.ArrayList(css.Value) = .empty;
+        var attachment: []const css.Value = &.{};
         if (chosen) |li| {
             const layer = layers.items[li];
             var k: usize = 0;
@@ -1135,6 +1147,8 @@ fn expand(a: std.mem.Allocator, d: css.Declaration, decls: *std.ArrayList(Declar
                 } else if (ident(v)) |w| {
                     if (eq(w, "repeat") or eq(w, "repeat-x") or eq(w, "repeat-y") or eq(w, "no-repeat") or eq(w, "space") or eq(w, "round")) {
                         try repeat.append(a, v);
+                    } else if (eq(w, "fixed") or eq(w, "scroll") or eq(w, "local")) {
+                        attachment = try single(a, v);
                     } else if (eq(w, "left") or eq(w, "right") or eq(w, "top") or eq(w, "bottom") or eq(w, "center")) {
                         try pos.append(a, v);
                     }
@@ -1153,6 +1167,7 @@ fn expand(a: std.mem.Allocator, d: css.Declaration, decls: *std.ArrayList(Declar
         }
         try push(a, decls, .background_size, size, d.important);
         try push(a, decls, .background_repeat, repeat.items, d.important);
+        try push(a, decls, .background_attachment, attachment, d.important);
         return;
     }
     if (eq(name, "mask")) {
@@ -2861,6 +2876,7 @@ fn copyProp(out: *Computed, from: *const Computed, p: Prop) void {
         .background_position_y => out.background_position[1] = from.background_position[1],
         .background_size => out.background_size = from.background_size,
         .background_repeat => out.background_repeat = from.background_repeat,
+        .background_attachment => out.background_attachment = from.background_attachment,
         .border_top_left_radius => out.border_radius[0] = from.border_radius[0],
         .border_top_right_radius => out.border_radius[1] = from.border_radius[1],
         .border_bottom_right_radius => out.border_radius[2] = from.border_radius[2],
@@ -3224,6 +3240,11 @@ fn applyValues(out: *Computed, p: Prop, vals_in: []const css.Value, parent: *con
             out.background_repeat = backgroundRepeatOf(vals) orelse return error.Invalid;
             return true;
         },
+        .background_attachment => {
+            const w = ident(vals[0]) orelse return error.Invalid;
+            out.background_attachment = if (std.mem.eql(u8, w, "fixed")) .fixed else if (std.mem.eql(u8, w, "local")) .local else if (std.mem.eql(u8, w, "scroll")) .scroll else return error.Invalid;
+            return true;
+        },
         .background_position_x, .background_position_y => {
             const pos = positionComponent(vals, p == .background_position_x, font_size, env) orelse return error.Invalid;
             out.background_position[if (p == .background_position_x) 0 else 1] = pos;
@@ -3458,7 +3479,7 @@ fn applyValues(out: *Computed, p: Prop, vals_in: []const css.Value, parent: *con
         .transform, .mask_image, .mask_position_x, .mask_position_y, .mask_size, .mask_repeat, .grid_template_columns, .grid_template_rows, .grid_template_areas, .grid_auto_columns, .grid_auto_rows, .grid_auto_flow, .grid_row_start, .grid_column_start, .grid_row_end, .grid_column_end => unreachable,
         .justify_items => out.justify_items = keyword(AlignItems, v) orelse return error.Invalid,
         .justify_self => out.justify_self = keyword(AlignSelf, v) orelse return error.Invalid,
-        .background_image, .background_size, .background_repeat, .background_position_x, .background_position_y, .border_top_left_radius, .border_top_right_radius, .border_bottom_right_radius, .border_bottom_left_radius => unreachable,
+        .background_image, .background_size, .background_repeat, .background_attachment, .background_position_x, .background_position_y, .border_top_left_radius, .border_top_right_radius, .border_bottom_right_radius, .border_bottom_left_radius => unreachable,
         .row_gap, .column_gap => {
             const lp: LengthPercent = if (ident(v) != null and std.ascii.eqlIgnoreCase(ident(v).?, "normal")) .{ .px = 0 } else lengthPercent(v, font_size, env) orelse return error.Invalid;
             if (p == .row_gap) out.row_gap = lp else out.column_gap = lp;
@@ -3649,7 +3670,6 @@ pub fn collectDocumentSheetsKept(a: std.mem.Allocator, doc: *const Document, env
         const is_link = doc.isHtml(id, "link");
         if (!is_style and !is_link) continue;
         if (is_link) {
-            if (loader == null) continue;
             if (!linkIsStylesheet(doc.getAttr(id, "rel") orelse continue)) continue;
             if (doc.getAttr(id, "disabled") != null) continue;
         }
@@ -3664,7 +3684,12 @@ pub fn collectDocumentSheetsKept(a: std.mem.Allocator, doc: *const Document, env
         } else {
             const href = std.mem.trim(u8, doc.getAttr(id, "href") orelse continue, " \t\n\r");
             if (href.len == 0) continue;
-            const ld = loader.?;
+            // A `data:` sheet needs no loader (Acid2's appendix sheet).
+            if (weburl.decodeData(a, href) catch null) |d| {
+                if (std.ascii.startsWithIgnoreCase(d.mime, "text/css")) try appendSheetText(a, &sheets, d.bytes, env, null, loader, keep);
+                continue;
+            }
+            const ld = loader orelse continue;
             const got = ld.fetch(ld.ctx, href, null) orelse continue;
             try appendSheetText(a, &sheets, got.text, env, got.url, loader, keep);
         }
@@ -3867,6 +3892,31 @@ test "style: presentational hints sit under every author rule" {
     try std.testing.expectEqual(@as(f64, 30), styles.get(imgs[0]).width.px);
     try std.testing.expectEqual(@as(f64, 20), styles.get(imgs[0]).height.px);
     try std.testing.expectEqual(@as(f64, 50), styles.get(imgs[1]).width.percent);
+}
+
+// Acid2's second line under the cascade: the float rule's subject is
+// named by attribute selectors alone, one with an escaped space.
+test "style: an attribute-only subject with an escaped space floats" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const env: Env = .{ .width = 400, .height = 300 };
+    const doc = try html.parse(a,
+        \\<style>
+        \\[class~=one].first.one { position: absolute; top: 0; }
+        \\[class~=one][class~=first] [class=second\ two][class="second two"] { float: right; width: 48px; height: 12px; background: yellow; }
+        \\</style><blockquote class="first one"><address class="second two"></address></blockquote>
+    , .{});
+    const sheets = try collectDocumentSheets(a, doc, env);
+    const styles = try compute(a, doc, sheets, env);
+    var w = doc.walk(dom.document_id);
+    var seen = false;
+    while (w.next()) |id| if (doc.isHtml(id, "address")) {
+        seen = true;
+        try std.testing.expectEqual(Float.right, styles.get(id).float);
+        try std.testing.expectEqual(@as(f64, 48), styles.get(id).width.px);
+    };
+    try std.testing.expect(seen);
 }
 
 test "style: backgrounds, gradients and radii" {

@@ -206,6 +206,10 @@ pub const Box = struct {
     y: f64 = 0,
     w: f64 = 0,
     h: f64 = 0,
+    /// How far relative positioning and `transform` moved the box from
+    /// where the flow placed it: what follows in the flow ignores it.
+    rel_dx: f64 = 0,
+    rel_dy: f64 = 0,
     /// Used margins, and the content box's inset from the border box.
     margin: [4]f64 = .{ 0, 0, 0, 0 },
     padding: [4]f64 = .{ 0, 0, 0, 0 },
@@ -264,6 +268,9 @@ pub const Layout = struct {
     fonts: Fonts,
     /// The host's pictures, if it has any.
     images: ?Images = null,
+    /// A `position: fixed` box exists: the viewport's rows no longer
+    /// move rigidly with a scroll (a host repaints whole).
+    has_fixed: bool = false,
     /// Chunked lists (`store`): an append never moves a box or a
     /// fragment, and a bump arena never pays for a doubling.
     boxes: store.Chunked(Box, 8) = .{},
@@ -389,8 +396,16 @@ fn isInlineBlockDisplay(d: style.Display) bool {
 /// Elements whose content is not laid out as their children (replaced
 /// or form controls): an atomic inline with a size of its own. A
 /// `button` is not one: its content is laid out, in its own face.
-fn isReplaced(doc: *const Document, id: NodeId) bool {
+fn isReplaced(l: *const Layout, id: NodeId) bool {
+    const doc = l.doc;
     const n = doc.get(id);
+    // An `<object>` is a picture only once its data has decoded; until
+    // then (and when it never does: an unknown type, a 404) its content
+    // is its fallback, laid out as any element's.
+    if (n.namespace == .html and std.mem.eql(u8, n.name, "object")) {
+        const imgs = l.images orelse return false;
+        return imgs.get(id) != null;
+    }
     // An outermost `<svg>` in HTML is a picture of its own markup.
     if (n.namespace == .svg and std.mem.eql(u8, n.name, "svg")) {
         const p = n.parent orelse return true;
@@ -420,7 +435,7 @@ fn buildBoxes(l: *Layout, parent: BoxId, id: NodeId) Error!void {
         while (c) |cid| : (c = doc.get(cid).next) try buildBoxes(l, parent, cid);
         return;
     }
-    const replaced = isReplaced(doc, id);
+    const replaced = isReplaced(l, id);
     var kind: Kind = .inline_box;
     if (replaced) {
         kind = if (isBlockDisplay(st.display)) .block else .inline_block;
@@ -799,8 +814,11 @@ fn placeFloat(l: *Layout, id: BoxId, bfc: *const Bfc, cb_x: f64, cb_w: f64, y_st
     var inner: Bfc = .{ .root = id };
     const avail = cb_w - b.margin[1] - b.margin[3] - horizontalExtras(b);
     const width = if (resolveLA(b.style.width, cb_w)) |w| (if (b.style.box_sizing == .border_box) w - horizontalExtras(b) else w) else blk: {
+        // Shrink-to-fit: the preferred widths are border-box ones (a
+        // float with borders was as wide again as them, 2026-10-07).
         const pref = try preferredWidths(l, id);
-        break :blk @min(@max(pref.min, avail), pref.max);
+        const extras = horizontalExtras(b);
+        break :blk @min(@max(pref.min - extras, avail), pref.max - extras);
     };
     b.w = constrainWidth(b, width, cb_w) + horizontalExtras(b);
     b.x = 0;
@@ -884,8 +902,27 @@ fn bottomCollapsible(b: *const Box) bool {
     return b.border[2] == 0 and b.padding[2] == 0 and !isBfcRoot(b) and b.style.height == .auto and b.style.min_height.px == 0 and b.kind != .inline_block;
 }
 
+fn bottomCollapsibleIn(l: *const Layout, b: *const Box) bool {
+    return b.border[2] == 0 and b.padding[2] == 0 and !isBfcRoot(b) and heightIsAuto(l, b) and b.style.min_height.px == 0 and b.kind != .inline_block;
+}
+
 /// Does this block hold nothing that separates its top and bottom
 /// margins (no lines, no in-flow child with content, no height)?
+/// Whether a box's `height` is auto for layout: `auto`, or a percentage
+/// (or calc) against a containing block whose height is itself auto
+/// (CSS 2.1 §10.5 — Acid2's `.empty { height: 10% }` is empty).
+fn heightIsAuto(l: *const Layout, b: *const Box) bool {
+    switch (b.style.height) {
+        .auto => return true,
+        .px => return false,
+        .percent, .calc => {
+            const p = b.parent orelse return true;
+            const pb = l.get(p);
+            return pb.kind != .root and pb.style.height == .auto;
+        },
+    }
+}
+
 fn collapsesThrough(l: *const Layout, id: BoxId) bool {
     const b = l.get(id);
     if (b.kind == .inline_block or b.kind == .root) return false;
@@ -893,7 +930,7 @@ fn collapsesThrough(l: *const Layout, id: BoxId) bool {
     // not arrived and has no size yet is 0 tall, and still not empty).
     if (isReplacedBox(l, b)) return false;
     if (b.border[0] != 0 or b.padding[0] != 0 or b.border[2] != 0 or b.padding[2] != 0) return false;
-    if (b.style.height != .auto or resolveLP(b.style.min_height, 0) > 0) return false;
+    if (!heightIsAuto(l, b) or resolveLP(b.style.min_height, 0) > 0) return false;
     if (isBfcRoot(b)) return false;
     if (hasInlineContent(l, id)) return !hasVisibleInline(l, id);
     for (b.children.items) |c| {
@@ -973,17 +1010,26 @@ fn layoutBlockChildren(l: *Layout, id: BoxId, bfc: *Bfc) Error!FlowEnd {
             try placeFloat(l, c, bfc, cb_x, cb_w, cursor + pending.value());
             continue;
         }
-        // Clearance: the box moves below the floats it clears, and the
-        // pending margin is spent.
+        const top = try collapsedTop(l, c, cb_w);
+        // Clearance (CSS 2.1 §9.5.2): where the border edge would land
+        // with every margin collapsed — the hypothetical position — is
+        // held against the floats to clear; when it is not past them,
+        // the edge lands at their bottom, the box's own top margin spent
+        // inside the clearance (which may be negative: Acid2's smile).
         if (cb.style.clear != .none) {
-            const cleared = clearY(l, bfc, cb.style.clear, cursor + pending.value());
-            if (cleared > cursor + pending.value()) {
-                cursor = cleared;
+            // A first child's top margin already sits above the parent.
+            var hyp = pending;
+            if (!first_collapsed) {
+                hyp.add(top.pos);
+                hyp.add(top.neg);
+            }
+            const hyp_border = cursor + hyp.value();
+            const cleared = clearY(l, bfc, cb.style.clear, hyp_border);
+            if (cleared > hyp_border) {
+                cursor = if (first_collapsed) cleared else cleared - top.value();
                 pending = .{};
-                first_collapsed = false;
             }
         }
-        const top = try collapsedTop(l, c, cb_w);
         if (first_collapsed) {
             // Already above us: the child starts at the content top.
             first_collapsed = false;
@@ -992,17 +1038,20 @@ fn layoutBlockChildren(l: *Layout, id: BoxId, bfc: *Bfc) Error!FlowEnd {
             pending.add(top.neg);
         }
         if (collapsesThrough(l, c)) {
-            // Its bottom margin joins the same pending margin; it takes no room.
-            const margins = resolveEdges(cb, cb_w);
-            pending.add(margins[2] orelse 0);
+            // Its bottom margin — and its empty descendants' (Acid2's
+            // `.empty` holds a child with a -6em bottom) — join the same
+            // pending margin; it takes no room.
             try positionEmptyBlock(l, c, bfc, cb_x, cursor + pending.value(), cb_w);
+            const bottom = try collapsedBottom(l, c);
+            pending.add(bottom.pos);
+            pending.add(bottom.neg);
             continue;
         }
         const y = cursor + pending.value();
         pending = .{};
         try layoutBlockAt(l, c, bfc, cb_x, y, cb_w);
         const laid = l.get(c);
-        cursor = laid.y + laid.h;
+        cursor = laid.y - laid.rel_dy + laid.h;
         // The child's bottom margin (collapsed with its last child's)
         // waits for the next sibling or the parent's bottom.
         const bottom = try collapsedBottom(l, c);
@@ -1018,7 +1067,8 @@ fn positionEmptyBlock(l: *Layout, id: BoxId, bfc: *Bfc, cb_x: f64, y: f64, cb_w:
     b.margin = .{ margins[0] orelse 0, margins[1] orelse 0, margins[2] orelse 0, margins[3] orelse 0 };
     b.x = cb_x + b.margin[3];
     b.y = y;
-    b.w = @max(0, cb_w - b.margin[1] - b.margin[3]);
+    // Its own width when it has one: the floats it places go by it.
+    b.w = if (resolveLA(b.style.width, cb_w)) |w| (if (b.style.box_sizing == .border_box) w else w + horizontalExtras(b)) else @max(0, cb_w - b.margin[1] - b.margin[3]);
     b.h = 0;
     b.laid_out = true;
     const children = try l.a.dupe(BoxId, b.children.items);
@@ -1037,7 +1087,7 @@ fn collapsedBottom(l: *Layout, id: BoxId) Error!Margin {
     const b = l.get(id);
     var m: Margin = .{};
     m.add(b.margin[2]);
-    if (!bottomCollapsible(b) or hasInlineContent(l, id)) return m;
+    if (!bottomCollapsibleIn(l, b) or hasInlineContent(l, id)) return m;
     var i = b.children.items.len;
     while (i > 0) {
         i -= 1;
@@ -1053,6 +1103,9 @@ fn collapsedBottom(l: *Layout, id: BoxId) Error!Margin {
 }
 
 fn containingBlockFor(l: *const Layout, id: BoxId) BoxId {
+    // A fixed box's containing block is the viewport: the root, whose
+    // height is the viewport's for an absolute (`layoutAbsolute`).
+    if (l.get(id).style.position == .fixed) return l.root;
     var p = l.get(id).parent;
     while (p) |pid| : (p = l.get(pid).parent) {
         const pb = l.get(pid);
@@ -1139,6 +1192,8 @@ fn layoutBlockContents(l: *Layout, id: BoxId, bfc: *Bfc, cb_w: f64) Error!void {
             const dx: f64 = resolveLA(st.inset[3], cb_w) orelse -(resolveLA(st.inset[1], cb_w) orelse 0);
             const dy: f64 = resolveLA(st.inset[0], 0) orelse -(resolveLA(st.inset[2], 0) orelse 0);
             try moveBox(l, id, dx, dy);
+            l.box(id).rel_dx += dx;
+            l.box(id).rel_dy += dy;
         }
         try translateBox(l, id);
         return;
@@ -1179,24 +1234,30 @@ fn layoutBlockContents(l: *Layout, id: BoxId, bfc: *Bfc, cb_w: f64) Error!void {
         content_h = resolveLA(st.height, cb_h orelse 0).?;
         if (st.box_sizing == .border_box) content_h -= verticalExtras(b);
     }
-    content_h = @max(content_h, resolveLP(st.min_height, cb_h orelse 0) - (if (st.box_sizing == .border_box) verticalExtras(b) else 0));
+    // `max-height` first, then `min-height`: a minimum above the maximum
+    // wins (CSS 2.1 §10.7; Acid2's scalp).
     switch (st.max_height) {
         .none => {},
-        .px => |x| content_h = @min(content_h, x),
+        .px => |x| content_h = @min(content_h, x - (if (st.box_sizing == .border_box) verticalExtras(b) else 0)),
         .percent => |p| if (cb_h) |h| {
-            content_h = @min(content_h, h * p / 100);
+            content_h = @min(content_h, h * p / 100 - (if (st.box_sizing == .border_box) verticalExtras(b) else 0));
         },
         .calc => |m| if (cb_h) |h| {
-            content_h = @min(content_h, m.of(h));
+            content_h = @min(content_h, m.of(h) - (if (st.box_sizing == .border_box) verticalExtras(b) else 0));
         },
     }
+    content_h = @max(content_h, resolveLP(st.min_height, cb_h orelse 0) - (if (st.box_sizing == .border_box) verticalExtras(b) else 0));
     b.h = @max(0, content_h) + verticalExtras(b);
     b.laid_out = true;
-    // Relative positioning shifts the box after layout.
+    // Relative positioning shifts the box after layout — the flow it
+    // sits in does not move (Acid2's smile: a child moved down by
+    // `bottom: -1em` once made its parent 12px taller, 2026-10-07).
     if (st.position == .relative or st.position == .sticky) {
         const dx: f64 = resolveLA(st.inset[3], cb_w) orelse -(resolveLA(st.inset[1], cb_w) orelse 0);
         const dy: f64 = resolveLA(st.inset[0], 0) orelse -(resolveLA(st.inset[2], 0) orelse 0);
         try moveBox(l, id, dx, dy);
+        l.box(id).rel_dx += dx;
+        l.box(id).rel_dy += dy;
     }
     try translateBox(l, id);
 }
@@ -2519,7 +2580,7 @@ fn layoutAtomic(l: *Layout, id: BoxId) Error!AtomicSize {
     const margins = resolveEdges(b, cb_w);
     b.margin = .{ margins[0] orelse 0, margins[1] orelse 0, margins[2] orelse 0, margins[3] orelse 0 };
     const extras = horizontalExtras(b);
-    if (b.node != null and isReplaced(l.doc, b.node.?)) {
+    if (b.node != null and isReplaced(l, b.node.?)) {
         const size = replacedSize(l, id, cb_w);
         b.x = 0;
         b.y = 0;
@@ -2698,7 +2759,11 @@ fn translateBox(l: *Layout, id: BoxId) Error!void {
     const b = l.get(id);
     const t = b.style.translate;
     if (t[0] == .px and t[0].px == 0 and t[1] == .px and t[1].px == 0) return;
-    try moveBox(l, id, resolveLP(t[0], b.w), resolveLP(t[1], b.h));
+    const dx = resolveLP(t[0], b.w);
+    const dy = resolveLP(t[1], b.h);
+    try moveBox(l, id, dx, dy);
+    l.box(id).rel_dx += dx;
+    l.box(id).rel_dy += dy;
 }
 
 /// A replaced box's content height once its content width is settled
@@ -2720,7 +2785,7 @@ fn attrNumber(doc: *const Document, node: NodeId, name: []const u8) ?f64 {
 }
 
 fn isReplacedBox(l: *const Layout, b: *const Box) bool {
-    return b.node != null and b.kind != .text and isReplaced(l.doc, b.node.?);
+    return b.node != null and b.kind != .text and isReplaced(l, b.node.?);
 }
 
 /// A fragment being assembled on the current line.
@@ -3559,6 +3624,7 @@ fn layoutFlexItem(l: *Layout, id: BoxId, x: f64, y: f64, content_w: f64, content
 /// An out-of-flow box for the end of layout, once however often its
 /// container was measured or laid out.
 fn addAbsolute(l: *Layout, id: BoxId) Error!void {
+    if (l.get(id).style.position == .fixed) l.has_fixed = true;
     for (l.absolutes.items) |ab| if (ab.box == id) return;
     try l.absolutes.append(l.a, .{ .box = id, .cb = containingBlockFor(l, id) });
 }
@@ -3712,7 +3778,21 @@ test "layout: lines wrap, floats intrude, inline-block sits on the baseline" {
 /// border box holds the point, text counting for its parent element;
 /// null over the canvas alone. A host's click or hover starts here and
 /// walks the DOM up to what it wants (a link, a control).
-pub fn hitTest(l: *const Layout, x: f64, y: f64) ?NodeId {
+/// Whether a box is inside a `position: fixed` subtree: laid out in
+/// viewport coordinates, painted without the scroll.
+pub fn inFixed(l: *const Layout, id: BoxId) bool {
+    if (!l.has_fixed) return false;
+    var cur: ?BoxId = id;
+    while (cur) |c| : (cur = l.get(c).parent) {
+        if (l.get(c).style.position == .fixed) return true;
+    }
+    return false;
+}
+
+/// The element under a point: `x`, `y` in document coordinates (the
+/// viewport's plus the scroll); a fixed subtree is tested against the
+/// viewport's.
+pub fn hitTest(l: *const Layout, x: f64, y: f64, scroll_y: f64) ?NodeId {
     var best: ?BoxId = null;
     var best_depth: usize = 0;
     // Inline content is where its fragments landed: one pass over them
@@ -3723,7 +3803,9 @@ pub fn hitTest(l: *const Layout, x: f64, y: f64) ?NodeId {
         const run = l.fragments.slice(i);
         i += run.len;
         for (run) |*f| {
-            if (f.dead or !(x >= f.x and x < f.x + f.w and y >= f.y and y < f.y + f.h)) continue;
+            if (f.dead or !(x >= f.x and x < f.x + f.w)) continue;
+            const yy = if (inFixed(l, f.box)) y - scroll_y else y;
+            if (!(yy >= f.y and yy < f.y + f.h)) continue;
             const depth = boxDepth(l, f.box);
             if (best == null or depth >= best_depth) {
                 best = f.box;
@@ -3738,8 +3820,10 @@ pub fn hitTest(l: *const Layout, x: f64, y: f64) ?NodeId {
         bi += run.len;
         for (run, 0..) |*b, k| {
             if (b.kind == .root or b.kind == .text or b.kind == .inline_box) continue;
-            if (!(b.laid_out and x >= b.x and x < b.x + b.w and y >= b.y and y < b.y + b.h)) continue;
+            if (!(b.laid_out and x >= b.x and x < b.x + b.w)) continue;
             const id: BoxId = @intCast(base + k);
+            const yy = if (inFixed(l, id)) y - scroll_y else y;
+            if (!(yy >= b.y and yy < b.y + b.h)) continue;
             const depth = boxDepth(l, id);
             if (best == null or depth >= best_depth) {
                 best = id;
@@ -3775,11 +3859,11 @@ test "layout: hit test finds the link under a point" {
     var fixed: FixedFonts = .{};
     const l = try layoutDocument(a, doc, styles, fixed.fonts(), 320, 240);
     // "go " is 3 cells of 8px; the link starts at x=24 on the line at y=40.
-    const hit = hitTest(l, 30, 50) orelse return error.TestUnexpectedResult;
+    const hit = hitTest(l, 30, 50, 0) orelse return error.TestUnexpectedResult;
     try std.testing.expect(doc.isHtml(hit, "a"));
-    const before = hitTest(l, 5, 50) orelse return error.TestUnexpectedResult;
+    const before = hitTest(l, 5, 50, 0) orelse return error.TestUnexpectedResult;
     try std.testing.expect(doc.isHtml(before, "p"));
-    const above = hitTest(l, 5, 10) orelse return error.TestUnexpectedResult;
+    const above = hitTest(l, 5, 10, 0) orelse return error.TestUnexpectedResult;
     try std.testing.expect(doc.isHtml(above, "div"));
 }
 

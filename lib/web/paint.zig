@@ -58,9 +58,9 @@ pub fn paintWith(l: *const Layout, canvas: *const Canvas, scroll_y: f64, opts: O
     const order = try p.l.a.dupe(layout.Absolute, l.absolutes.items);
     std.mem.sort(layout.Absolute, order, l, zBelow);
     var i: usize = 0;
-    while (i < order.len and zOf(l, order[i].box) < 0) : (i += 1) try p.paintBox(order[i].box);
+    while (i < order.len and zOf(l, order[i].box) < 0) : (i += 1) try p.paintPositioned(order[i].box);
     try p.paintBox(l.root);
-    while (i < order.len) : (i += 1) try p.paintBox(order[i].box);
+    while (i < order.len) : (i += 1) try p.paintPositioned(order[i].box);
     for (opts.highlights) |h| p.tint(h);
     if (opts.focus) |f| p.focusRing(f);
 }
@@ -111,6 +111,27 @@ const Painter = struct {
         p.canvas.fillRect(px(x0), px(yy), px(x1 - x0), px(y1 - yy), word);
     }
 
+    /// A positioned box from the global list: a fixed one (or one inside
+    /// a fixed subtree) was laid out in viewport coordinates and paints
+    /// without the scroll.
+    fn paintPositioned(p: *Painter, id: BoxId) Error!void {
+        if (!layout.inFixed(p.l, id)) return p.paintBox(id);
+        const saved = p.scroll;
+        p.scroll = 0;
+        defer p.scroll = saved;
+        try p.paintBox(id);
+    }
+
+    /// The area a background layer is positioned in: the box's padding
+    /// box, or the viewport for `background-attachment: fixed` (in the
+    /// painter's coordinates: the scroll is where the viewport is).
+    const Area = struct { x: f64, y: f64, w: f64, h: f64 };
+
+    fn backgroundArea(p: *const Painter, b: *const Box) Area {
+        if (b.style.background_attachment == .fixed) return .{ .x = 0, .y = p.scroll, .w = p.l.viewport_w, .h = p.l.viewport_h };
+        return .{ .x = b.x + b.border[3], .y = b.y + b.border[0], .w = b.w - b.border[1] - b.border[3], .h = b.h - b.border[0] - b.border[2] };
+    }
+
     fn paintBox(p: *Painter, id: BoxId) Error!void {
         const b = p.l.get(id);
         if (b.style.visibility != .visible or b.style.opacity == 0) return;
@@ -122,48 +143,101 @@ const Painter = struct {
             p.control(b, n, kind);
             return;
         };
-        if (b.node) |n| if (p.l.doc.isHtml(n, "img") or (p.l.doc.get(n).namespace == .svg and std.mem.eql(u8, p.l.doc.get(n).name, "svg"))) {
+        // A picture (an `img`, an `object` whose data decoded, an inline
+        // `svg`): its background and borders as any box's, then the
+        // picture in its content box, and no children.
+        var picture_bm: ?layout.Bitmap = null;
+        if (b.node) |n| if (p.l.doc.isHtml(n, "img") or p.l.doc.isHtml(n, "object") or (p.l.doc.get(n).namespace == .svg and std.mem.eql(u8, p.l.doc.get(n).name, "svg"))) {
             if (p.l.images) |imgs| if (imgs.get(n)) |bm| {
-                p.picture(b, bm);
-                return;
+                picture_bm = bm;
             };
         };
         // Backgrounds and borders on the border box (the root's are the
-        // canvas's).
-        if (b.kind != .root and b.kind != .inline_box and b.kind != .anon_block) {
-            const radii = p.radiiOf(b);
-            const rounded = radii[0] > 0 or radii[1] > 0 or radii[2] > 0 or radii[3] > 0;
-            if (!(isHtmlOrBody(p.l, id) and rootBackground(p.l) != null) and !p.maskedBackground(b)) {
-                if (b.style.background_color.a > 0) {
-                    // Rounded or translucent: blended per pixel.
-                    if (rounded or b.style.background_color.a < 1) p.roundRect(b.x, b.y, b.w, b.h, radii, null, b.style.background_color) else p.fill(b.x, b.y, b.w, b.h, b.style.background_color.word());
-                }
-                p.backgroundImage(b);
-            }
-            if (rounded) p.roundBorders(b, radii) else p.borders(b);
+        // canvas's), then the picture, or the content in the order CSS
+        // paints a stacking context's flow (Appendix E): every block's
+        // background first, then the floats, then the inline content —
+        // so a float covers the blocks beside it and text and atomics
+        // paint over the float (Acid2's eyes: an object in a line sits
+        // on a float, 2026-10-07).
+        if (b.kind != .root and (b.kind != .inline_box or picture_bm != null) and b.kind != .anon_block) p.paintSelf(b, id);
+        if (picture_bm) |bm| {
+            p.picture(b, bm);
+            return;
         }
-        // Clip children to the padding box when overflow says so.
         const saved = p.canvas;
-        const clips = b.style.overflow_x != .visible or b.style.overflow_y != .visible;
-        if (clips and b.kind != .root) {
-            const x0 = b.x + b.border[3];
-            const y0 = b.y + b.border[0] - p.scroll;
-            const x1 = x0 + b.w - b.border[1] - b.border[3];
-            const y1 = y0 + b.h - b.border[0] - b.border[2];
-            p.canvas.clip_x0 = @max(p.canvas.clip_x0, px(@max(0, x0)));
-            p.canvas.clip_y0 = @max(p.canvas.clip_y0, px(@max(0, y0)));
-            p.canvas.clip_x1 = @min(p.canvas.clip_x1, px(@max(0, x1)));
-            p.canvas.clip_y1 = @min(p.canvas.clip_y1, px(@max(0, y1)));
-        }
+        p.clipTo(b);
         defer p.canvas = saved;
-        // In-flow block children first, then floats, so a float paints
-        // over the blocks it sits beside.
+        try p.paintFlow(id, .backgrounds);
+        try p.paintFlow(id, .floats);
+        try p.paintFlow(id, .inlines);
+    }
+
+    /// A box's own background and borders.
+    fn paintSelf(p: *Painter, b: *const Box, id: BoxId) void {
+        const radii = p.radiiOf(b);
+        const rounded = radii[0] > 0 or radii[1] > 0 or radii[2] > 0 or radii[3] > 0;
+        if (!(isHtmlOrBody(p.l, id) and rootBackground(p.l) != null) and !p.maskedBackground(b)) {
+            if (b.style.background_color.a > 0) {
+                // Rounded or translucent: blended per pixel.
+                if (rounded or b.style.background_color.a < 1) p.roundRect(b.x, b.y, b.w, b.h, radii, null, b.style.background_color) else p.fill(b.x, b.y, b.w, b.h, b.style.background_color.word());
+            }
+            p.backgroundImage(b);
+        }
+        if (rounded) p.roundBorders(b, radii) else p.borders(b);
+    }
+
+    /// Narrow the canvas's clip to the box's padding box when its
+    /// overflow says so (the caller restores the canvas).
+    fn clipTo(p: *Painter, b: *const Box) void {
+        const clips = b.style.overflow_x != .visible or b.style.overflow_y != .visible;
+        if (!clips or b.kind == .root) return;
+        const x0 = b.x + b.border[3];
+        const y0 = b.y + b.border[0] - p.scroll;
+        const x1 = x0 + b.w - b.border[1] - b.border[3];
+        const y1 = y0 + b.h - b.border[0] - b.border[2];
+        p.canvas.clip_x0 = @max(p.canvas.clip_x0, px(@max(0, x0)));
+        p.canvas.clip_y0 = @max(p.canvas.clip_y0, px(@max(0, y0)));
+        p.canvas.clip_x1 = @min(p.canvas.clip_x1, px(@max(0, x1)));
+        p.canvas.clip_y1 = @min(p.canvas.clip_y1, px(@max(0, y1)));
+    }
+
+    const Phase = enum { backgrounds, floats, inlines };
+
+    /// Whether a block-level box paints as one unit at the backgrounds
+    /// phase (a control, a picture): its content is not a flow.
+    fn isAtomicBlock(p: *const Painter, b: *const Box) bool {
+        const n = b.node orelse return false;
+        if (controlOf(p.l.doc, n)) |_| if (!p.l.doc.isHtml(n, "button")) return true;
+        if (p.l.doc.isHtml(n, "img") or p.l.doc.isHtml(n, "object") or (p.l.doc.get(n).namespace == .svg and std.mem.eql(u8, p.l.doc.get(n).name, "svg"))) {
+            if (p.l.images) |imgs| if (imgs.get(n) != null) return true;
+        }
+        return false;
+    }
+
+    /// One phase of a box's in-flow content: its block descendants'
+    /// backgrounds, or the floats among them, or the lines.
+    fn paintFlow(p: *Painter, id: BoxId, phase: Phase) Error!void {
+        const b = p.l.get(id);
         for (b.children.items) |c| {
             const cb = p.l.get(c);
+            if (cb.isFloat()) {
+                if (phase == .floats) try p.paintBox(c);
+                continue;
+            }
             if (cb.isOutOfFlow()) continue;
-            if (cb.isBlockLevel()) try p.paintBox(c);
+            if (!cb.isBlockLevel()) continue;
+            if (cb.style.visibility != .visible or cb.style.opacity == 0 or cb.style.display == .none) continue;
+            if (p.isAtomicBlock(cb)) {
+                if (phase == .backgrounds) try p.paintBox(c);
+                continue;
+            }
+            if (phase == .backgrounds and cb.kind != .anon_block) p.paintSelf(cb, c);
+            const saved = p.canvas;
+            p.clipTo(cb);
+            try p.paintFlow(c, phase);
+            p.canvas = saved;
         }
-        for (b.children.items) |c| if (p.l.get(c).isFloat()) try p.paintBox(c);
+        if (phase != .inlines) return;
         // Lines: inline backgrounds, then text and atomics in order — a
         // line wholly outside the clip band paints nothing (a band
         // repaint walks every box of the page).
@@ -195,6 +269,9 @@ const Painter = struct {
         for (0..4) |side| {
             const w = b.border[side];
             if (w <= 0) continue;
+            // A transparent border takes its room and paints nothing
+            // (Acid2's picture frame, 2026-10-07).
+            if (st.borderColor(side).a <= 0) continue;
             const c = borderShade(st.borderColor(side), st.border_style[side], side);
             switch (side) {
                 0 => p.fill(b.x, b.y, b.w, w, c),
@@ -370,11 +447,11 @@ const Painter = struct {
     /// sized by `size` from the picture's natural size, placed by
     /// `position`, started early enough to cover the border box when it
     /// repeats. Null when it has no size.
-    fn tilesFor(b: *const Box, bm: layout.Bitmap, size: style.BackgroundSize, position: [2]style.LengthPercent, repeat: [2]bool) ?Tiles {
-        const ax = b.x + b.border[3];
-        const ay = b.y + b.border[0];
-        const aw = b.w - b.border[1] - b.border[3];
-        const ah = b.h - b.border[0] - b.border[2];
+    fn tilesFor(area: Area, bm: layout.Bitmap, size: style.BackgroundSize, position: [2]style.LengthPercent, repeat: [2]bool) ?Tiles {
+        const ax = area.x;
+        const ay = area.y;
+        const aw = area.w;
+        const ah = area.h;
         if (aw <= 0 or ah <= 0 or bm.w == 0 or bm.h == 0) return null;
         const scale = style.px_scale / bm.density;
         const nw = @as(f64, @floatFromInt(bm.w)) * scale;
@@ -425,8 +502,8 @@ const Painter = struct {
             .calc => |m| m.of(ah - th),
         };
         var t: Tiles = .{ .x = ax + off_x, .y = ay + off_y, .w = tw, .h = th, .rep_x = repeat[0], .rep_y = repeat[1] };
-        if (t.rep_x) t.x -= @ceil((t.x - b.x) / tw) * tw;
-        if (t.rep_y) t.y -= @ceil((t.y - b.y) / th) * th;
+        if (t.rep_x) t.x -= @ceil((t.x - ax) / tw) * tw;
+        if (t.rep_y) t.y -= @ceil((t.y - ay) / th) * th;
         return t;
     }
 
@@ -446,20 +523,28 @@ const Painter = struct {
     /// to the border box; or a linear gradient over it.
     fn backgroundImage(p: *const Painter, b: *const Box) void {
         const st = b.style;
+        const area = p.backgroundArea(b);
         switch (st.background_image) {
             .none => return,
-            .linear => |g| return p.gradient(b, g.angle, g.stops, g.repeating),
+            .linear => |g| return p.gradient(area, b, g.angle, g.stops, g.repeating),
             .url => {},
         }
         const imgs = p.l.images orelse return;
         const bm = imgs.background(st.background_image.url, st.background_base) orelse return;
-        const t = tilesFor(b, bm, st.background_size, st.background_position, st.background_repeat) orelse return;
+        const t = tilesFor(area, bm, st.background_size, st.background_position, st.background_repeat) orelse return;
         const q = p.clippedTo(b) orelse return;
+        // Tiles from the area's origin, as far as the box reaches (an
+        // area above the box — the viewport, scrolled — starts them
+        // where they would land).
         var ty = t.y;
         var rows: usize = 0;
         while (ty < b.y + b.h and rows < 4096) : (rows += 1) {
+            if (t.rep_y and ty + t.h <= b.y) {
+                ty += t.h * @floor((b.y - ty) / t.h);
+            }
             var tx = t.x;
             var cols: usize = 0;
+            if (t.rep_x and tx + t.w <= b.x) tx += t.w * @floor((b.x - tx) / t.w);
             while (tx < b.x + b.w and cols < 4096) : (cols += 1) {
                 q.bitmap(bm, tx, ty - p.scroll, t.w, t.h, 0, 0, @floatFromInt(bm.w), @floatFromInt(bm.h));
                 if (!t.rep_x) break;
@@ -481,7 +566,7 @@ const Painter = struct {
         const bm = imgs.background(st.mask_image.url, st.mask_base) orelse return true;
         const c = st.background_color;
         if (c.a <= 0) return true;
-        const t = tilesFor(b, bm, st.mask_size, st.mask_position, st.mask_repeat) orelse return true;
+        const t = tilesFor(.{ .x = b.x + b.border[3], .y = b.y + b.border[0], .w = b.w - b.border[1] - b.border[3], .h = b.h - b.border[0] - b.border[2] }, bm, st.mask_size, st.mask_position, st.mask_repeat) orelse return true;
         const q = p.clippedTo(b) orelse return true;
         const word = c.word();
         var ty = t.y;
@@ -540,12 +625,13 @@ const Painter = struct {
     /// A linear gradient over the border box: the colour at each pixel
     /// from its projection on the gradient line (CSS's length for the
     /// angle), stops interpolated in straight sRGB.
-    fn gradient(p: *const Painter, b: *const Box, angle: f64, stops: []const style.Stop, repeating: bool) void {
-        if (stops.len == 0 or b.w <= 0 or b.h <= 0) return;
+    /// A linear gradient over `area`, painted inside the box `b`.
+    fn gradient(p: *const Painter, area: Area, b: *const Box, angle: f64, stops: []const style.Stop, repeating: bool) void {
+        if (stops.len == 0 or area.w <= 0 or area.h <= 0) return;
         const rad = angle * std.math.pi / 180;
         const dx = @sin(rad);
         const dy = -@cos(rad);
-        const len = @abs(b.w * dx) + @abs(b.h * dy);
+        const len = @abs(area.w * dx) + @abs(area.h * dy);
         if (len <= 0) return;
         // Stop positions as fractions, the unplaced spread between the
         // placed (CSS Images §3.5.1).
@@ -572,8 +658,8 @@ const Painter = struct {
             for (i..j) |k| pos[k] = from + (to - from) * @as(f64, @floatFromInt(k - i + 1)) / @as(f64, @floatFromInt(j - i + 1));
             i = j;
         }
-        const cxm = b.x + b.w / 2;
-        const cym = b.y + b.h / 2;
+        const cxm = area.x + area.w / 2;
+        const cym = area.y + area.h / 2;
         const cb = p.clipBounds(b.x, b.y, b.w, b.h);
         const y0 = cb.y0;
         const y1 = cb.y1;
@@ -856,22 +942,100 @@ fn optionText(doc: *const Document, id: NodeId) []const u8 {
 
 const html = @import("html.zig");
 const dom = @import("dom.zig");
+const url = @import("url.zig");
+const image = @import("../image.zig");
 
 /// Render a page into a fresh white canvas of `w`×`h` with the test fonts.
 pub fn renderForTest(a: std.mem.Allocator, src: []const u8, w: usize, h: usize) ![]u32 {
+    return renderForTestWith(a, src, w, h, .{});
+}
+
+pub const RenderOpts = struct {
+    /// Pictures for the page's `img`/`object` and backgrounds (the test
+    /// harness decodes `data:` URLs through `TestImages`).
+    images: ?layout.Images = null,
+    /// Scroll so the element with this id has its border box's top at
+    /// the viewport's (`scrollIntoView`), before painting.
+    scroll_to: ?[]const u8 = null,
+};
+
+pub fn renderForTestWith(a: std.mem.Allocator, src: []const u8, w: usize, h: usize, opts: RenderOpts) ![]u32 {
     const doc = try html.parse(a, src, .{});
     const env: style.Env = .{ .width = @floatFromInt(w), .height = @floatFromInt(h) };
     const sheets = try style.collectDocumentSheets(a, doc, env);
     const styles = try a.create(style.Styles);
     styles.* = try style.compute(a, doc, sheets, env);
     var fixed: layout.FixedFonts = .{};
-    const l = try layout.layoutDocument(a, doc, styles, fixed.fonts(), @floatFromInt(w), @floatFromInt(h));
+    const l = try layout.layoutDocumentWith(a, doc, styles, fixed.fonts(), opts.images, @floatFromInt(w), @floatFromInt(h));
+    var scroll: f64 = 0;
+    if (opts.scroll_to) |want| {
+        var n: usize = 0;
+        const target: ?dom.NodeId = while (n < doc.nodes.len) : (n += 1) {
+            const nid: dom.NodeId = @intCast(n);
+            if (doc.get(nid).kind == .element) if (doc.getAttr(nid, "id")) |v| if (std.mem.eql(u8, v, want)) break nid;
+        } else null;
+        if (target) |t| {
+            var bi: usize = 0;
+            while (bi < l.boxes.len) {
+                const run = l.boxes.slice(bi);
+                bi += run.len;
+                for (run) |*b| if (b.node == t and b.kind != .text) {
+                    // Whole pixels, as a browser scrolls.
+                    scroll = @round(@max(0, @min(b.y, l.height - @as(f64, @floatFromInt(h)))));
+                    break;
+                };
+            }
+        }
+    }
     const px = try a.alloc(u32, w * h);
     const canvas = Canvas.init(px.ptr, w, h);
     canvas.fillAll(0xffffff);
-    try paint(l, &canvas, 0);
+    try paint(l, &canvas, scroll);
     return px;
 }
+
+/// Pictures for a test page: `data:` URLs decoded (the `src` of an
+/// `img`, the `data` of an `object`, a background's url), anything
+/// else missing — an `object` naming a URL that is not a picture falls
+/// back, as it would for a 404.
+pub const TestImages = struct {
+    a: std.mem.Allocator,
+    doc: *const dom.Document,
+    cache: std.ArrayList(Entry) = .empty,
+
+    const Entry = struct { key: []const u8, bm: ?layout.Bitmap };
+
+    pub fn images(t: *TestImages) layout.Images {
+        return .{ .ctx = @ptrCast(t), .vtable = &.{ .get = get, .background = background } };
+    }
+
+    fn decode(t: *TestImages, href: []const u8) ?layout.Bitmap {
+        for (t.cache.items) |e| if (std.mem.eql(u8, e.key, href)) return e.bm;
+        const bm: ?layout.Bitmap = blk: {
+            const data = (url.decodeData(t.a, href) catch null) orelse break :blk null;
+            if (!std.mem.startsWith(u8, data.mime, "image/")) break :blk null;
+            const img = image.decode(t.a, data.bytes) catch break :blk null;
+            break :blk .{ .w = img.w, .h = img.h, .rgba = img.rgba };
+        };
+        t.cache.append(t.a, .{ .key = t.a.dupe(u8, href) catch return null, .bm = bm }) catch {};
+        return bm;
+    }
+
+    fn get(ctx: *anyopaque, node: dom.NodeId) ?layout.Bitmap {
+        const t: *TestImages = @ptrCast(@alignCast(ctx));
+        const n = t.doc.get(node);
+        if (n.kind != .element) return null;
+        const attr = if (std.mem.eql(u8, n.name, "object")) "data" else "src";
+        const href = t.doc.getAttr(node, attr) orelse return null;
+        return t.decode(href);
+    }
+
+    fn background(ctx: *anyopaque, href: []const u8, base: ?[]const u8) ?layout.Bitmap {
+        _ = base;
+        const t: *TestImages = @ptrCast(@alignCast(ctx));
+        return t.decode(href);
+    }
+};
 
 const verbose = false;
 
@@ -947,11 +1111,74 @@ test "paint: the reftests, counted" {
             diff = i;
             break;
         };
-        if (diff == null) passed += 1 else if (verbose) std.debug.print("--- {s}: first difference at ({d}, {d}): {x:0>6} vs {x:0>6}\n", .{ name, diff.? % w, diff.? / w, got[diff.?] & 0xffffff, want[diff.?] & 0xffffff });
+        if (diff == null) passed += 1 else if (verbose) {
+            std.debug.print("--- {s}: first difference at ({d}, {d}): {x:0>6} vs {x:0>6}\n", .{ name, diff.? % w, diff.? / w, got[diff.?] & 0xffffff, want[diff.?] & 0xffffff });
+            // Where each render painted anything but white, as a bounding box.
+            for ([_][]const u32{ got, want }, [_][]const u8{ "got", "want" }) |pix, label| {
+                var x0: usize = w;
+                var y0: usize = h;
+                var x1: usize = 0;
+                var y1: usize = 0;
+                for (pix, 0..) |v, i| if (v & 0xffffff != 0xffffff) {
+                    x0 = @min(x0, i % w);
+                    x1 = @max(x1, i % w + 1);
+                    y0 = @min(y0, i / w);
+                    y1 = @max(y1, i / w + 1);
+                };
+                std.debug.print("    {s}: painted ({d},{d})-({d},{d})\n", .{ label, x0, y0, x1, y1 });
+            }
+        }
     }
     std.debug.print("reftests: {d}/{d} agree\n", .{ passed, names.items.len });
     try std.testing.expectEqual(names.items.len, passed);
     try std.testing.expect(names.items.len >= 16);
+}
+
+// Acid2 (tools/fetch-acid2.sh into tools/testdata/acid2, ignored by git):
+// the test scrolled to its "Hello World!" anchor on the 400×300 canvas
+// of WPT's reftest wrapper, against the pixel-for-pixel CSS reference.
+// The count of differing pixels is printed; both renders are written
+// as PPMs under zig-out when they differ.
+test "paint: Acid2 against its pixel reference" {
+    const io = std.testing.io;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var dir = std.Io.Dir.cwd().openDir(io, "tools/testdata/acid2", .{}) catch {
+        std.debug.print("acid2 (host): not fetched (tools/fetch-acid2.sh); skipped\n", .{});
+        return error.SkipZigTest;
+    };
+    defer dir.close(io);
+    const test_src = try dir.readFileAlloc(io, "test.html", a, .limited(1 << 20));
+    const ref_src = try dir.readFileAlloc(io, "px-reference.html", a, .limited(1 << 20));
+    const w: usize = 400;
+    const h: usize = 300;
+    // The pictures: the document is parsed once more for the image
+    // source (the harness parses its own copy to render).
+    const doc = try html.parse(a, test_src, .{});
+    var ti: TestImages = .{ .a = a, .doc = doc };
+    const got = try renderForTestWith(a, test_src, w, h, .{ .images = ti.images(), .scroll_to = "top" });
+    const ref_doc = try html.parse(a, ref_src, .{});
+    var ri: TestImages = .{ .a = a, .doc = ref_doc };
+    const want = try renderForTestWith(a, ref_src, w, h, .{ .images = ri.images() });
+    var differ: usize = 0;
+    var first: ?usize = null;
+    for (got, want, 0..) |g, r, i| if ((g & 0xffffff) != (r & 0xffffff)) {
+        differ += 1;
+        if (first == null) first = i;
+    };
+    if (differ == 0) {
+        std.debug.print("acid2 (host): agrees with its reference\n", .{});
+    } else {
+        std.debug.print("acid2 (host): {d} of {d} pixels differ, first at ({d}, {d})\n", .{ differ, w * h, first.? % w, first.? / w });
+        for ([_][]const u8{ "zig-out/acid2-got.ppm", "zig-out/acid2-want.ppm" }, [_][]const u32{ got, want }) |path, pix| {
+            var ppm: std.ArrayList(u8) = .empty;
+            try ppm.print(a, "P6\n{d} {d}\n255\n", .{ w, h });
+            for (pix) |v| try ppm.appendSlice(a, &.{ @intCast((v >> 16) & 0xff), @intCast((v >> 8) & 0xff), @intCast(v & 0xff) });
+            std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = ppm.items }) catch {};
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), differ);
 }
 
 // A line with hundreds of inline boxes: the spans appended for them grow
