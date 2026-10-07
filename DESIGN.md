@@ -8189,6 +8189,27 @@ from its shown value each frame, so it converged and never arrived —
 the page keeps `base_styles` (the cascade's) for the engine and
 `styles` (the animated copy) for layout.
 
+**Stage 9, the WPT subsets (as built, 2026-10-07).** `tools/fetch-wpt.sh`
+reads `tools/testdata/web/wpt-reftests.txt`, fetches each test at the
+pin, extracts the `rel=match` and stylesheet links and the pictures it
+names (BSD `sed` has no alternation: `grep -oE` does the extracting) and
+fetches those beside it, `../reference/` landing under the module's
+parent. The harness (`paint.zig`, "the WPT reftest subsets, counted")
+walks `tools/testdata/wpt/css-*`, skips tests with scripts or a
+`reftest-wait`, finds the reference through `matchRef`, renders both at
+800×600 through `renderForTestWith` with `RenderOpts.dir` — a
+`DirLoader` feeding `collectDocumentSheetsLoading` the linked sheets by
+relative path, absolute `/fonts/` and `/css/` paths unread since the
+Ahem face is built into `FixedFonts` (`isAhem`: a square the font size
+wide and tall, ascent 0.8 and descent 0.2, `p` and `É` their halves, a
+space blank, no inset) — and prints a count per module. The first run
+was 56/64, 3/17 and 2/8; the fixes it drove are in ROADMAP's entry
+(CDATA around an XHTML sheet, transformed containing blocks, per-axis
+overflow clipping, relative percentage insets and `calc()` against
+indefinite heights, relative inline boxes moving their fragments and
+split-out blocks, `overflow-clip-margin`), and the run ends at 61/64,
+8/17 and 4/8 with each miss named.
+
 ## JavaScript
 
 The decision row "JavaScript" (2026-09-24) fixes the shape: `lib/js/` is

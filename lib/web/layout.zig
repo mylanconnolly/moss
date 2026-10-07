@@ -1078,6 +1078,13 @@ fn layoutBlockChildren(l: *Layout, id: BoxId, bfc: *Bfc) Error!FlowEnd {
         const y = cursor + pending.value();
         pending = .{};
         try layoutBlockAt(l, c, bfc, cb_x, y, cb_w);
+        // A block split out of a relatively positioned inline moves with it.
+        const split_off = splitAncestorOffset(l, c, cb_w);
+        if (split_off[0] != 0 or split_off[1] != 0) {
+            try moveBox(l, c, split_off[0], split_off[1]);
+            l.box(c).rel_dx += split_off[0];
+            l.box(c).rel_dy += split_off[1];
+        }
         const laid = l.get(c);
         cursor = laid.y - laid.rel_dy + laid.h;
         // The child's bottom margin (collapsed with its last child's)
@@ -1130,15 +1137,55 @@ fn collapsedBottom(l: *Layout, id: BoxId) Error!Margin {
     return m;
 }
 
+/// What a relative box's percentage `top`/`bottom` resolve against: its
+/// containing block's content height when that is specified, else
+/// nothing (CSS 2.1 §9.3.2: as `auto`).
+/// A relative box's vertical inset: a percentage, or a calc with one,
+/// against an indefinite containing-block height is `auto`.
+fn relativeInset(lp: style.LengthAuto, cb_h: f64, definite: bool) ?f64 {
+    switch (lp) {
+        .auto => return null,
+        .px => |x| return x,
+        .percent => |pc| return if (definite) cb_h * pc / 100 else null,
+        .calc => |m| return if (definite or m.pct == 0) m.of(cb_h) else null,
+    }
+}
+
+fn relativeCbDefinite(l: *const Layout, id: BoxId) bool {
+    var p = l.get(id).parent;
+    while (p) |pid| : (p = l.get(pid).parent) {
+        const pb = l.get(pid);
+        if (pb.kind == .anon_block or pb.kind == .inline_box) continue;
+        if (pb.kind == .root) return false;
+        return pb.style.height != .auto;
+    }
+    return false;
+}
+
+fn relativeCbHeight(l: *const Layout, id: BoxId) f64 {
+    var p = l.get(id).parent;
+    while (p) |pid| : (p = l.get(pid).parent) {
+        const pb = l.get(pid);
+        if (pb.kind == .anon_block or pb.kind == .inline_box) continue;
+        if (pb.kind == .root) return 0;
+        return if (pb.style.height == .auto) 0 else pb.contentH();
+    }
+    return 0;
+}
+
 fn containingBlockFor(l: *const Layout, id: BoxId) BoxId {
-    // A fixed box's containing block is the viewport: the root, whose
-    // height is the viewport's for an absolute (`layoutAbsolute`).
-    if (l.get(id).style.position == .fixed) return l.root;
+    // A transformed ancestor is a containing block for absolute and
+    // fixed descendants (CSS Transforms §2); a fixed box's is otherwise
+    // the viewport: the root, whose height is the viewport's for an
+    // absolute (`layoutAbsolute`).
+    const fixed = l.get(id).style.position == .fixed;
     var p = l.get(id).parent;
     while (p) |pid| : (p = l.get(pid).parent) {
         const pb = l.get(pid);
         if (pb.kind == .root) return pid;
-        if (pb.style.position != .static and pb.kind != .anon_block) return pid;
+        if (pb.kind == .anon_block) continue;
+        if (pb.style.has_transform) return pid;
+        if (!fixed and pb.style.position != .static) return pid;
     }
     return l.root;
 }
@@ -1217,8 +1264,10 @@ fn layoutBlockContents(l: *Layout, id: BoxId, bfc: *Bfc, cb_w: f64) Error!void {
         b.h = size + verticalExtras(b);
         b.laid_out = true;
         if (st.position == .relative) {
+            const cb_h = relativeCbHeight(l, id);
+            const definite = relativeCbDefinite(l, id);
             const dx: f64 = resolveLA(st.inset[3], cb_w) orelse -(resolveLA(st.inset[1], cb_w) orelse 0);
-            const dy: f64 = resolveLA(st.inset[0], 0) orelse -(resolveLA(st.inset[2], 0) orelse 0);
+            const dy: f64 = relativeInset(st.inset[0], cb_h, definite) orelse -(relativeInset(st.inset[2], cb_h, definite) orelse 0);
             try moveBox(l, id, dx, dy);
             l.box(id).rel_dx += dx;
             l.box(id).rel_dy += dy;
@@ -1282,8 +1331,10 @@ fn layoutBlockContents(l: *Layout, id: BoxId, bfc: *Bfc, cb_w: f64) Error!void {
     // sits in does not move (Acid2's smile: a child moved down by
     // `bottom: -1em` once made its parent 12px taller, 2026-10-07).
     if (st.position == .relative) {
+        const rel_h = relativeCbHeight(l, id);
+        const definite = relativeCbDefinite(l, id);
         const dx: f64 = resolveLA(st.inset[3], cb_w) orelse -(resolveLA(st.inset[1], cb_w) orelse 0);
-        const dy: f64 = resolveLA(st.inset[0], 0) orelse -(resolveLA(st.inset[2], 0) orelse 0);
+        const dy: f64 = relativeInset(st.inset[0], rel_h, definite) orelse -(relativeInset(st.inset[2], rel_h, definite) orelse 0);
         try moveBox(l, id, dx, dy);
         l.box(id).rel_dx += dx;
         l.box(id).rel_dy += dy;
@@ -3136,7 +3187,65 @@ noinline fn layoutInlineContent(l: *Layout, id: BoxId, bfc: *Bfc) Error!f64 {
             for (b.lines.items[1..]) |*later| later.first_frag += 1;
         }
     }
+    // Relatively positioned inline boxes: what is inside them moves by
+    // their offsets (an atomic inline's box with its fragment).
+    const rel_h: f64 = if (st.height == .px) st.height.px else 0;
+    const definite = st.height != .auto;
+    for (l.box(id).lines.items) |ln| for (ln.first_frag..ln.first_frag + ln.frag_count) |fi| {
+        const f = l.fragments.at(fi);
+        const from = if (f.kind == .atomic) l.get(f.box).parent else f.box;
+        const off = inlineOffset(l, from, cw, rel_h, definite);
+        if (off[0] == 0 and off[1] == 0) continue;
+        f.x += off[0];
+        f.y += off[1];
+        if (f.kind == .atomic) try moveBox(l, f.box, off[0], off[1]);
+    };
     return y - b.contentY();
+}
+
+/// The relative offsets of the inline boxes from `from` up to the block
+/// container, summed.
+fn inlineOffset(l: *const Layout, from: ?BoxId, cb_w: f64, cb_h: f64, definite: bool) [2]f64 {
+    var off: [2]f64 = .{ 0, 0 };
+    var cur = from;
+    while (cur) |c| : (cur = l.get(c).parent) {
+        const b = l.get(c);
+        if (b.kind != .inline_box and b.kind != .text) break;
+        if (b.kind == .inline_box and b.style.position == .relative) {
+            const st = b.style;
+            off[0] += resolveLA(st.inset[3], cb_w) orelse -(resolveLA(st.inset[1], cb_w) orelse 0);
+            off[1] += relativeInset(st.inset[0], cb_h, definite) orelse -(relativeInset(st.inset[2], cb_h, definite) orelse 0);
+        }
+    }
+    return off;
+}
+
+/// A block split out of a relatively positioned inline (`splitInlines`
+/// made it the container's child): the inline's offsets, found through
+/// the document's parents between the block and the container.
+fn splitAncestorOffset(l: *const Layout, id: BoxId, cb_w: f64) [2]f64 {
+    var off: [2]f64 = .{ 0, 0 };
+    const b = l.get(id);
+    const node = b.node orelse return off;
+    const container = b.parent orelse return off;
+    const cb = l.get(container);
+    const cnode = cb.node;
+    const cb_h: f64 = if (cb.style.height == .px) cb.style.height.px else 0;
+    const definite = cb.style.height != .auto;
+    var cur = l.doc.get(node).parent;
+    var depth: usize = 0;
+    while (cur) |n| : (cur = l.doc.get(n).parent) {
+        if (cnode != null and n == cnode.?) break;
+        depth += 1;
+        if (depth > 32) break;
+        if (l.doc.get(n).kind != .element or n >= l.styles.computed.len) continue;
+        const st = l.styles.get(n);
+        if (st.position == .relative and st.display == .@"inline") {
+            off[0] += resolveLA(st.inset[3], cb_w) orelse -(resolveLA(st.inset[1], cb_w) orelse 0);
+            off[1] += relativeInset(st.inset[0], cb_h, definite) orelse -(relativeInset(st.inset[2], cb_h, definite) orelse 0);
+        }
+    }
+    return off;
 }
 
 fn endsWithCjk(text: []const u8) bool {

@@ -50,5 +50,14 @@ harness renders the test scrolled to `#top` on a 400×300 canvas beside
 pixels agree (`acid2 (host): agrees with its reference`); without the
 files it says so and skips.
 
-Still to vendor, with the stage that first reads them: WPT reftest
-subsets per layout module (stages 4 and 9).
+## WPT reftest subsets
+
+Fetched, not vendored: `tools/fetch-wpt.sh` fetches the tests listed in
+`web/wpt-reftests.txt` (per module under `css/`) at the pin in the
+script into `wpt/`, each beside the reference its `rel=match` names and
+the sheets it links (a shared `../reference/` one lands under
+`wpt/reference/`). The harness renders test and reference on an 800×600
+canvas with the Ahem face built into the test fonts, skips scripted and
+`reftest-wait` tests, and prints `wpt/<module>: N/M agree` — a number
+the stage reports, never asserts. To widen the measurement, add tests
+to the list and re-run the script (it refetches when the list changes).

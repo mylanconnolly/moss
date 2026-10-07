@@ -155,7 +155,11 @@ with `insertRule`/`deleteRule`. `MutationObserver` reports the tree,
 attributes and text changing, delivered as a microtask; `onclick="…"`
 attributes and `el.onclick = f` properties run; `document.write` under
 a parser-inserted script inserts after it; `localStorage.foo` reads
-and writes items. Acid2 is a host reftest: `tools/fetch-acid2.sh` fetches
+and writes items. The layout engine is also measured against WPT
+reftest subsets (`tools/fetch-wpt.sh`, a curated list per module;
+`zig build test` prints `wpt/<module>: N/M agree`): css-transforms
+61/64, css-position 8/17, css-overflow 4/8 on 2026-10-07. Acid2 is a
+host reftest: `tools/fetch-acid2.sh` fetches
 WPT's copy with its pixel-for-pixel CSS reference, and `zig build test`
 renders the test scrolled to its anchor beside the reference and asserts
 they agree (fixed positioning, viewport-anchored backgrounds, object

@@ -110,6 +110,7 @@ pub const WhiteSpace = enum { normal, nowrap, pre, pre_wrap, pre_line, break_spa
 pub const ListStyleType = enum { disc, circle, square, decimal, lower_alpha, upper_alpha, lower_roman, upper_roman, none };
 pub const ListStylePosition = enum { inside, outside };
 pub const Overflow = enum { visible, hidden, scroll, auto, clip };
+pub const ClipBox = enum { content_box, padding_box, border_box };
 /// `background-attachment`: `fixed` anchors the image to the viewport
 /// (its positioning area), the others to the box.
 pub const BackgroundAttachment = enum { scroll, fixed, local };
@@ -251,6 +252,10 @@ pub const Computed = struct {
     list_style_position: ListStylePosition = .outside,
     overflow_x: Overflow = .visible,
     overflow_y: Overflow = .visible,
+    /// `overflow-clip-margin`: how far past the padding box (or the box
+    /// named) an `overflow: clip` box's clip reaches.
+    overflow_clip_margin: f64 = 0,
+    overflow_clip_box: ClipBox = .padding_box,
     visibility: Visibility = .visible,
     cursor: Cursor = .auto,
     opacity: f64 = 1,
@@ -292,6 +297,9 @@ pub const Computed = struct {
     /// `translate` is zero and the painter maps the box through it);
     /// empty for none or for pure translations.
     transform_fns: []const TransformFn = &.{},
+    /// `transform` is not `none` (a translation alone included): the box
+    /// is a containing block for absolute and fixed descendants.
+    has_transform: bool = false,
     transform_origin: [2]LengthPercent = .{ .{ .percent = 50 }, .{ .percent = 50 } },
     clip_path: ClipPath = .none,
     /// `transition-*`, as lists (the i-th property takes the i-th
@@ -450,6 +458,7 @@ pub const Prop = enum {
     transform,
     transform_origin,
     clip_path,
+    overflow_clip_margin,
     transition_property,
     transition_duration,
     transition_delay,
@@ -948,6 +957,13 @@ fn appendSheetWithImports(a: std.mem.Allocator, sheets: *std.ArrayList(Sheet), p
         try appendSheetWithImports(a, sheets, imported, env, loader, keep, depth + 1);
     };
     try sheets.append(list_a, sheet);
+}
+
+/// A stylesheet's text without a CDATA section's markers around it.
+fn stripCdata(text: []const u8) []const u8 {
+    const t = std.mem.trim(u8, text, " \t\r\n");
+    if (std.mem.startsWith(u8, t, "<![CDATA[") and std.mem.endsWith(u8, t, "]]>")) return t["<![CDATA[".len .. t.len - "]]>".len];
+    return text;
 }
 
 /// Whether a `<link>`'s `rel` names a stylesheet that applies: the
@@ -2004,10 +2020,10 @@ fn translationOf(vals: []const css.Value, font_size: f64, env: Env) ?[2]LengthPe
 /// A `transform` list: a pure translation goes to layout (`translate`);
 /// anything else is kept as functions for the painter, which maps the
 /// box through them in order. Null for an invalid list.
-const Transform = struct { translate: [2]LengthPercent, fns: []const TransformFn };
+const Transform = struct { translate: [2]LengthPercent, fns: []const TransformFn, some: bool = true };
 
 fn transformOf(a: std.mem.Allocator, vals: []const css.Value, font_size: f64, env: Env) ?Transform {
-    const none: Transform = .{ .translate = .{ .{ .px = 0 }, .{ .px = 0 } }, .fns = &.{} };
+    const none: Transform = .{ .translate = .{ .{ .px = 0 }, .{ .px = 0 } }, .fns = &.{}, .some = false };
     if (vals.len == 1) if (ident(vals[0])) |w| if (std.ascii.eqlIgnoreCase(w, "none")) return none;
     var fns: std.ArrayList(TransformFn) = .empty;
     var pure = true;
@@ -3617,9 +3633,14 @@ pub fn copyProp(out: *Computed, from: *const Computed, p: Prop) void {
         .transform => {
             out.translate = from.translate;
             out.transform_fns = from.transform_fns;
+            out.has_transform = from.has_transform;
         },
         .transform_origin => out.transform_origin = from.transform_origin,
         .clip_path => out.clip_path = from.clip_path,
+        .overflow_clip_margin => {
+            out.overflow_clip_margin = from.overflow_clip_margin;
+            out.overflow_clip_box = from.overflow_clip_box;
+        },
         .transition_property => {
             out.transition_property = from.transition_property;
             out.transition_none = from.transition_none;
@@ -3936,6 +3957,7 @@ fn applyValues(out: *Computed, p: Prop, vals_in: []const css.Value, parent: *con
             const t = transformOf(a, vals, font_size, env) orelse return error.Invalid;
             out.translate = t.translate;
             out.transform_fns = t.fns;
+            out.has_transform = t.some;
             return true;
         },
         .transform_origin => {
@@ -3944,6 +3966,19 @@ fn applyValues(out: *Computed, p: Prop, vals_in: []const css.Value, parent: *con
         },
         .clip_path => {
             out.clip_path = clipPathOf(a, vals, font_size, env) orelse return error.Invalid;
+            return true;
+        },
+        .overflow_clip_margin => {
+            out.overflow_clip_margin = 0;
+            out.overflow_clip_box = .padding_box;
+            for (vals) |v| {
+                if (isWs(v)) continue;
+                if (keyword(ClipBox, v)) |kb| {
+                    out.overflow_clip_box = kb;
+                } else if (lengthPercent(v, font_size, env)) |lp| {
+                    out.overflow_clip_margin = if (lp == .px) lp.px else return error.Invalid;
+                } else return error.Invalid;
+            }
             return true;
         },
         .transition_property => {
@@ -4315,7 +4350,7 @@ fn applyValues(out: *Computed, p: Prop, vals_in: []const css.Value, parent: *con
                 .current => .current,
             };
         },
-        .transform, .transform_origin, .clip_path, .transition_property, .transition_duration, .transition_delay, .transition_timing_function, .animation_name, .animation_duration, .animation_delay, .animation_timing_function, .animation_iteration_count, .animation_direction, .animation_fill_mode, .animation_play_state, .mask_image, .mask_position_x, .mask_position_y, .mask_size, .mask_repeat, .grid_template_columns, .grid_template_rows, .grid_template_areas, .grid_auto_columns, .grid_auto_rows, .grid_auto_flow, .grid_row_start, .grid_column_start, .grid_row_end, .grid_column_end => unreachable,
+        .transform, .transform_origin, .clip_path, .overflow_clip_margin, .transition_property, .transition_duration, .transition_delay, .transition_timing_function, .animation_name, .animation_duration, .animation_delay, .animation_timing_function, .animation_iteration_count, .animation_direction, .animation_fill_mode, .animation_play_state, .mask_image, .mask_position_x, .mask_position_y, .mask_size, .mask_repeat, .grid_template_columns, .grid_template_rows, .grid_template_areas, .grid_auto_columns, .grid_auto_rows, .grid_auto_flow, .grid_row_start, .grid_column_start, .grid_row_end, .grid_column_end => unreachable,
         .justify_items => out.justify_items = keyword(AlignItems, v) orelse return error.Invalid,
         .justify_self => out.justify_self = keyword(AlignSelf, v) orelse return error.Invalid,
         .background_image, .background_size, .background_repeat, .background_attachment, .background_position_x, .background_position_y, .border_top_left_radius, .border_top_right_radius, .border_bottom_right_radius, .border_bottom_left_radius => unreachable,
@@ -4518,7 +4553,10 @@ pub fn collectDocumentSheetsKept(a: std.mem.Allocator, doc: *const Document, env
         }
         if (is_style) {
             // Where it survives the scratch being reset between pieces.
-            const text = try doc.textContent(id, if (keep) |k| k.a else a);
+            // An XHTML page's `<![CDATA[ … ]]>` around the text is the
+            // XML parser's to remove; without one, it is removed here
+            // (WPT's shared references are XHTML, 2026-10-07).
+            const text = stripCdata(try doc.textContent(id, if (keep) |k| k.a else a));
             try appendSheetText(a, &sheets, text, env, null, loader, keep);
         } else {
             const href = std.mem.trim(u8, doc.getAttr(id, "href") orelse continue, " \t\n\r");

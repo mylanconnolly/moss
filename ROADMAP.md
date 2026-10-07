@@ -1021,10 +1021,39 @@ supervises), and memory history per unit beside the CPU one.
       values are kept apart now). Residuals: a frame is a whole restyle
       and layout (fine for a box, not a site), no `transitionend`/
       `animationend` events, no `Element.animate`, `:focus` state is the
-      page's focus only, a transform from `none` switches at the half. Remaining for the
-      stage: shaping and bidi for the scripts that need them (deferred
-      behind Latin, Greek and Cyrillic, as decided). *Exit:* WPT
-      reftest subsets per module with counts.
+      page's focus only, a transform from `none` switches at the half.
+      ✅ *The exit, measured* (2026-10-07): `tools/fetch-wpt.sh` fetches
+      a curated list (`tools/testdata/web/wpt-reftests.txt`, 110 tests)
+      of WPT reftests at the Acid pin with the references their
+      `rel=match` names (shared ones under `css/reference/` too), the
+      test fonts gained the Ahem face (a square per glyph, `p` the
+      descender alone, `É` the ascender alone, a space blank), the
+      harness reads linked sheets from the test's directory, and `zig
+      build test` prints a count per module, never asserted — the number
+      is the measurement: **css-transforms 61/64, css-position 8/17,
+      css-overflow 4/8** (scripted and `reftest-wait` tests are
+      skipped, so the denominators are the static ones). What the first
+      run found: the shared XHTML references wrap their sheet in a CDATA
+      section the CSS tokenizer swallowed as an unclosed block, so every
+      reference painted nothing (stripped now, as an XML parser would);
+      a transformed element — a pure translation included
+      (`Computed.has_transform`) — is the containing block for its
+      absolute and fixed descendants; overflow clips per axis (`clip` on
+      one leaves the other visible); a relative box's percentage
+      `top`/`bottom` resolve against a definite containing-block height
+      and are `auto` against an indefinite one (a `calc()` with a
+      percentage too); relatively positioned *inline* boxes move their
+      fragments, their atomics and the blocks split out of them (the
+      document's parents say which inline a split block came from); and
+      `overflow-clip-margin` with its box keywords. What the misses
+      need, each named: a static-position fallback for a fixed or
+      absolute box without insets, an inline element as a containing
+      block for an absolute, the static position inside a flex container
+      with centred alignment, `box-shadow`, anti-aliased rotation (the
+      fuzzy 30° test), `inline-table`, a translated inline-block, and
+      relative positioning of table rows. Shaping and bidi for the
+      scripts that need them stay deferred behind Latin, Greek and
+      Cyrillic, as decided. Stage 9 is complete.
     - **(10) JavaScript, the engine** (decision row "JavaScript",
       2026-09-24). `lib/js/`, in stages, each with its test262 numbers
       and a DESIGN entry: (a) lexer, parser and AST for ES2023 — ASI,

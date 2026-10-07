@@ -485,16 +485,50 @@ const Painter = struct {
     /// Narrow the canvas's clip to the box's padding box when its
     /// overflow says so (the caller restores the canvas).
     fn clipTo(p: *Painter, b: *const Box) void {
-        const clips = b.style.overflow_x != .visible or b.style.overflow_y != .visible;
-        if (!clips or b.kind == .root) return;
-        const x0 = b.x + b.border[3] - p.dx;
-        const y0 = b.y + b.border[0] - p.scroll;
-        const x1 = x0 + b.w - b.border[1] - b.border[3];
-        const y1 = y0 + b.h - b.border[0] - b.border[2];
-        p.canvas.clip_x0 = @max(p.canvas.clip_x0, px(@max(0, x0)));
-        p.canvas.clip_y0 = @max(p.canvas.clip_y0, px(@max(0, y0)));
-        p.canvas.clip_x1 = @min(p.canvas.clip_x1, px(@max(0, x1)));
-        p.canvas.clip_y1 = @min(p.canvas.clip_y1, px(@max(0, y1)));
+        if (b.kind == .root) return;
+        // Per axis: `clip` on one axis leaves the other visible; any
+        // other non-visible value makes both clip (CSS Overflow §3.1).
+        const ox = b.style.overflow_x;
+        const oy = b.style.overflow_y;
+        const clip_x = ox != .visible or (oy != .visible and oy != .clip);
+        const clip_y = oy != .visible or (ox != .visible and ox != .clip);
+        if (!clip_x and !clip_y) return;
+        var x0 = b.x + b.border[3] - p.dx;
+        var y0 = b.y + b.border[0] - p.scroll;
+        var x1 = x0 + b.w - b.border[1] - b.border[3];
+        var y1 = y0 + b.h - b.border[0] - b.border[2];
+        if (ox == .clip or oy == .clip) {
+            // `overflow-clip-margin`: the clip reaches past the box it
+            // names by the margin.
+            switch (b.style.overflow_clip_box) {
+                .padding_box => {},
+                .border_box => {
+                    x0 -= b.border[3];
+                    y0 -= b.border[0];
+                    x1 += b.border[1];
+                    y1 += b.border[2];
+                },
+                .content_box => {
+                    x0 += b.padding[3];
+                    y0 += b.padding[0];
+                    x1 -= b.padding[1];
+                    y1 -= b.padding[2];
+                },
+            }
+            const m = b.style.overflow_clip_margin;
+            x0 -= m;
+            y0 -= m;
+            x1 += m;
+            y1 += m;
+        }
+        if (clip_x) {
+            p.canvas.clip_x0 = @max(p.canvas.clip_x0, px(@max(0, x0)));
+            p.canvas.clip_x1 = @min(p.canvas.clip_x1, px(@max(0, x1)));
+        }
+        if (clip_y) {
+            p.canvas.clip_y0 = @max(p.canvas.clip_y0, px(@max(0, y0)));
+            p.canvas.clip_y1 = @min(p.canvas.clip_y1, px(@max(0, y1)));
+        }
     }
 
     const Phase = enum { backgrounds, floats, inlines };
@@ -1447,20 +1481,7 @@ test "paint: the reftests, counted" {
         };
         if (diff == null) passed += 1 else if (verbose) {
             std.debug.print("--- {s}: first difference at ({d}, {d}): {x:0>6} vs {x:0>6}\n", .{ name, diff.? % w, diff.? / w, got[diff.?] & 0xffffff, want[diff.?] & 0xffffff });
-            // Where each render painted anything but white, as a bounding box.
-            for ([_][]const u32{ got, want }, [_][]const u8{ "got", "want" }) |pix, label| {
-                var x0: usize = w;
-                var y0: usize = h;
-                var x1: usize = 0;
-                var y1: usize = 0;
-                for (pix, 0..) |v, i| if (v & 0xffffff != 0xffffff) {
-                    x0 = @min(x0, i % w);
-                    x1 = @max(x1, i % w + 1);
-                    y0 = @min(y0, i / w);
-                    y1 = @max(y1, i / w + 1);
-                };
-                std.debug.print("    {s}: painted ({d},{d})-({d},{d})\n", .{ label, x0, y0, x1, y1 });
-            }
+            printBounds(got, want, w, h);
         }
     }
     std.debug.print("reftests: {d}/{d} agree\n", .{ passed, names.items.len });
@@ -1570,9 +1591,29 @@ test "paint: the WPT reftest subsets, counted" {
                 diff = i;
                 break;
             };
-            if (diff == null) passed += 1 else if (verbose) std.debug.print("--- wpt/{s}/{s}: first difference at ({d}, {d}): {x:0>6} vs {x:0>6}\n", .{ mod, name, diff.? % w, diff.? / w, got[diff.?] & 0xffffff, want[diff.?] & 0xffffff });
+            if (diff == null) passed += 1 else if (verbose) {
+                std.debug.print("--- wpt/{s}/{s}: first difference at ({d}, {d}): {x:0>6} vs {x:0>6}\n", .{ mod, name, diff.? % w, diff.? / w, got[diff.?] & 0xffffff, want[diff.?] & 0xffffff });
+                printBounds(got, want, w, h);
+            }
         }
         std.debug.print("wpt/{s}: {d}/{d} agree\n", .{ mod, passed, total });
+    }
+}
+
+/// Where each render painted anything but white, as a bounding box.
+fn printBounds(got: []const u32, want: []const u32, w: usize, h: usize) void {
+    for ([_][]const u32{ got, want }, [_][]const u8{ "got", "want" }) |pix, label| {
+        var x0: usize = w;
+        var y0: usize = h;
+        var x1: usize = 0;
+        var y1: usize = 0;
+        for (pix, 0..) |v, i| if (v & 0xffffff != 0xffffff) {
+            x0 = @min(x0, i % w);
+            x1 = @max(x1, i % w + 1);
+            y0 = @min(y0, i / w);
+            y1 = @max(y1, i / w + 1);
+        };
+        std.debug.print("    {s}: painted ({d},{d})-({d},{d})\n", .{ label, x0, y0, x1, y1 });
     }
 }
 
