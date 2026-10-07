@@ -351,9 +351,9 @@ and its layout and die (a 1.2 MB Wikipedia article takes 29 MB: the
 DOM is ~7 MB and the layout ~17 MB, 1.1 KB a box); scripts run, with
 the simple CORS case and no cookies, so a site whose API wants
 credentials shows what its markup carried; scroll containers and sticky
-boxes work vertically only; no scaling or rotating
-transforms (translations only), no merged `border-collapse` borders,
-no subgrid or masonry, no WebP,
+boxes work vertically only; transforms sample nearest (a rotation's
+edge is stairs) and the hit test ignores them, no merged `border-collapse` borders,
+no subgrid or masonry, no `transitionend`/`animationend` events, no WebP,
 animated GIF (the first frame shows) or `srcset`; SVG draws its shapes,
 paths, strokes and `use`s but not gradients (their mean colour), clips,
 masks, filters or text; the scripts that need shaping or bidi (Arabic,

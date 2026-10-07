@@ -46,10 +46,17 @@ pub const Pseudo = union(enum) {
     disabled,
     enabled,
     link,
-    /// An interaction state no static match has (`:hover`, `:focus`,
-    /// `:active`, `:visited`, `:target`…), or a pseudo-element (the
-    /// boxes they make are not built): parsed so the rest of a selector
-    /// list stands, matched by nothing.
+    /// The pointer is over the element or a descendant (`Document.hovered`).
+    hover,
+    /// The element or a descendant is pressed (`Document.active`).
+    active,
+    /// The element is focused (`:focus`, `:focus-visible`), or holds the
+    /// focus (`:focus-within`).
+    focus,
+    focus_within,
+    /// A state no static match has (`:visited`, `:target`…), or a
+    /// pseudo-element (the boxes they make are not built): parsed so
+    /// the rest of a selector list stands, matched by nothing.
     never,
     required,
     optional,
@@ -346,6 +353,10 @@ fn matchPseudo(doc: *const Document, id: NodeId, ps: Pseudo) bool {
         .disabled => return attrValue(doc, id, "disabled") != null,
         .enabled => return attrValue(doc, id, "disabled") == null and (std.mem.eql(u8, n.name, "input") or std.mem.eql(u8, n.name, "button") or std.mem.eql(u8, n.name, "select") or std.mem.eql(u8, n.name, "textarea")),
         .link => return (std.mem.eql(u8, n.name, "a") or std.mem.eql(u8, n.name, "area")) and attrValue(doc, id, "href") != null,
+        .hover => return inChain(doc, doc.hovered, id),
+        .active => return inChain(doc, doc.active, id),
+        .focus => return doc.focused == id,
+        .focus_within => return inChain(doc, doc.focused, id),
         .never => return false,
         .required => return isFormField(n.name) and attrValue(doc, id, "required") != null,
         .optional => return isFormField(n.name) and attrValue(doc, id, "required") == null,
@@ -422,6 +433,27 @@ fn nextOfType(doc: *const Document, id: NodeId) ?NodeId {
     var s = nextElement(doc, id);
     while (s) |sid| : (s = nextElement(doc, sid)) if (sameType(doc, sid, id)) return sid;
     return null;
+}
+
+/// Whether `id` is `from` or one of its ancestors.
+fn inChain(doc: *const Document, from: ?NodeId, id: NodeId) bool {
+    var cur = from;
+    while (cur) |c| : (cur = doc.get(c).parent) if (c == id) return true;
+    return false;
+}
+
+/// Whether a complex selector depends on the interaction state (so a
+/// hover or press changes what matches).
+pub fn isInteractive(c: Complex) bool {
+    for (c.compounds) |comp| for (comp.simples) |sm| {
+        if (sm != .pseudo) continue;
+        switch (sm.pseudo) {
+            .hover, .active, .focus, .focus_within => return true,
+            .not, .is, .where, .has => |list| for (list) |inner| if (isInteractive(inner)) return true,
+            else => {},
+        }
+    };
+    return false;
 }
 
 fn countBefore(doc: *const Document, id: NodeId, of_type: bool) i32 {
@@ -790,8 +822,12 @@ const Parser = struct {
         if (eq(name, "read-write")) return .read_write;
         if (eq(name, "read-only")) return .read_only;
         if (eq(name, "placeholder-shown")) return .placeholder_shown;
-        // Interaction and history states: valid, never matched here.
-        const states = [_][]const u8{ "hover", "active", "focus", "focus-visible", "focus-within", "visited", "target", "target-within", "default", "indeterminate", "valid", "invalid", "in-range", "out-of-range", "user-invalid", "user-valid", "autofill", "fullscreen", "modal", "open", "closed", "popover-open", "playing", "paused", "defined", "scope", "host", "blank", "current", "past", "future", "local-link" };
+        if (eq(name, "hover")) return .hover;
+        if (eq(name, "active")) return .active;
+        if (eq(name, "focus") or eq(name, "focus-visible")) return .focus;
+        if (eq(name, "focus-within")) return .focus_within;
+        // History and other states: valid, never matched here.
+        const states = [_][]const u8{ "visited", "target", "target-within", "default", "indeterminate", "valid", "invalid", "in-range", "out-of-range", "user-invalid", "user-valid", "autofill", "fullscreen", "modal", "open", "closed", "popover-open", "playing", "paused", "defined", "scope", "host", "blank", "current", "past", "future", "local-link" };
         for (states) |st| if (eq(name, st)) return .never;
         return error.Invalid;
     }
@@ -882,6 +918,15 @@ test "selectors: simple, attribute, structural, combinators" {
     // still applies its other selectors) and match nothing; an unknown
     // pseudo-class is invalid.
     try std.testing.expectEqual(@as(usize, 0), try count(a, doc, ":hover"));
+    // Hover is the document's state: the chain from the hovered element up.
+    var it = doc.walk(dom.document_id);
+    while (it.next()) |id| if (doc.isHtml(id, "a")) {
+        doc.hovered = id;
+    };
+    try std.testing.expectEqual(@as(usize, 1), try count(a, doc, "a:hover"));
+    try std.testing.expectEqual(@as(usize, 1), try count(a, doc, "div:hover"));
+    try std.testing.expectEqual(@as(usize, 0), try count(a, doc, "p:hover"));
+    doc.hovered = null;
     try std.testing.expectEqual(@as(usize, 0), try count(a, doc, "p::before"));
     try std.testing.expectEqual(@as(usize, 1), try count(a, doc, "ul, a:focus, p::after"));
     try std.testing.expectError(error.Invalid, Selector.parse(a, ":bogus"));

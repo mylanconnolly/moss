@@ -32,6 +32,10 @@ pub const Highlight = struct { x: f64, y: f64, w: f64, h: f64, color: u32 };
 pub const Options = struct {
     highlights: []const Highlight = &.{},
     focus: ?NodeId = null,
+    /// Memory for the layers a translucent, transformed or clipped box
+    /// is painted into (freed within the paint; a layer that does not
+    /// fit paints plainly, without its effect). None: no layers.
+    scratch: ?std.mem.Allocator = null,
     /// The ring's colour, and a control's frame and face.
     accent: u32 = 0x2f6fde,
     frame: u32 = 0x8a8a8a,
@@ -91,6 +95,12 @@ const Painter = struct {
     canvas: Canvas,
     scroll: f64,
     opts: Options = .{},
+    /// What the canvas's x = 0 is in document x: a layer's painter
+    /// targets a buffer that starts at the layer's left edge.
+    dx: f64 = 0,
+    /// The layer box being painted into its own buffer (so its
+    /// `paintBox` paints plainly, once).
+    layer_root: ?BoxId = null,
 
     fn px(v: f64) usize {
         return @intFromFloat(@max(0, @round(v)));
@@ -103,9 +113,9 @@ const Painter = struct {
     fn fill(p: *const Painter, x: f64, y: f64, w: f64, h: f64, word: u32) void {
         const y0 = y - p.scroll;
         if (w <= 0 or h <= 0) return;
-        const x0 = @max(@as(f64, @floatFromInt(p.canvas.clip_x0)), x);
+        const x0 = @max(@as(f64, @floatFromInt(p.canvas.clip_x0)), x - p.dx);
         const yy = @max(@as(f64, @floatFromInt(p.canvas.clip_y0)), y0);
-        const x1 = @min(@as(f64, @floatFromInt(p.canvas.clip_x1)), x + w);
+        const x1 = @min(@as(f64, @floatFromInt(p.canvas.clip_x1)), x + w - p.dx);
         const y1 = @min(@as(f64, @floatFromInt(p.canvas.clip_y1)), y0 + h);
         if (x1 <= x0 or y1 <= yy) return;
         p.canvas.fillRect(px(x0), px(yy), px(x1 - x0), px(y1 - yy), word);
@@ -135,6 +145,225 @@ const Painter = struct {
     fn paintBox(p: *Painter, id: BoxId) Error!void {
         const b = p.l.get(id);
         if (b.style.visibility != .visible or b.style.opacity == 0) return;
+        if (layout.isLayerBox(b) and (p.layer_root == null or p.layer_root.? != id)) return p.paintLayered(id);
+        return p.paintPlain(id);
+    }
+
+    /// A 2D affine map, CSS's `matrix(a, b, c, d, e, f)`: x' = ax + cy + e,
+    /// y' = bx + dy + f.
+    const Affine = [6]f64;
+    const identity: Affine = .{ 1, 0, 0, 1, 0, 0 };
+
+    fn mul(m: Affine, n: Affine) Affine {
+        // m ∘ n: n first.
+        return .{
+            m[0] * n[0] + m[2] * n[1],
+            m[1] * n[0] + m[3] * n[1],
+            m[0] * n[2] + m[2] * n[3],
+            m[1] * n[2] + m[3] * n[3],
+            m[0] * n[4] + m[2] * n[5] + m[4],
+            m[1] * n[4] + m[3] * n[5] + m[5],
+        };
+    }
+
+    fn apply(m: Affine, x: f64, y: f64) [2]f64 {
+        return .{ m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5] };
+    }
+
+    fn invert(m: Affine) ?Affine {
+        const det = m[0] * m[3] - m[1] * m[2];
+        if (@abs(det) < 1e-9) return null;
+        const a = m[3] / det;
+        const b = -m[1] / det;
+        const c = -m[2] / det;
+        const d = m[0] / det;
+        return .{ a, b, c, d, -(a * m[4] + c * m[5]), -(b * m[4] + d * m[5]) };
+    }
+
+    /// A box's transform in the painter's coordinates: its functions in
+    /// order about its `transform-origin`.
+    fn transformOf(p: *const Painter, b: *const Box) Affine {
+        const st = b.style;
+        if (st.transform_fns.len == 0) return identity;
+        const ox = b.x + resolveLP(st.transform_origin[0], b.w);
+        const oy = b.y - p.scroll + resolveLP(st.transform_origin[1], b.h);
+        var m: Affine = .{ 1, 0, 0, 1, ox, oy };
+        for (st.transform_fns) |f| {
+            const fm: Affine = switch (f) {
+                .translate => |t| .{ 1, 0, 0, 1, resolveLP(t[0], b.w), resolveLP(t[1], b.h) },
+                .scale => |s| .{ s[0], 0, 0, s[1], 0, 0 },
+                .rotate => |deg| blk: {
+                    const r = deg * std.math.pi / 180;
+                    break :blk .{ @cos(r), @sin(r), -@sin(r), @cos(r), 0, 0 };
+                },
+                .skew => |sk| .{ 1, @tan(sk[1] * std.math.pi / 180), @tan(sk[0] * std.math.pi / 180), 1, 0, 0 },
+                .matrix => |mm| mm,
+            };
+            m = mul(m, fm);
+        }
+        return mul(m, .{ 1, 0, 0, 1, -ox, -oy });
+    }
+
+    fn resolveLP(lp: style.LengthPercent, of: f64) f64 {
+        return switch (lp) {
+            .px => |x| x,
+            .percent => |pc| of * pc / 100,
+            .calc => |c| c.of(of),
+        };
+    }
+
+    /// Whether a document point is inside the box's `clip-path` shape.
+    fn clipInside(b: *const Box, x: f64, y: f64) bool {
+        const st = b.style;
+        switch (st.clip_path) {
+            .none => return true,
+            .inset => |in| {
+                const x0 = b.x + resolveLP(in.left, b.w);
+                const x1 = b.x + b.w - resolveLP(in.right, b.w);
+                const y0 = b.y + resolveLP(in.top, b.h);
+                const y1 = b.y + b.h - resolveLP(in.bottom, b.h);
+                if (!(x >= x0 and x < x1 and y >= y0 and y < y1)) return false;
+                const r = @min(resolveLP(in.radius, b.w), (x1 - x0) / 2, (y1 - y0) / 2);
+                if (r <= 0) return true;
+                const cx = @max(x0 + r, @min(x1 - r, x));
+                const cy = @max(y0 + r, @min(y1 - r, y));
+                return (x - cx) * (x - cx) + (y - cy) * (y - cy) <= r * r;
+            },
+            .circle => |c| {
+                const cx = b.x + resolveLP(c.cx, b.w);
+                const cy = b.y + resolveLP(c.cy, b.h);
+                const r = if (c.r) |rr| resolveLP(rr, @sqrt((b.w * b.w + b.h * b.h) / 2)) else @min(@min(cx - b.x, b.x + b.w - cx), @min(cy - b.y, b.y + b.h - cy));
+                return (x - cx) * (x - cx) + (y - cy) * (y - cy) <= r * r;
+            },
+            .ellipse => |e| {
+                const cx = b.x + resolveLP(e.cx, b.w);
+                const cy = b.y + resolveLP(e.cy, b.h);
+                const rx = if (e.rx) |rr| resolveLP(rr, b.w) else @min(cx - b.x, b.x + b.w - cx);
+                const ry = if (e.ry) |rr| resolveLP(rr, b.h) else @min(cy - b.y, b.y + b.h - cy);
+                if (rx <= 0 or ry <= 0) return false;
+                const u = (x - cx) / rx;
+                const v = (y - cy) / ry;
+                return u * u + v * v <= 1;
+            },
+            .polygon => |pts| {
+                // Even-odd crossing count.
+                var inside = false;
+                var j = pts.len - 1;
+                for (pts, 0..) |pt, i| {
+                    const xi = b.x + resolveLP(pt[0], b.w);
+                    const yi = b.y + resolveLP(pt[1], b.h);
+                    const xj = b.x + resolveLP(pts[j][0], b.w);
+                    const yj = b.y + resolveLP(pts[j][1], b.h);
+                    if ((yi > y) != (yj > y) and x < (xj - xi) * (y - yi) / (yj - yi) + xi) inside = !inside;
+                    j = i;
+                }
+                return inside;
+            },
+        }
+    }
+
+    /// A translucent, transformed or clipped box: its subtree painted
+    /// into a layer of its own — twice, over black and over white, so
+    /// the alpha of every pixel is the difference — then composited
+    /// onto the canvas through its transform (each destination pixel
+    /// mapped back and sampled at the nearest layer pixel), its clip
+    /// shape and its opacity. A layer that does not fit the scratch
+    /// paints plainly.
+    fn paintLayered(p: *Painter, id: BoxId) Error!void {
+        const b = p.l.get(id);
+        const scratch = p.opts.scratch orelse return p.paintPlain(id);
+        const sb = layout.paintBounds(p.l, id);
+        if (sb.w <= 0 or sb.h <= 0) return;
+        const m = p.transformOf(b);
+        const inv = invert(m) orelse return;
+        // The source rect in painter space (x document, y scrolled), and
+        // where the transform puts it on the canvas.
+        const src: [4]f64 = .{ sb.x, sb.y - p.scroll, sb.x + sb.w, sb.y - p.scroll + sb.h };
+        var dx0: f64 = std.math.inf(f64);
+        var dy0: f64 = std.math.inf(f64);
+        var dx1: f64 = -std.math.inf(f64);
+        var dy1: f64 = -std.math.inf(f64);
+        for ([_][2]f64{ .{ src[0], src[1] }, .{ src[2], src[1] }, .{ src[0], src[3] }, .{ src[2], src[3] } }) |c| {
+            const q = apply(m, c[0], c[1]);
+            dx0 = @min(dx0, q[0]);
+            dy0 = @min(dy0, q[1]);
+            dx1 = @max(dx1, q[0]);
+            dy1 = @max(dy1, q[1]);
+        }
+        // Clamp to the canvas's clip (canvas x = painter x - dx).
+        const cx0 = @max(@floor(dx0), @as(f64, @floatFromInt(p.canvas.clip_x0)) + p.dx);
+        const cy0 = @max(@floor(dy0), @as(f64, @floatFromInt(p.canvas.clip_y0)));
+        const cx1 = @min(@ceil(dx1), @as(f64, @floatFromInt(@min(p.canvas.clip_x1, p.canvas.w))) + p.dx);
+        const cy1 = @min(@ceil(dy1), @as(f64, @floatFromInt(@min(p.canvas.clip_y1, p.canvas.h))));
+        if (cx1 <= cx0 or cy1 <= cy0) return;
+        // The part of the source that maps into it.
+        var sx0: f64 = std.math.inf(f64);
+        var sy0: f64 = std.math.inf(f64);
+        var sx1: f64 = -std.math.inf(f64);
+        var sy1: f64 = -std.math.inf(f64);
+        for ([_][2]f64{ .{ cx0, cy0 }, .{ cx1, cy0 }, .{ cx0, cy1 }, .{ cx1, cy1 } }) |c| {
+            const q = apply(inv, c[0], c[1]);
+            sx0 = @min(sx0, q[0]);
+            sy0 = @min(sy0, q[1]);
+            sx1 = @max(sx1, q[0]);
+            sy1 = @max(sy1, q[1]);
+        }
+        sx0 = @max(@floor(sx0) - 1, @floor(src[0]));
+        sy0 = @max(@floor(sy0) - 1, @floor(src[1]));
+        sx1 = @min(@ceil(sx1) + 1, @ceil(src[2]));
+        sy1 = @min(@ceil(sy1) + 1, @ceil(src[3]));
+        if (sx1 <= sx0 or sy1 <= sy0) return;
+        const lw: usize = @intFromFloat(sx1 - sx0);
+        const lh: usize = @intFromFloat(sy1 - sy0);
+        if (lw == 0 or lh == 0 or lw * lh > layer_max_pixels) return p.paintPlain(id);
+        const black = scratch.alloc(u32, lw * lh) catch return p.paintPlain(id);
+        defer scratch.free(black);
+        const white = scratch.alloc(u32, lw * lh) catch return p.paintPlain(id);
+        defer scratch.free(white);
+        for ([_][]u32{ black, white }, [_]u32{ 0x000000, 0xffffff }) |buf, bg| {
+            const lc = Canvas.init(buf.ptr, lw, lh);
+            lc.fillAll(bg);
+            var q = p.*;
+            q.canvas = lc;
+            q.dx = sx0;
+            q.scroll = p.scroll + sy0;
+            q.layer_root = id;
+            try q.paintPlain(id);
+        }
+        // Composite.
+        const opacity = b.style.opacity;
+        const clipped = b.style.clip_path != .none;
+        var y = cy0;
+        while (y < cy1) : (y += 1) {
+            var x = cx0;
+            while (x < cx1) : (x += 1) {
+                const s = apply(inv, x + 0.5, y + 0.5);
+                const u = s[0] - sx0;
+                const v = s[1] - sy0;
+                if (u < 0 or v < 0 or u >= @as(f64, @floatFromInt(lw)) or v >= @as(f64, @floatFromInt(lh))) continue;
+                if (clipped and !clipInside(b, s[0], s[1] + p.scroll)) continue;
+                const i = @as(usize, @intFromFloat(v)) * lw + @as(usize, @intFromFloat(u));
+                const bl = black[i];
+                const wh = white[i];
+                var diff: u32 = 0;
+                inline for (.{ 0, 8, 16 }) |shf| diff += ((wh >> shf) & 0xff) -| ((bl >> shf) & 0xff);
+                const a = 1 - @as(f64, @floatFromInt(diff)) / (3 * 255);
+                if (a <= 0.002) continue;
+                var fg: u32 = 0;
+                inline for (.{ 0, 8, 16 }) |shf| {
+                    const c = @as(f64, @floatFromInt((bl >> shf) & 0xff)) / a;
+                    fg |= @as(u32, @intFromFloat(@min(255, @round(c)))) << shf;
+                }
+                const cov = @min(1, a * opacity);
+                p.canvas.blend(@intFromFloat(x - p.dx), @intFromFloat(y), fg, @intFromFloat(@round(cov * 255)));
+            }
+        }
+    }
+
+    const layer_max_pixels: usize = 1 << 20;
+
+    fn paintPlain(p: *Painter, id: BoxId) Error!void {
+        const b = p.l.get(id);
         if (b.style.display == .none) return;
         if (b.kind == .text or b.kind == .br) return;
         // A control paints itself — except a `button` element, whose
@@ -190,7 +419,7 @@ const Painter = struct {
         try p.collectLayer(id, &layer);
         if (b.kind == .root) {
             for (p.l.absolutes.items) |ab| if (layout.clipAncestor(p.l, ab.box) == null) try layer.append(p.l.a, .{ .box = ab.box, .z = zOf(p.l, ab.box) });
-        } else if (layout.clipsOverflow(b)) {
+        } else if (layout.clipsOverflow(b) or layout.isLayerBox(b)) {
             for (p.l.absolutes.items) |ab| if (layout.clipAncestor(p.l, ab.box) == id) try layer.append(p.l.a, .{ .box = ab.box, .z = zOf(p.l, ab.box) });
         }
         std.mem.sort(Layered, layer.items, {}, layerBelow);
@@ -211,7 +440,7 @@ const Painter = struct {
         for (p.l.get(id).children.items) |c| {
             const cb = p.l.get(c);
             if (cb.isOutOfFlow() or !cb.isBlockLevel()) continue;
-            if (cb.style.position == .relative or cb.style.position == .sticky) {
+            if (cb.style.position == .relative or cb.style.position == .sticky or layout.isLayerBox(cb)) {
                 try out.append(p.l.a, .{ .box = c, .z = zOf(p.l, c) });
                 continue;
             }
@@ -258,7 +487,7 @@ const Painter = struct {
     fn clipTo(p: *Painter, b: *const Box) void {
         const clips = b.style.overflow_x != .visible or b.style.overflow_y != .visible;
         if (!clips or b.kind == .root) return;
-        const x0 = b.x + b.border[3];
+        const x0 = b.x + b.border[3] - p.dx;
         const y0 = b.y + b.border[0] - p.scroll;
         const x1 = x0 + b.w - b.border[1] - b.border[3];
         const y1 = y0 + b.h - b.border[0] - b.border[2];
@@ -294,9 +523,9 @@ const Painter = struct {
             if (cb.isOutOfFlow()) continue;
             if (!cb.isBlockLevel()) continue;
             if (cb.style.visibility != .visible or cb.style.opacity == 0 or cb.style.display == .none) continue;
-            // A relatively positioned or sticky box is in the unit's
-            // positioned layer, painted whole after the flow.
-            if (cb.style.position == .relative or cb.style.position == .sticky) continue;
+            // A relatively positioned or sticky box — or a layer box — is
+            // in the unit's positioned layer, painted whole after the flow.
+            if (cb.style.position == .relative or cb.style.position == .sticky or layout.isLayerBox(cb)) continue;
             if (p.isAtomicBlock(cb)) {
                 if (phase == .backgrounds) try p.paintBox(c);
                 continue;
@@ -475,8 +704,8 @@ const Painter = struct {
         return .{
             .y0 = @max(@as(f64, @floatFromInt(p.canvas.clip_y0)), @floor(y - p.scroll)),
             .y1 = @min(@as(f64, @floatFromInt(@min(p.canvas.h, p.canvas.clip_y1))), @ceil(y + h - p.scroll)),
-            .x0 = @max(@as(f64, @floatFromInt(p.canvas.clip_x0)), @floor(x)),
-            .x1 = @min(@as(f64, @floatFromInt(@min(p.canvas.w, p.canvas.clip_x1))), @ceil(x + w)),
+            .x0 = @max(@as(f64, @floatFromInt(p.canvas.clip_x0)), @floor(x - p.dx)),
+            .x1 = @min(@as(f64, @floatFromInt(@min(p.canvas.w, p.canvas.clip_x1))), @ceil(x + w - p.dx)),
         };
     }
 
@@ -494,9 +723,9 @@ const Painter = struct {
         while (sy < y1) : (sy += 1) {
             var sx = x0;
             while (sx < x1) : (sx += 1) {
-                var cov = roundCover(x, y - p.scroll, w, h, r, sx, sy);
+                var cov = roundCover(x - p.dx, y - p.scroll, w, h, r, sx, sy);
                 if (hole) |ho| if (cov > 0) {
-                    cov -= roundCover(ho[0], ho[1] - p.scroll, ho[2], ho[3], .{ ho[4], ho[5], ho[6], ho[7] }, sx, sy);
+                    cov -= roundCover(ho[0] - p.dx, ho[1] - p.scroll, ho[2], ho[3], .{ ho[4], ho[5], ho[6], ho[7] }, sx, sy);
                 };
                 if (cov <= 0) continue;
                 p.canvas.blend(@intFromFloat(sx), @intFromFloat(sy), word, @intFromFloat(@round(@min(1, cov) * alpha * 255)));
@@ -590,8 +819,8 @@ const Painter = struct {
     /// A painter clipped to a box's border box.
     fn clippedTo(p: *const Painter, b: *const Box) ?Painter {
         var q = p.*;
-        q.canvas.clip_x0 = @max(q.canvas.clip_x0, px(@max(0, b.x)));
-        q.canvas.clip_x1 = @min(q.canvas.clip_x1, px(@max(0, b.x + b.w)));
+        q.canvas.clip_x0 = @max(q.canvas.clip_x0, px(@max(0, b.x - p.dx)));
+        q.canvas.clip_x1 = @min(q.canvas.clip_x1, px(@max(0, b.x + b.w - p.dx)));
         q.canvas.clip_y0 = @max(q.canvas.clip_y0, px(@max(0, b.y - p.scroll)));
         q.canvas.clip_y1 = @min(q.canvas.clip_y1, px(@max(0, b.y + b.h - p.scroll)));
         if (q.canvas.clip_x1 <= q.canvas.clip_x0 or q.canvas.clip_y1 <= q.canvas.clip_y0) return null;
@@ -656,15 +885,15 @@ const Painter = struct {
             var cols: usize = 0;
             while (tx < b.x + b.w and cols < 4096) : (cols += 1) {
                 // The tile's pixels, each the mask's alpha at its centre.
-                const x0 = @max(@as(f64, @floatFromInt(q.canvas.clip_x0)), @floor(tx));
-                const x1 = @min(@as(f64, @floatFromInt(q.canvas.clip_x1)), @ceil(tx + t.w));
+                const x0 = @max(@as(f64, @floatFromInt(q.canvas.clip_x0)), @floor(tx - p.dx));
+                const x1 = @min(@as(f64, @floatFromInt(q.canvas.clip_x1)), @ceil(tx + t.w - p.dx));
                 const y0 = @max(@as(f64, @floatFromInt(q.canvas.clip_y0)), @floor(ty - p.scroll));
                 const y1 = @min(@as(f64, @floatFromInt(@min(q.canvas.clip_y1, q.canvas.h))), @ceil(ty - p.scroll + t.h));
                 var sy = y0;
                 while (sy < y1) : (sy += 1) {
                     var sx = x0;
                     while (sx < x1) : (sx += 1) {
-                        const u = (sx + 0.5 - tx) / t.w * @as(f64, @floatFromInt(bm.w)) - 0.5;
+                        const u = (sx + p.dx + 0.5 - tx) / t.w * @as(f64, @floatFromInt(bm.w)) - 0.5;
                         const v = (sy + 0.5 - (ty - p.scroll)) / t.h * @as(f64, @floatFromInt(bm.h)) - 0.5;
                         const alpha = sampleAlpha(bm, u, v);
                         if (alpha <= 0) continue;
@@ -749,7 +978,7 @@ const Painter = struct {
         while (sy < y1) : (sy += 1) {
             var sx = x0;
             while (sx < x1) : (sx += 1) {
-                var t = ((sx + 0.5 - cxm) * dx + (sy + 0.5 + p.scroll - cym) * dy) / len + 0.5;
+                var t = ((sx + p.dx + 0.5 - cxm) * dx + (sy + 0.5 + p.scroll - cym) * dy) / len + 0.5;
                 if (repeating and pos[n - 1] > pos[0]) {
                     const span = pos[n - 1] - pos[0];
                     t = pos[0] + @mod(t - pos[0], span);
@@ -790,7 +1019,7 @@ const Painter = struct {
         const dw: usize = px(w);
         const dh: usize = px(h);
         if (dw == 0 or dh == 0 or bm.w == 0 or bm.h == 0) return;
-        const ox: i64 = @intFromFloat(@round(x));
+        const ox: i64 = @intFromFloat(@round(x - p.dx));
         const oy: i64 = @intFromFloat(@round(y));
         const exact = @abs(sw - w) < 0.01 and @abs(sh - h) < 0.01;
         const fx = sw / @as(f64, @floatFromInt(dw));
@@ -860,11 +1089,11 @@ const Painter = struct {
 
     /// A translucent tint over a rect (a highlight), blending per pixel.
     fn tint(p: *const Painter, h: Highlight) void {
-        const x0: usize = px(@max(0, h.x));
+        const x0: usize = px(@max(0, h.x - p.dx));
         const y0f = h.y - p.scroll;
         if (y0f + h.h <= 0 or h.w <= 0 or h.h <= 0) return;
         const y0: usize = px(@max(0, y0f));
-        const x1: usize = px(@max(0, h.x + h.w));
+        const x1: usize = px(@max(0, h.x + h.w - p.dx));
         const y1: usize = px(@max(0, y0f + h.h));
         var y = y0;
         while (y < y1 and y < p.canvas.h) : (y += 1) {
@@ -934,18 +1163,18 @@ const Painter = struct {
         // What does not fit is cut at the content box; the text sits on
         // its centre line (a textarea's from the top).
         var q = p.*;
-        q.canvas.clip_x0 = @max(q.canvas.clip_x0, px(@max(0, cx)));
-        q.canvas.clip_x1 = @min(q.canvas.clip_x1, px(@max(0, cx + cw)));
+        q.canvas.clip_x0 = @max(q.canvas.clip_x0, px(@max(0, cx - p.dx)));
+        q.canvas.clip_x1 = @min(q.canvas.clip_x1, px(@max(0, cx + cw - p.dx)));
         const inner_h = m.ascent + m.descent;
         const baseline = if (kind == .textarea) cy + m.ascent else cy + (ch - inner_h) / 2 + m.ascent;
         const tx = if (kind == .button) cx + @max(0, (cw - p.l.fonts.advance(font, value)) / 2) else cx;
         // An empty field shows its placeholder, greyed.
         if (value.len == 0 and (kind == .text or kind == .textarea or kind == .password)) if (doc.getAttr(node, "placeholder")) |ph| {
-            p.l.fonts.draw(&q.canvas, font, tx, baseline - p.scroll, ph, 0x757575);
+            p.l.fonts.draw(&q.canvas, font, tx - p.dx, baseline - p.scroll, ph, 0x757575);
             return;
         };
-        p.l.fonts.draw(&q.canvas, font, tx, baseline - p.scroll, value, st.color.word());
-        if (kind == .select) p.l.fonts.draw(&q.canvas, font, cx + cw - p.l.fonts.advance(font, "v"), baseline - p.scroll, "v", p.opts.frame);
+        p.l.fonts.draw(&q.canvas, font, tx - p.dx, baseline - p.scroll, value, st.color.word());
+        if (kind == .select) p.l.fonts.draw(&q.canvas, font, cx + cw - p.l.fonts.advance(font, "v") - p.dx, baseline - p.scroll, "v", p.opts.frame);
     }
 
     fn text(p: *const Painter, f: layout.Fragment) void {
@@ -962,7 +1191,7 @@ const Painter = struct {
         // visible heading).
         if (st.visibility != .visible) return;
         if (f.kind == .marker) if (p.bullet(f, st)) return;
-        p.l.fonts.draw(&p.canvas, font, f.x, f.baseline - p.scroll, f.text, word);
+        p.l.fonts.draw(&p.canvas, font, f.x - p.dx, f.baseline - p.scroll, f.text, word);
         // Decorations: one pixel lines, or thicker with the font.
         const thick = @max(1, @round(st.font_size / 16));
         if (st.text_decoration.underline) p.fill(f.x, f.baseline + 1, f.w, thick, word);
@@ -1037,12 +1266,37 @@ pub const RenderOpts = struct {
     /// Scroll so the element with this id has its border box's top at
     /// the viewport's (`scrollIntoView`), before painting.
     scroll_to: ?[]const u8 = null,
+    /// A directory the page's linked stylesheets are read from, by
+    /// relative path (absolute `/fonts/…` and `/css/…` paths are not:
+    /// the Ahem face is built into the test fonts).
+    dir: ?std.Io.Dir = null,
+};
+
+/// Linked stylesheets read beside the page, for the WPT tests.
+const DirLoader = struct {
+    a: std.mem.Allocator,
+    dir: std.Io.Dir,
+
+    fn loader(d: *DirLoader) style.Loader {
+        return .{ .ctx = @ptrCast(d), .fetch = fetch };
+    }
+
+    fn fetch(ctx: *anyopaque, href: []const u8, base: ?[]const u8) ?style.Loader.Loaded {
+        const d: *DirLoader = @ptrCast(@alignCast(ctx));
+        if (href.len == 0 or href[0] == '/' or std.mem.startsWith(u8, href, "http")) return null;
+        const path = if (base) |b| (std.fs.path.join(d.a, &.{ std.fs.path.dirname(b) orelse ".", href }) catch return null) else href;
+        const text = d.dir.readFileAlloc(std.testing.io, path, d.a, .limited(1 << 20)) catch return null;
+        return .{ .text = text, .url = path };
+    }
 };
 
 pub fn renderForTestWith(a: std.mem.Allocator, src: []const u8, w: usize, h: usize, opts: RenderOpts) ![]u32 {
     const doc = try html.parse(a, src, .{});
     const env: style.Env = .{ .width = @floatFromInt(w), .height = @floatFromInt(h) };
-    const sheets = try style.collectDocumentSheets(a, doc, env);
+    const sheets = if (opts.dir) |d| blk: {
+        var dl: DirLoader = .{ .a = a, .dir = d };
+        break :blk try style.collectDocumentSheetsLoading(a, doc, env, try style.parseSheet(a, style.ua_sheet, .user_agent, env), dl.loader());
+    } else try style.collectDocumentSheets(a, doc, env);
     const styles = try a.create(style.Styles);
     styles.* = try style.compute(a, doc, sheets, env);
     var fixed: layout.FixedFonts = .{};
@@ -1070,7 +1324,7 @@ pub fn renderForTestWith(a: std.mem.Allocator, src: []const u8, w: usize, h: usi
     const px = try a.alloc(u32, w * h);
     const canvas = Canvas.init(px.ptr, w, h);
     canvas.fillAll(0xffffff);
-    try paint(l, &canvas, scroll);
+    try paintWith(l, &canvas, scroll, .{ .scratch = a });
     return px;
 }
 
@@ -1259,6 +1513,88 @@ test "paint: Acid2 against its pixel reference" {
         }
     }
     try std.testing.expectEqual(@as(usize, 0), differ);
+}
+
+// The WPT reftests (tools/fetch-wpt.sh into tools/testdata/wpt, ignored
+// by git): every listed test rendered beside the reference its
+// `rel=match` names on an 800×600 canvas with the Ahem face; a count per
+// module is printed, never asserted — the number is the measurement.
+// Tests with scripts, or a `reftest-wait`, are skipped.
+test "paint: the WPT reftest subsets, counted" {
+    const io = std.testing.io;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var root = std.Io.Dir.cwd().openDir(io, "tools/testdata/wpt", .{ .iterate = true }) catch {
+        std.debug.print("wpt: not fetched (tools/fetch-wpt.sh); skipped\n", .{});
+        return error.SkipZigTest;
+    };
+    defer root.close(io);
+    var mods: std.ArrayList([]const u8) = .empty;
+    var it = root.iterate();
+    while (try it.next(io)) |entry| if (entry.kind == .directory and std.mem.startsWith(u8, entry.name, "css-")) try mods.append(a, try a.dupe(u8, entry.name));
+    std.mem.sort([]const u8, mods.items, {}, struct {
+        fn f(_: void, x: []const u8, y: []const u8) bool {
+            return std.mem.order(u8, x, y) == .lt;
+        }
+    }.f);
+    for (mods.items) |mod| {
+        var dir = try root.openDir(io, mod, .{ .iterate = true });
+        defer dir.close(io);
+        var names: std.ArrayList([]const u8) = .empty;
+        var di = dir.iterate();
+        while (try di.next(io)) |entry| {
+            if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".html") or std.mem.indexOf(u8, entry.name, "-ref") != null) continue;
+            try names.append(a, try a.dupe(u8, entry.name));
+        }
+        std.mem.sort([]const u8, names.items, {}, struct {
+            fn f(_: void, x: []const u8, y: []const u8) bool {
+                return std.mem.order(u8, x, y) == .lt;
+            }
+        }.f);
+        var passed: usize = 0;
+        var total: usize = 0;
+        for (names.items) |name| {
+            const test_src = try dir.readFileAlloc(io, name, a, .limited(1 << 20));
+            if (std.mem.indexOf(u8, test_src, "<script") != null or std.mem.indexOf(u8, test_src, "reftest-wait") != null) continue;
+            const ref_rel = matchRef(test_src) orelse continue;
+            // The reference, relative to the test (`../reference/x` too).
+            const ref_src = root.readFileAlloc(io, try std.fs.path.join(a, &.{ mod, ref_rel }), a, .limited(1 << 20)) catch continue;
+            total += 1;
+            const w: usize = 800;
+            const h: usize = 600;
+            const got = try renderForTestWith(a, test_src, w, h, .{ .dir = dir });
+            const want = try renderForTestWith(a, ref_src, w, h, .{ .dir = dir });
+            var diff: ?usize = null;
+            for (got, want, 0..) |g, r, i| if ((g & 0xffffff) != (r & 0xffffff)) {
+                diff = i;
+                break;
+            };
+            if (diff == null) passed += 1 else if (verbose) std.debug.print("--- wpt/{s}/{s}: first difference at ({d}, {d}): {x:0>6} vs {x:0>6}\n", .{ mod, name, diff.? % w, diff.? / w, got[diff.?] & 0xffffff, want[diff.?] & 0xffffff });
+        }
+        std.debug.print("wpt/{s}: {d}/{d} agree\n", .{ mod, passed, total });
+    }
+}
+
+/// The `rel=match` reference a WPT test names (the first).
+fn matchRef(src: []const u8) ?[]const u8 {
+    var at: usize = 0;
+    while (std.mem.indexOfPos(u8, src, at, "<link")) |i| {
+        const end = std.mem.indexOfScalarPos(u8, src, i, '>') orelse return null;
+        const tag = src[i..end];
+        at = end;
+        if (std.mem.indexOf(u8, tag, "rel=\"match\"") == null and std.mem.indexOf(u8, tag, "rel=match") == null) continue;
+        const hp = std.mem.indexOf(u8, tag, "href=") orelse continue;
+        var v = tag[hp + 5 ..];
+        if (v.len > 0 and v[0] == '"') {
+            v = v[1..];
+            const q = std.mem.indexOfScalar(u8, v, '"') orelse continue;
+            return v[0..q];
+        }
+        const sp = std.mem.indexOfAny(u8, v, " \t\r\n/>") orelse v.len;
+        return v[0..sp];
+    }
+    return null;
 }
 
 // A line with hundreds of inline boxes: the spans appended for them grow

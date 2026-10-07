@@ -113,7 +113,20 @@ pub const FixedFonts = struct {
         return .{ .ctx = @ptrCast(self), .vtable = &vtable };
     }
 
+    /// The Ahem face (`font-family: Ahem`, WPT's test font): every glyph
+    /// a square the font size wide and tall — ascent 0.8, descent 0.2 —
+    /// `X` and the rest solid, a space blank, `p` the descender part
+    /// alone, `É` the ascender part alone.
+    fn isAhem(font: Font) bool {
+        for (font.families) |f| {
+            if (std.ascii.eqlIgnoreCase(f, "ahem")) return true;
+            break;
+        }
+        return false;
+    }
+
     fn cellW(font: Font) f64 {
+        if (isAhem(font)) return @max(1, @round(font.size));
         return @max(1, @round(font.size / 2));
     }
 
@@ -141,6 +154,14 @@ pub const FixedFonts = struct {
             i += n;
             if (cp == ' ' or cp == 0xa0) continue; // a space, breaking or not, is blank
             const px = x + col * cw;
+            if (isAhem(font)) {
+                // Exact squares, no inset: the glyph is the box.
+                const y0: f64 = if (cp == 'p') baseline else top;
+                const gh: f64 = if (cp == 'p') h - asc else if (cp == 0xc9) asc else h;
+                if (px < 0 or y0 < 0) continue;
+                canvas.fillRect(@intFromFloat(@round(px)), @intFromFloat(@round(y0)), @intFromFloat(cw), @intFromFloat(gh), color);
+                continue;
+            }
             if (px < 0 or top < 0 or cw < 3 or h < 3) continue;
             canvas.fillRect(@intFromFloat(@round(px + 1)), @intFromFloat(@round(top + 1)), @intFromFloat(cw - 2), @intFromFloat(h - 2), color);
         }
@@ -3836,20 +3857,72 @@ pub fn scrollMax(l: *const Layout, id: BoxId) f64 {
     return @max(0, scrollExtent(l, id) - inner);
 }
 
-/// The nearest ancestor that clips an absolutely positioned box — an
-/// overflow box between it and its containing block (inclusive); none
-/// past the containing block, and none for a fixed box.
+/// A box the painter renders as a layer of its own (a stacking
+/// context): translucent, transformed beyond a translation, or clipped
+/// by a shape.
+pub fn isLayerBox(b: *const Box) bool {
+    if (b.kind == .root or b.kind == .text) return false;
+    const st = b.style;
+    return (st.opacity > 0 and st.opacity < 1) or st.transform_fns.len > 0 or st.clip_path != .none;
+}
+
+/// The nearest ancestor that owns an absolutely positioned box's
+/// painting — a layer box anywhere above it (a stacking context takes
+/// every descendant), or an overflow box between it and its containing
+/// block (inclusive). None for a fixed box, unless a layer holds it.
 pub fn clipAncestor(l: *const Layout, id: BoxId) ?BoxId {
     const b = l.get(id);
-    if (b.style.position == .fixed) return null;
     const cb = containingBlockFor(l, id);
+    var past_cb = b.style.position == .fixed;
     var p = b.parent;
     while (p) |pid| : (p = l.get(pid).parent) {
         const pb = l.get(pid);
-        if (clipsOverflow(pb)) return pid;
-        if (pid == cb) return null;
+        if (isLayerBox(pb)) return pid;
+        if (!past_cb and clipsOverflow(pb)) return pid;
+        if (pid == cb) past_cb = true;
     }
     return null;
+}
+
+pub const Bounds = struct { x: f64, y: f64, w: f64, h: f64 };
+
+/// What a box's subtree paints: the union of its and its descendants'
+/// border boxes (a fixed descendant aside), document coordinates.
+pub fn paintBounds(l: *const Layout, id: BoxId) Bounds {
+    const b = l.get(id);
+    var x0 = b.x;
+    var y0 = b.y;
+    var x1 = b.x + b.w;
+    var y1 = b.y + b.h;
+    var stack: [64]BoxId = undefined;
+    var n: usize = 0;
+    for (b.children.items) |c| if (n < stack.len) {
+        stack[n] = c;
+        n += 1;
+    };
+    while (n > 0) {
+        n -= 1;
+        const cid = stack[n];
+        const cb = l.get(cid);
+        if (cb.kind == .text or cb.style.position == .fixed) continue;
+        if (cb.laid_out and cb.kind != .inline_box) {
+            x0 = @min(x0, cb.x);
+            y0 = @min(y0, cb.y);
+            x1 = @max(x1, cb.x + cb.w);
+            y1 = @max(y1, cb.y + cb.h);
+        }
+        for (cb.lines.items) |ln| {
+            x0 = @min(x0, ln.x);
+            y0 = @min(y0, ln.y);
+            x1 = @max(x1, ln.x + ln.w);
+            y1 = @max(y1, ln.y + ln.h);
+        }
+        for (cb.children.items) |c| if (n < stack.len) {
+            stack[n] = c;
+            n += 1;
+        };
+    }
+    return .{ .x = x0, .y = y0, .w = x1 - x0, .h = y1 - y0 };
 }
 
 /// A sticky box's offset at this scroll: it is held at its `top` (or

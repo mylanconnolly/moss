@@ -26,6 +26,7 @@ pub const paint = @import("web/paint.zig");
 pub const fonts = @import("web/fonts.zig");
 pub const store = @import("web/store.zig");
 pub const script = @import("web/script.zig");
+pub const animate = @import("web/animate.zig");
 
 test {
     _ = url;

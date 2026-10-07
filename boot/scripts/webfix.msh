@@ -26,6 +26,7 @@ let pages = [
   { path: "/linked.html", file: "linked.html" }
   { path: "/app.html", file: "app.html" }
   { path: "/scroll.html", file: "scroll.html" }
+  { path: "/anim.html", file: "anim.html" }
 
   { path: "/churn.html", file: "churn.html" }
   { path: "/app.js", file: "app.js" }

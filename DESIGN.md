@@ -8114,6 +8114,81 @@ surroundings). `scrollBy` repaints whole when a sticky box exists, as
 for a fixed one. Residuals are in ROADMAP's stage 9 entry: one offset
 axis in the painter, so containers scroll vertically only.
 
+**Stage 9, layers: transforms, opacity and clip paths (as built,
+2026-10-07).** The painter gained an x offset: `Painter.dx` is what the
+canvas's left edge is in document x, subtracted wherever a document x
+becomes a canvas x (fills, clips, text, pictures, gradients, controls,
+tints), the twin of `scroll` for y — so a painter can target a buffer
+that starts anywhere, which is what a layer needs and what horizontal
+scrolling will need. A layer box (`layout.isLayerBox`: opacity in (0,
+1), a transform beyond translations, a clip shape) paints through
+`paintLayered`: the subtree's bounds (`paintBounds`, every descendant
+box's border box) are mapped through the box's affine (`transformOf`:
+the functions in order about `transform-origin`, CSS's matrix
+convention), clamped to the canvas's clip, and mapped back through the
+inverse to the part of the source that matters; that part is painted
+twice into scratch buffers (`Options.scratch`), over black and over
+white, with a copy of the painter whose canvas is the layer, whose
+`dx`/`scroll` place the layer's origin and whose `layer_root` is the
+box (so its own `paintBox` paints plainly); the alpha of a pixel is one
+minus the mean channel difference, its colour the black render divided
+by it; and each destination pixel is mapped back, sampled at the
+nearest layer pixel, tested against the clip shape in document
+coordinates (`clipInside`: inset with a radius, circle, ellipse, polygon
+by even-odd crossings), and blended with the alpha times the opacity.
+Nearest sampling is deliberate for now: integer scales and quarter turns
+are pixel-exact, which the reftests rely on. A layer box is a stacking
+context in the positioned-layer sense: `collectLayer` lists it, the
+flow phases skip it, `clipAncestor` gives it every absolutely
+positioned descendant (past the containing block too), and its own
+`paintContent` collects them. Style: `Computed.transform_fns` is the
+function list (`TransformFn`) when any function is not a translation,
+else empty with `translate` the sum as before (`transformOf` in
+style.zig replaces `translationOf`); `transform_origin`; `clip_path`
+(`ClipPath`). The page host hands the painter its picture scratch as
+the layers' memory (`paintOpts`), reset per paint; a layer over a
+million pixels paints plainly.
+
+**Stage 9, transitions, animations and `:hover` (as built,
+2026-10-07).** The document carries interaction state (`hovered`,
+`active`, `focused`); `:hover` and `:active` match the chain from that
+element up, `:focus` the element, `:focus-within` its chain; a sheet
+whose selectors use any of them is `interactive`, and the page host
+restyles on a pointer move that changes the element under it (or a
+press) only then. The cascade gained `transition-property/-duration/
+-delay/-timing-function` as lists and `animation-*` for one animation,
+both with shorthands parsed by what each token can be (a time is the
+duration then the delay, a timing name or function the timing, the rest
+the property or the name), `TimingFn.at` (Bézier by bisection on x),
+`@keyframes` into `Sheet.keyframes` (offsets from `from`/`to`/percent
+lists, each block's declarations expanded as a rule's), `interpolate`
+(a fresh `Computed` whose interpolable fields are lerped, discrete ones
+switched at the half, a transform list lerped function by function when
+the shapes match) and `applyKeyframe` (a frame's declarations over a
+base). `lib/web/animate.zig` is the engine, pure and tested on the host
+with the real cascade: `snapshot` copies the computed style of every
+element with a transition before the arena goes; `onRestyle` holds the
+cascade's new values against the snapshot per transitionable property
+and starts a transition from the old value — from the value a running
+one shows, retargeted — and starts or stops an animation by the
+element's `animation-name`; `apply` writes the moment's values into the
+styles, each a fresh `Computed` in the frame's arena, and says whether
+anything still runs. Ends are kept in fixed slots as full `Computed`
+copies (a transition's ends outlive the restyle that made them). The
+page host owns the clock: `scheduleWake` asks for a wake 16 ms out while
+anything runs, `tick` restyles, and a restyle that started something
+asks for its first frame. A frame is a whole restyle and layout. Three
+things the device found that the host did not: the engine's fixed slots
+held computed styles whose defaults are not zero, 400 KB of data
+segment that took the page image past its 4 MB staging buffer (the
+slots are `undefined` now, with `used` flags beside them); the page
+host's `resetLayout` left `page.styles` pointing into the poisoned
+arena on the load path, which the snapshot was the first to read; and a
+snapshot taken from the *animated* styles restarted every transition
+from its shown value each frame, so it converged and never arrived —
+the page keeps `base_styles` (the cascade's) for the engine and
+`styles` (the animated copy) for layout.
+
 ## JavaScript
 
 The decision row "JavaScript" (2026-09-24) fixes the shape: `lib/js/` is

@@ -187,6 +187,12 @@ fn layoutArena() std.mem.Allocator {
 fn resetLayout() void {
     setHi(region.len);
     web.layout.in_progress = null; // a failed layout's struct lived here
+    // What lived there is gone with it (the styles pointer outlived a
+    // reset on the load path and the animation engine's snapshot read
+    // the poisoned arena, 2026-10-07).
+    page.layout = null;
+    page.styles = null;
+    page.base_styles = null;
 }
 
 fn resetDocument() void {
@@ -461,19 +467,27 @@ fn afterScript() void {
 /// The page cannot wait on a clock and its host at once, so the host
 /// keeps the clock: tell it when the next timer or frame is due.
 fn scheduleWake() void {
-    if (!scripts_up) return;
-    const due = scripts.nextDue() orelse return;
     const now: f64 = @floatFromInt(usys.nowMs());
-    const delay: u64 = if (due > now) @intFromFloat(due - now) else 0;
+    var due: ?f64 = if (scripts_up) scripts.nextDue() else null;
+    // A running transition or animation wants the next frame.
+    if (anim.running()) due = @min(due orelse std.math.inf(f64), now + web.animate.frame_ms);
+    const at = due orelse return;
+    const delay: u64 = if (at > now) @intFromFloat(at - now) else 0;
     event(.wake, delay, 0);
 }
 
 /// The host's `tick`: run what is due, then what follows from it.
 fn tick() void {
-    if (!scripts_up) return;
-    _ = scripts.runDue(@floatFromInt(usys.nowMs()));
-    maybeReclaim();
-    afterScript();
+    if (scripts_up) {
+        _ = scripts.runDue(@floatFromInt(usys.nowMs()));
+        maybeReclaim();
+        afterScript();
+    }
+    // A frame of what animates: the restyle applies this moment's values.
+    if (anim.running()) {
+        relayout(false);
+        scheduleWake();
+    }
 }
 
 /// Rasterized glyphs, kept across navigations.
@@ -646,10 +660,20 @@ const Background = struct {
 const max_scrolls = 32;
 const ContainerScroll = struct { node: dom.NodeId, top: f64 };
 
+/// CSS transitions and animations: the engine keeps the ends of what
+/// runs; the page keeps the clock (the host's ticks) and restyles each
+/// frame while anything runs.
+var anim: web.animate.Engine = .{};
+
 const Page = struct {
     doc: ?*dom.Document = null,
     sheets: []const web.style.Sheet = &.{},
     styles: ?*web.style.Styles = null,
+    /// The cascade's own values, before the animation engine's (the
+    /// engine holds the next restyle against these, never against what
+    /// it animated — a transition restarted from its shown value every
+    /// frame converged and never arrived, 2026-10-07).
+    base_styles: ?*web.style.Styles = null,
     layout: ?*web.layout.Layout = null,
     base: ?web.url.Url = null,
     scroll_y: f64 = 0,
@@ -662,6 +686,9 @@ const Page = struct {
     /// scroll container under it.
     ptr_x: u64 = 0,
     ptr_y: u64 = 0,
+    /// A sheet's selectors depend on `:hover`/`:active`/`:focus`: a
+    /// change of those restyles the document.
+    interactive: bool = false,
     url_buf: [2048]u8 = undefined,
     url_len: usize = 0,
     type_buf: [256]u8 = undefined,
@@ -939,6 +966,7 @@ fn fresh() void {
     stopScripts();
     nav_pending = false;
     page = .{};
+    anim.reset();
     resetDocument();
     resetLayout();
     picture_fba.reset();
@@ -983,6 +1011,7 @@ fn present(markup: []const u8, failure: u64) void {
     eventText(.title, std.mem.trim(u8, title, " \t\r\n"));
     phase = "collecting its style sheets";
     page.sheets = collectSheets(doc);
+    page.interactive = web.style.sheetsInteractive(page.sheets);
     const t_sheets = usys.nowMs();
     phase = "loading its web fonts";
     loadFontFaces();
@@ -1330,15 +1359,29 @@ fn imagesProvider() web.layout.Images {
 /// decide differently).
 fn relayout(recollect: bool) void {
     const doc = page.doc orelse return;
+    // What the cascade gave the elements with transitions, before the
+    // arena goes.
+    if (page.base_styles) |old| anim.snapshot(doc, old);
     resetLayout();
     page.layout = null;
     page.styles = null;
-    if (recollect) page.sheets = collectSheets(doc);
+    if (recollect) {
+        page.sheets = collectSheets(doc);
+        page.interactive = web.style.sheetsInteractive(page.sheets);
+    }
     const a = layoutArena();
     web.style.px_scale = zoomScale();
     const t_layout = usys.nowMs();
+    const base = a.create(web.style.Styles) catch outOfMemory();
+    base.* = web.style.compute(a, doc, page.sheets, env()) catch outOfMemory();
+    // Transitions start from the change; animations from their names;
+    // then this frame's values go into a copy the layout reads.
+    const now_ms: f64 = @floatFromInt(usys.nowMs());
+    anim.onRestyle(a, doc, page.sheets, base, now_ms);
     const styles = a.create(web.style.Styles) catch outOfMemory();
-    styles.* = web.style.compute(a, doc, page.sheets, env()) catch outOfMemory();
+    styles.* = .{ .computed = a.dupe(*const web.style.Computed, base.computed) catch outOfMemory() };
+    _ = anim.apply(a, doc, page.sheets, styles, env(), now_ms) catch outOfMemory();
+    page.base_styles = base;
     page.styles = styles;
     const l = web.layout.layoutDocumentWith(a, doc, styles, page_fonts.fonts(), imagesProvider(), @floatFromInt(vw), @floatFromInt(vh)) catch outOfMemory();
     page.layout = l;
@@ -1350,6 +1393,8 @@ fn relayout(recollect: bool) void {
     if (page.find_len > 0) collectMatches();
     last_layout_ms = usys.nowMs() - t_layout;
     paintAll();
+    // A transition or animation a restyle started wants its frames.
+    if (anim.running()) scheduleWake();
 }
 
 /// The last relayout's layout time and the last paint's, for the log.
@@ -1405,7 +1450,7 @@ fn paintAll() void {
     // only as `prefers-color-scheme`, never as a canvas it did not ask for.
     canvas.fillAll(0xffffff);
     web.fonts.rasterized = 0;
-    web.paint.paintWith(l, &canvas, page.scroll_y, .{ .highlights = highlightsNow(), .focus = page.focus }) catch outOfMemory();
+    web.paint.paintWith(l, &canvas, page.scroll_y, paintOpts()) catch outOfMemory();
     last_glyphs = web.fonts.rasterized;
     commitAll();
 }
@@ -1414,6 +1459,22 @@ fn paintAll() void {
 /// the band that came into view is painted (a whole viewport a wheel
 /// notch was 50 ms under emulation, and the pictures it fetched 700).
 /// Pictures wait for `idle`.
+/// The element under the pointer changed: `:hover` may match
+/// differently, so the document restyles when a sheet cares.
+fn hoverChanged(now: ?dom.NodeId) void {
+    const doc = page.doc orelse return;
+    if (doc.hovered == now) return;
+    doc.hovered = now;
+    if (page.interactive) relayout(false);
+}
+
+fn activeChanged(now: ?dom.NodeId) void {
+    const doc = page.doc orelse return;
+    if (doc.active == now) return;
+    doc.active = now;
+    if (page.interactive) relayout(false);
+}
+
 /// A wheel: the innermost scroll container under the pointer takes it
 /// while it can move that way; else the page scrolls.
 fn scrollWheel(dy: f64) void {
@@ -1495,6 +1556,14 @@ fn scriptElementScroll(_: *anyopaque, id: dom.NodeId, set: ?f64) f64 {
     return containerScroll(id);
 }
 
+/// What a paint gets: the highlights, the focus, and the pictures'
+/// scratch as the layers' memory (pictures are fetched between paints,
+/// never during one, so the scratch is free then).
+fn paintOpts() web.paint.Options {
+    picture_scratch_fba.reset();
+    return .{ .highlights = highlightsNow(), .focus = page.focus, .scratch = picture_scratch_fba.allocator() };
+}
+
 fn scrollBy(dy: f64) void {
     const before = page.scroll_y;
     if (!scrollTo(page.scroll_y + dy)) return;
@@ -1545,7 +1614,7 @@ fn paintBand(y0: usize, y1: usize, canvas_in: *const ui.Canvas) void {
     canvas.clip_y1 = y1;
     canvas.fillRect(0, y0, vw, y1 - y0, 0xffffff);
     web.fonts.rasterized = 0;
-    web.paint.paintWith(l, &canvas, page.scroll_y, .{ .highlights = highlightsNow(), .focus = page.focus }) catch outOfMemory();
+    web.paint.paintWith(l, &canvas, page.scroll_y, paintOpts()) catch outOfMemory();
     last_glyphs = web.fonts.rasterized;
     commitAll();
 }
@@ -2021,6 +2090,7 @@ fn pointer(kind: wire.PointerKind, x: u64, y: u64) void {
                 };
                 return;
             }
+            hoverChanged(hitNode(x, y));
             const link = linkAt(x, y) orelse "";
             if (std.mem.eql(u8, link, page.hover_buf[0..page.hover_len])) return;
             page.hover_len = @min(link.len, page.hover_buf.len);
@@ -2032,6 +2102,7 @@ fn pointer(kind: wire.PointerKind, x: u64, y: u64) void {
             page.press_x = x;
             page.press_y = y;
             page.dragging = true;
+            activeChanged(page.pressed);
             const had = page.sel_from != null;
             page.sel_from = hitFragment(x, y);
             page.sel_to = null;
@@ -2041,6 +2112,7 @@ fn pointer(kind: wire.PointerKind, x: u64, y: u64) void {
             const was = page.pressed;
             page.pressed = null;
             page.dragging = false;
+            activeChanged(null);
             if (page.sel_to != null and page.sel_from != null) {
                 // A drag: the selection is the news, not a click.
                 var text: [2048]u8 = undefined;

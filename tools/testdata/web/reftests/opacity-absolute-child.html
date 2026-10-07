@@ -1,0 +1,4 @@
+<!DOCTYPE html>
+<title>An absolutely positioned descendant is inside the opacity layer, whatever its containing block</title>
+<style> body { margin: 0; } .o { opacity: 0.5; width: 10px; height: 10px; } .a { position: absolute; left: 50px; top: 20px; width: 60px; height: 30px; background: blue; } </style>
+<div class="o"><div class="a"></div></div>

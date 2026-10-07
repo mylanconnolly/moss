@@ -963,12 +963,68 @@ supervises), and memory history per unit beside the CPU one.
       horizontal one touches every primitive); `left`/`right` sticky
       likewise; `scrollHeight` is still the client height; a sticky
       inside an inline-block or a float is placed, not held; the
-      scrollbar is a thumb without a track or a drag. Remaining for the
-      stage: scaling and rotating transforms and opacity at paint time,
-      clip paths, stacking contexts for them, then transitions and
-      animations on the page's tick; shaping and bidi for the scripts
-      that need them. *Exit:* WPT reftest subsets per module with
-      counts.
+      scrollbar is a thumb without a track or a drag. ✅ *Transforms,
+      opacity and clip paths at paint time* (2026-10-07): a box that is
+      translucent, transformed beyond a translation, or clipped by a
+      shape is a layer (`layout.isLayerBox`): the painter renders its
+      subtree into an offscreen buffer twice, over black and over white,
+      so each pixel's alpha is the difference, then composites it onto
+      the canvas through the transform (every destination pixel mapped
+      back through the inverse and sampled at the nearest layer pixel),
+      the clip shape and the opacity. `transform` keeps its function
+      list when it is more than translations (`scale`, `rotate`, `skew`,
+      `matrix`, mixed with translations, composed in order about
+      `transform-origin`); pure translations still move the box in
+      layout. `clip-path` takes `inset()` (with `round`), `circle()`,
+      `ellipse()` and `polygon()`. A layer box is a stacking context:
+      it joins its unit's positioned layer by z-index and takes every
+      absolutely positioned descendant, whatever the containing block.
+      The painter gained its x offset (`Painter.dx`, what the canvas's
+      left edge is in document x), so a layer's painter targets a
+      buffer the size of the visible part of the box — the memory is
+      the page's picture scratch (6 MB), free between pictures; a layer
+      past a million pixels paints plainly, without its effect. Five
+      reftests (opacity, an absolute inside an opacity box, `scale(2)`,
+      `rotate(90deg)` with halves swapped, `inset()`); exact by
+      construction, since nearest sampling keeps integer scales and
+      quarter turns pixel-perfect. Residuals: nearest sampling (a
+      rotation's edges are stairs; bilinear is the next step), a
+      shape's edge is not anti-aliased, the hit test ignores transforms,
+      `rotateX`/`rotateY`/`matrix3d`/`perspective` are accepted and
+      flattened. ✅ *Transitions, animations, and `:hover`* (2026-10-07): `:hover`,
+      `:active`, `:focus` and `:focus-within` match from state the host
+      keeps on the document (the deepest element under the pointer, the
+      pressed one, the focused one); the page restyles when that state
+      changes and a sheet's selectors depend on it (`Sheet.interactive`).
+      `transition-*` and `animation-*` with their shorthands, `@keyframes`
+      collected into the sheets, timing functions (the keywords,
+      `cubic-bezier()` by bisection, `steps()`), and `style.interpolate`
+      over computed values — lengths, percentages, colours, numbers, the
+      translation, a transform list of the same shape — anything else
+      switching at the half. The engine (`lib/web/animate.zig`) is pure
+      and host-tested: before a restyle it snapshots the elements that
+      declare transitions, after one it starts a transition for each
+      changed transitionable property (retargeting a running one from
+      the value it shows) and an animation for each element naming
+      keyframes, and each frame it writes the moment's values into the
+      styles as fresh computed values; the page host keeps the clock,
+      asking the window for a wake 16 ms out while anything runs and
+      restyling on each tick. One element animates one animation; the
+      engine holds 48 transitions and 24 animations in fixed slots. The
+      `webpage` drill gained a fixture whose box widens on hover over a
+      second: the pointer moves onto it, the host ticks the page's
+      wakes, and the box is seen part-way and then at its end.
+      Found on the device: the engine's slots in the data segment took
+      the page image past its staging buffer; a stale styles pointer
+      after a layout reset on the load path; a snapshot of the animated
+      values restarting every transition each frame (the cascade's own
+      values are kept apart now). Residuals: a frame is a whole restyle
+      and layout (fine for a box, not a site), no `transitionend`/
+      `animationend` events, no `Element.animate`, `:focus` state is the
+      page's focus only, a transform from `none` switches at the half. Remaining for the
+      stage: shaping and bidi for the scripts that need them (deferred
+      behind Latin, Greek and Cyrillic, as decided). *Exit:* WPT
+      reftest subsets per module with counts.
     - **(10) JavaScript, the engine** (decision row "JavaScript",
       2026-09-24). `lib/js/`, in stages, each with its test262 numbers
       and a DESIGN entry: (a) lexer, parser and AST for ES2023 — ASI,

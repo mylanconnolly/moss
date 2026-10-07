@@ -97,6 +97,20 @@ fn loadPage(id: webhost.PageId, url: []const u8) void {
     fail("the fixture never answered", 25);
 }
 
+/// Serve what the page says after a command until it asks for the next.
+fn serveUntilParked(id: webhost.PageId) void {
+    var n: usize = 0;
+    while (n < 400) : (n += 1) {
+        switch (host.step()) {
+            .dead => fail("the page died", 72),
+            .failed, .idle => fail("the host stopped", 73),
+            .served => if (host.page(id).parked != null) return,
+            else => {},
+        }
+    }
+    fail("the page never parked again", 74);
+}
+
 /// Serve until `page` reports event `kind`.
 fn waitEvent(id: webhost.PageId, kind: wire.Event, steps: usize) void {
     var n: usize = 0;
@@ -273,6 +287,28 @@ export fn umain(log_h: u64, chan_h: u64, _: u64, blob_va: u64, blob_len: u64) ca
     scrollAndCommit(a, 400);
     demand(countColour(a, 0x000080) == 0, "the sticky header outlived its containing block", 67);
     _ = usys.log(glog, "webpagecli: the container scrolled and the header stuck");
+
+    // 5. `:hover` restyles the page, and a transition runs on the host's
+    // ticks: the box grows from 100 to 200 px over a second of wakes,
+    // seen part-way and at its end.
+    loadPage(a, "http://www.moss.test:8080/anim.html");
+    demand(countColour(a, 0xff0000) == 100 * 20, "the box is not 100 px wide at rest", 68);
+    demand(host.send(a, .{ .pointer = .{ .kind = .move, .x = 50, .y = 10 } }), "send move over the box", 69);
+    serveUntilParked(a);
+    var mid = false;
+    const t0 = usys.nowMs();
+    while (usys.nowMs() - t0 < 3000) {
+        if (host.wakeDelay(a)) |d| if (d > 0) usys.sleepMs(@min(d, 30));
+        host.tickWakes();
+        if (pa.parked == null) serveUntilParked(a);
+        const red = countColour(a, 0xff0000);
+        if (red > 100 * 20 and red < 200 * 20) mid = true;
+        if (red == 200 * 20) break;
+        if (host.wakeDelay(a) == null) usys.sleepMs(20);
+    }
+    demand(mid, "the width never showed a value between its ends", 70);
+    demand(countColour(a, 0xff0000) == 200 * 20, "the transition did not end at 200 px", 71);
+    _ = usys.log(glog, "webpagecli: the hover transition ran to its end");
 
     _ = usys.log(glog, "webpagecli: page domains ok");
     host.deinit();

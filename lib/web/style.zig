@@ -113,6 +113,75 @@ pub const Overflow = enum { visible, hidden, scroll, auto, clip };
 /// `background-attachment`: `fixed` anchors the image to the viewport
 /// (its positioning area), the others to the box.
 pub const BackgroundAttachment = enum { scroll, fixed, local };
+
+/// A timing function (`transition-timing-function`, `animation-*`).
+pub const TimingFn = union(enum) {
+    linear,
+    ease,
+    ease_in,
+    ease_out,
+    ease_in_out,
+    cubic: [4]f64,
+    /// `steps(n, start|end)`.
+    steps: struct { n: u32, start: bool },
+
+    /// The eased progress for a linear one in [0, 1].
+    pub fn at(tf: TimingFn, t_in: f64) f64 {
+        const t = @max(0, @min(1, t_in));
+        return switch (tf) {
+            .linear => t,
+            .ease => bezier(0.25, 0.1, 0.25, 1, t),
+            .ease_in => bezier(0.42, 0, 1, 1, t),
+            .ease_out => bezier(0, 0, 0.58, 1, t),
+            .ease_in_out => bezier(0.42, 0, 0.58, 1, t),
+            .cubic => |c| bezier(c[0], c[1], c[2], c[3], t),
+            .steps => |st| blk: {
+                const n: f64 = @floatFromInt(@max(1, st.n));
+                const k = if (st.start) @ceil(t * n) else @floor(t * n);
+                break :blk @min(1, k / n);
+            },
+        };
+    }
+
+    /// A cubic Bézier easing curve: the y at the x that equals t, by
+    /// bisection on the curve's x.
+    fn bezier(x1: f64, y1: f64, x2: f64, y2: f64, t: f64) f64 {
+        if (t <= 0) return 0;
+        if (t >= 1) return 1;
+        var lo: f64 = 0;
+        var hi: f64 = 1;
+        var u: f64 = t;
+        var i: usize = 0;
+        while (i < 24) : (i += 1) {
+            const x = 3 * (1 - u) * (1 - u) * u * x1 + 3 * (1 - u) * u * u * x2 + u * u * u;
+            if (x < t) lo = u else hi = u;
+            u = (lo + hi) / 2;
+        }
+        return 3 * (1 - u) * (1 - u) * u * y1 + 3 * (1 - u) * u * u * y2 + u * u * u;
+    }
+};
+
+pub const AnimationDirection = enum { normal, reverse, alternate, alternate_reverse };
+pub const AnimationFill = enum { none, forwards, backwards, both };
+
+/// One function of a `transform` list, in order; angles in degrees.
+pub const TransformFn = union(enum) {
+    translate: [2]LengthPercent,
+    scale: [2]f64,
+    rotate: f64,
+    skew: [2]f64,
+    matrix: [6]f64,
+};
+
+/// `clip-path`: a basic shape over the border box.
+pub const ClipPath = union(enum) {
+    none,
+    inset: struct { top: LengthPercent, right: LengthPercent, bottom: LengthPercent, left: LengthPercent, radius: LengthPercent },
+    /// Null radius: `closest-side`.
+    circle: struct { r: ?LengthPercent, cx: LengthPercent, cy: LengthPercent },
+    ellipse: struct { rx: ?LengthPercent, ry: ?LengthPercent, cx: LengthPercent, cy: LengthPercent },
+    polygon: []const [2]LengthPercent,
+};
 pub const Visibility = enum { visible, hidden, collapse };
 pub const Cursor = enum { auto, default, none, context_menu, help, pointer, progress, wait, cell, crosshair, text, vertical_text, alias, copy, move, no_drop, not_allowed, grab, grabbing, e_resize, n_resize, ne_resize, nw_resize, s_resize, se_resize, sw_resize, w_resize, ew_resize, ns_resize, nesw_resize, nwse_resize, col_resize, row_resize, all_scroll, zoom_in, zoom_out };
 pub const BoxSizing = enum { content_box, border_box };
@@ -219,6 +288,29 @@ pub const Computed = struct {
     /// The translation part of `transform` (a percentage is of the box's
     /// own size); scales and rotations are not painted yet.
     translate: [2]LengthPercent = .{ .{ .px = 0 }, .{ .px = 0 } },
+    /// The `transform` list when it is more than translations (then
+    /// `translate` is zero and the painter maps the box through it);
+    /// empty for none or for pure translations.
+    transform_fns: []const TransformFn = &.{},
+    transform_origin: [2]LengthPercent = .{ .{ .percent = 50 }, .{ .percent = 50 } },
+    clip_path: ClipPath = .none,
+    /// `transition-*`, as lists (the i-th property takes the i-th
+    /// duration, delay and timing, each list repeating): an empty
+    /// property list means `all`, a null entry means `all` too.
+    transition_property: []const ?Prop = &.{},
+    transition_none: bool = false,
+    transition_duration: []const f64 = &.{},
+    transition_delay: []const f64 = &.{},
+    transition_timing: []const TimingFn = &.{},
+    /// `animation-*`, the first animation of the list (one per element).
+    animation_name: []const u8 = "",
+    animation_duration: f64 = 0,
+    animation_delay: f64 = 0,
+    animation_timing: TimingFn = .ease,
+    animation_iterations: f64 = 1,
+    animation_direction: AnimationDirection = .normal,
+    animation_fill: AnimationFill = .none,
+    animation_paused: bool = false,
     /// `mask-image` and its placement (the background's kinds): what of
     /// the element shows is the picture's alpha.
     mask_image: BackgroundImage = .none,
@@ -356,6 +448,20 @@ pub const Prop = enum {
     border_bottom_left_radius,
     fill,
     transform,
+    transform_origin,
+    clip_path,
+    transition_property,
+    transition_duration,
+    transition_delay,
+    transition_timing_function,
+    animation_name,
+    animation_duration,
+    animation_delay,
+    animation_timing_function,
+    animation_iteration_count,
+    animation_direction,
+    animation_fill_mode,
+    animation_play_state,
     mask_image,
     mask_position_x,
     mask_position_y,
@@ -482,10 +588,33 @@ pub const Sheet = struct {
     imports: []const []const u8,
     /// `@font-face` rules seen, in order.
     font_faces: []const FontFace = &.{},
+    /// `@keyframes` rules seen, in order (a later name wins).
+    keyframes: []const Keyframes = &.{},
+    /// A selector in the sheet depends on the interaction state
+    /// (`:hover`, `:active`, `:focus`): a hover change restyles.
+    interactive: bool = false,
     /// The sheet's own URL when it was fetched (a `<link>` or an
     /// `@import`); null for a `<style>` block, whose base is the page.
     base: ?[]const u8 = null,
 };
+
+pub const Keyframe = struct { offset: f64, declarations: []const Declaration };
+pub const Keyframes = struct { name: []const u8, frames: []const Keyframe };
+
+/// The keyframes named `name` across the sheets: the last declared.
+pub fn keyframesNamed(sheets: []const Sheet, name: []const u8) ?Keyframes {
+    var found: ?Keyframes = null;
+    for (sheets) |sh| for (sh.keyframes) |k| if (std.mem.eql(u8, k.name, name)) {
+        found = k;
+    };
+    return found;
+}
+
+/// Whether any sheet's selectors depend on the interaction state.
+pub fn sheetsInteractive(sheets: []const Sheet) bool {
+    for (sheets) |sh| if (sh.interactive) return true;
+    return false;
+}
 
 /// A deep copy of a sheet into `a`: parse a sheet through a scratch
 /// arena — its tokens, blocks and re-flattened token lists are ten
@@ -507,7 +636,22 @@ pub fn cloneSheet(a: std.mem.Allocator, sheet: Sheet) Error!Sheet {
     for (sheet.imports, 0..) |u, i| imports[i] = try a.dupe(u8, u);
     const faces = try a.alloc(FontFace, sheet.font_faces.len);
     for (sheet.font_faces, 0..) |f, i| faces[i] = .{ .family = try a.dupe(u8, f.family), .src = try a.dupe(u8, f.src), .base = if (f.base) |b| try a.dupe(u8, b) else null };
-    return .{ .origin = sheet.origin, .rules = rules, .imports = imports, .font_faces = faces, .base = if (sheet.base) |b| try a.dupe(u8, b) else null };
+    const kfs = try a.alloc(Keyframes, sheet.keyframes.len);
+    for (sheet.keyframes, 0..) |k, i| {
+        const frames = try a.alloc(Keyframe, k.frames.len);
+        for (k.frames, 0..) |fr, j| {
+            const decls = try a.alloc(Declaration, fr.declarations.len);
+            for (fr.declarations, 0..) |d, m| decls[m] = .{ .prop = d.prop, .important = d.important, .name = if (d.name.len > 0) try a.dupe(u8, d.name) else "", .value = switch (d.value) {
+                .values => |v| .{ .values = try css.cloneValues(a, v) },
+                .custom => |v| .{ .custom = try css.cloneValues(a, v) },
+                .pending => |v| .{ .pending = try css.cloneValues(a, v) },
+                else => d.value,
+            } };
+            frames[j] = .{ .offset = fr.offset, .declarations = decls };
+        }
+        kfs[i] = .{ .name = try a.dupe(u8, k.name), .frames = frames };
+    }
+    return .{ .origin = sheet.origin, .rules = rules, .imports = imports, .font_faces = faces, .keyframes = kfs, .interactive = sheet.interactive, .base = if (sheet.base) |b| try a.dupe(u8, b) else null };
 }
 
 test "style: a cloned sheet outlives the arena it was parsed in" {
@@ -590,12 +734,18 @@ fn parseSheetLayered(a: std.mem.Allocator, text: []const u8, origin: Origin, env
     var out: std.ArrayList(Rule) = .empty;
     var imports: std.ArrayList([]const u8) = .empty;
     var faces: std.ArrayList(FontFace) = .empty;
+    var kfs: std.ArrayList(Keyframes) = .empty;
     // The per-block parsers below share the sheet parser's value stack.
-    try collectRulesFaces(a, rules, env, &out, &imports, &faces, p.scratchOf(), layers, "");
+    try collectRulesFaces(a, rules, env, &out, &imports, &faces, &kfs, p.scratchOf(), layers, "");
     if (base != null) for (faces.items) |*f| {
         f.base = base;
     };
-    return .{ .origin = origin, .rules = out.items, .imports = imports.items, .font_faces = faces.items, .base = base };
+    var interactive = false;
+    for (out.items) |r| if (selectors.isInteractive(r.selector)) {
+        interactive = true;
+        break;
+    };
+    return .{ .origin = origin, .rules = out.items, .imports = imports.items, .font_faces = faces.items, .keyframes = kfs.items, .interactive = interactive, .base = base };
 }
 
 /// A sheet's `@import`s fetched and appended before it (an imported
@@ -814,8 +964,10 @@ fn linkIsStylesheet(rel: []const u8) bool {
 
 fn collectRules(a: std.mem.Allocator, rules: []const css.Rule, env: Env, out: *std.ArrayList(Rule), imports: *std.ArrayList([]const u8)) Error!void {
     var faces: std.ArrayList(FontFace) = .empty;
+    var kfs: std.ArrayList(Keyframes) = .empty;
     var scratch: css.Scratch = .empty;
-    try collectRulesFaces(a, rules, env, out, imports, &faces, &scratch);
+    var layer_list: std.ArrayList([]const u8) = .empty;
+    try collectRulesFaces(a, rules, env, out, imports, &faces, &kfs, &scratch, .{ .list = &layer_list, .a = a }, "");
 }
 
 /// An `@font-face` block's descriptors: the family and the first
@@ -858,7 +1010,7 @@ fn layerIndex(layers: Layers, name: []const u8) Error!u8 {
     return @intCast(layers.list.items.len - 1);
 }
 
-fn collectRulesFaces(a: std.mem.Allocator, rules: []const css.Rule, env: Env, out: *std.ArrayList(Rule), imports: *std.ArrayList([]const u8), faces: *std.ArrayList(FontFace), scratch: *css.Scratch, layers: Layers, layer_prefix: []const u8) Error!void {
+fn collectRulesFaces(a: std.mem.Allocator, rules: []const css.Rule, env: Env, out: *std.ArrayList(Rule), imports: *std.ArrayList([]const u8), faces: *std.ArrayList(FontFace), kf: *std.ArrayList(Keyframes), scratch: *css.Scratch, layers: Layers, layer_prefix: []const u8) Error!void {
     for (rules) |r| switch (r) {
         .err => {},
         .qualified => |q| if (q.items) |items| try addQualifiedItems(a, q.prelude, items, out) else try addQualified(a, q, out, scratch),
@@ -868,11 +1020,61 @@ fn collectRulesFaces(a: std.mem.Allocator, rules: []const css.Rule, env: Env, ou
                 const q = try media.Query.parseValues(a, at.prelude);
                 if (!q.matches(env)) continue;
                 if (at.rules) |rs| {
-                    try collectRulesFaces(a, rs, env, out, imports, faces, scratch, layers, layer_prefix);
+                    try collectRulesFaces(a, rs, env, out, imports, faces, kf, scratch, layers, layer_prefix);
                     continue;
                 }
                 const block = at.block orelse continue;
-                try collectRulesFaces(a, try rulesOfBlock(a, block, scratch), env, out, imports, faces, scratch, layers, layer_prefix);
+                try collectRulesFaces(a, try rulesOfBlock(a, block, scratch), env, out, imports, faces, kf, scratch, layers, layer_prefix);
+            } else if (eq(at.name, "keyframes") or eq(at.name, "-webkit-keyframes")) {
+                var name: ?[]const u8 = null;
+                for (at.prelude) |v| {
+                    if (v == .token and v.token == .ident) name = v.token.ident;
+                    if (v == .token and v.token == .string) name = v.token.string;
+                }
+                const kname = name orelse continue;
+                const rs = at.rules orelse blk: {
+                    const block = at.block orelse continue;
+                    break :blk try rulesOfBlock(a, block, scratch);
+                };
+                var frames: std.ArrayList(Keyframe) = .empty;
+                for (rs) |fr| {
+                    if (fr != .qualified) continue;
+                    const q = fr.qualified;
+                    // The selector list: `from`, `to`, percentages.
+                    var offsets: [16]f64 = undefined;
+                    var no: usize = 0;
+                    for (q.prelude) |v| {
+                        if (no == offsets.len) break;
+                        if (v == .token and v.token == .ident) {
+                            if (eq(v.token.ident, "from")) {
+                                offsets[no] = 0;
+                                no += 1;
+                            } else if (eq(v.token.ident, "to")) {
+                                offsets[no] = 1;
+                                no += 1;
+                            }
+                        } else if (v == .token and v.token == .percentage) {
+                            offsets[no] = @max(0, @min(1, v.token.percentage.value / 100));
+                            no += 1;
+                        }
+                    }
+                    if (no == 0) continue;
+                    const items = q.items orelse blk: {
+                        var bp = try css.Parser.fromValuesScratch(a, q.block, scratch);
+                        break :blk try bp.parseBlockContents();
+                    };
+                    var decls: std.ArrayList(Declaration) = .empty;
+                    for (items) |item| if (item == .declaration) try expand(a, item.declaration, &decls);
+                    for (offsets[0..no]) |off| try frames.append(a, .{ .offset = off, .declarations = decls.items });
+                }
+                // In offset order (a stable sort keeps a repeated offset's
+                // later block later).
+                std.mem.sort(Keyframe, frames.items, {}, struct {
+                    fn lt(_: void, x: Keyframe, y: Keyframe) bool {
+                        return x.offset < y.offset;
+                    }
+                }.lt);
+                try kf.append(a, .{ .name = kname, .frames = frames.items });
             } else if (eq(at.name, "font-face")) {
                 if (at.items) |items| {
                     if (try fontFaceOfItems(items)) |f| try faces.append(a, f);
@@ -901,7 +1103,7 @@ fn collectRulesFaces(a: std.mem.Allocator, rules: []const css.Rule, env: Env, ou
                 const name = if (names.items.len > 0) names.items[0] else try std.fmt.allocPrint(a, "{s}.#anon{d}", .{ layer_prefix, layers.list.items.len });
                 const idx = try layerIndex(layers, name);
                 const first = out.items.len;
-                try collectRulesFaces(a, rs, env, out, imports, faces, scratch, layers, name);
+                try collectRulesFaces(a, rs, env, out, imports, faces, kf, scratch, layers, name);
                 for (out.items[first..]) |*rule| if (rule.layer == unlayered) {
                     rule.layer = idx;
                 };
@@ -915,15 +1117,15 @@ fn collectRulesFaces(a: std.mem.Allocator, rules: []const css.Rule, env: Env, ou
                     const q = media.Query.parseValues(a, at.prelude[k..]) catch continue;
                     if (!q.matches(env)) continue;
                 }
-                if (at.rules) |rs| try collectRulesFaces(a, rs, env, out, imports, faces, scratch, layers, layer_prefix);
+                if (at.rules) |rs| try collectRulesFaces(a, rs, env, out, imports, faces, kf, scratch, layers, layer_prefix);
             } else if (eq(at.name, "supports")) {
                 if (!supportsMatches(a, at.prelude)) continue;
                 if (at.rules) |rs| {
-                    try collectRulesFaces(a, rs, env, out, imports, faces, scratch, layers, layer_prefix);
+                    try collectRulesFaces(a, rs, env, out, imports, faces, kf, scratch, layers, layer_prefix);
                     continue;
                 }
                 const block = at.block orelse continue;
-                try collectRulesFaces(a, try rulesOfBlock(a, block, scratch), env, out, imports, faces, scratch, layers, layer_prefix);
+                try collectRulesFaces(a, try rulesOfBlock(a, block, scratch), env, out, imports, faces, kf, scratch, layers, layer_prefix);
             }
         },
     };
@@ -1168,6 +1370,118 @@ fn expand(a: std.mem.Allocator, d: css.Declaration, decls: *std.ArrayList(Declar
         try push(a, decls, .background_size, size, d.important);
         try push(a, decls, .background_repeat, repeat.items, d.important);
         try push(a, decls, .background_attachment, attachment, d.important);
+        return;
+    }
+    if (eq(name, "transition")) {
+        const t_props = [_]Prop{ .transition_property, .transition_duration, .transition_delay, .transition_timing_function };
+        if (wide) {
+            for (t_props) |p| try push(a, decls, p, vals, d.important);
+            return;
+        }
+        // Per item: the first time is the duration, the second the
+        // delay, a timing keyword or function the timing, any other
+        // identifier the property.
+        var props: std.ArrayList(css.Value) = .empty;
+        var durs: std.ArrayList(css.Value) = .empty;
+        var delays: std.ArrayList(css.Value) = .empty;
+        var fns: std.ArrayList(css.Value) = .empty;
+        var start: usize = 0;
+        var i: usize = 0;
+        while (i <= vals.len) : (i += 1) {
+            if (i < vals.len and !(vals[i] == .token and vals[i].token == .comma)) continue;
+            const item = vals[start..i];
+            start = i + 1;
+            var prop: ?css.Value = null;
+            var dur: ?css.Value = null;
+            var delay: ?css.Value = null;
+            var fnv: ?css.Value = null;
+            for (item) |v| {
+                if (isWs(v)) continue;
+                if (timeMs(v) != null) {
+                    if (dur == null) dur = v else if (delay == null) delay = v else return;
+                } else if (timingOf(v) != null) {
+                    if (fnv != null) return;
+                    fnv = v;
+                } else if (ident(v) != null) {
+                    if (prop != null) return;
+                    prop = v;
+                } else return;
+            }
+            if (prop == null and dur == null and delay == null and fnv == null) continue;
+            const comma: css.Value = .{ .token = .comma };
+            if (props.items.len > 0) {
+                try props.append(a, comma);
+                try durs.append(a, comma);
+                try delays.append(a, comma);
+                try fns.append(a, comma);
+            }
+            try props.append(a, prop orelse .{ .token = .{ .ident = "all" } });
+            try durs.append(a, dur orelse .{ .token = .{ .dimension = .{ .num = .{ .value = 0, .integer = true, .repr = "0" }, .unit = "s" } } });
+            try delays.append(a, delay orelse .{ .token = .{ .dimension = .{ .num = .{ .value = 0, .integer = true, .repr = "0" }, .unit = "s" } } });
+            try fns.append(a, fnv orelse .{ .token = .{ .ident = "ease" } });
+        }
+        try push(a, decls, .transition_property, props.items, d.important);
+        try push(a, decls, .transition_duration, durs.items, d.important);
+        try push(a, decls, .transition_delay, delays.items, d.important);
+        try push(a, decls, .transition_timing_function, fns.items, d.important);
+        return;
+    }
+    if (eq(name, "animation")) {
+        const an_props = [_]Prop{ .animation_name, .animation_duration, .animation_delay, .animation_timing_function, .animation_iteration_count, .animation_direction, .animation_fill_mode, .animation_play_state };
+        if (wide) {
+            for (an_props) |p| try push(a, decls, p, vals, d.important);
+            return;
+        }
+        // The first animation of the list only.
+        var item: []const css.Value = vals;
+        for (vals, 0..) |v, i| if (v == .token and v.token == .comma) {
+            item = vals[0..i];
+            break;
+        };
+        var name_v: ?css.Value = null;
+        var dur: ?css.Value = null;
+        var delay: ?css.Value = null;
+        var fnv: ?css.Value = null;
+        var count: ?css.Value = null;
+        var dir: ?css.Value = null;
+        var fill: ?css.Value = null;
+        var play: ?css.Value = null;
+        for (item) |v| {
+            if (isWs(v)) continue;
+            if (timeMs(v) != null) {
+                if (dur == null) dur = v else if (delay == null) delay = v else return;
+            } else if (timingOf(v) != null) {
+                if (fnv != null) return;
+                fnv = v;
+            } else if (v == .token and v.token == .number) {
+                if (count != null) return;
+                count = v;
+            } else if (ident(v)) |w| {
+                if (eq(w, "infinite") and count == null) {
+                    count = v;
+                } else if (keyword(AnimationDirection, v) != null and dir == null) {
+                    dir = v;
+                } else if (keyword(AnimationFill, v) != null and fill == null) {
+                    fill = v;
+                } else if ((eq(w, "running") or eq(w, "paused")) and play == null) {
+                    play = v;
+                } else if (name_v == null) {
+                    name_v = v;
+                } else return;
+            } else if (v == .token and v.token == .string) {
+                if (name_v != null) return;
+                name_v = v;
+            } else return;
+        }
+        const zero: css.Value = .{ .token = .{ .dimension = .{ .num = .{ .value = 0, .integer = true, .repr = "0" }, .unit = "s" } } };
+        try push(a, decls, .animation_name, try single(a, name_v orelse .{ .token = .{ .ident = "none" } }), d.important);
+        try push(a, decls, .animation_duration, try single(a, dur orelse zero), d.important);
+        try push(a, decls, .animation_delay, try single(a, delay orelse zero), d.important);
+        try push(a, decls, .animation_timing_function, try single(a, fnv orelse .{ .token = .{ .ident = "ease" } }), d.important);
+        try push(a, decls, .animation_iteration_count, try single(a, count orelse .{ .token = .{ .number = .{ .value = 1, .integer = true, .repr = "1" } } }), d.important);
+        try push(a, decls, .animation_direction, try single(a, dir orelse .{ .token = .{ .ident = "normal" } }), d.important);
+        try push(a, decls, .animation_fill_mode, try single(a, fill orelse .{ .token = .{ .ident = "none" } }), d.important);
+        try push(a, decls, .animation_play_state, try single(a, play orelse .{ .token = .{ .ident = "running" } }), d.important);
         return;
     }
     if (eq(name, "mask")) {
@@ -1687,6 +2001,317 @@ fn translationOf(vals: []const css.Value, font_size: f64, env: Env) ?[2]LengthPe
     return res;
 }
 
+/// A `transform` list: a pure translation goes to layout (`translate`);
+/// anything else is kept as functions for the painter, which maps the
+/// box through them in order. Null for an invalid list.
+const Transform = struct { translate: [2]LengthPercent, fns: []const TransformFn };
+
+fn transformOf(a: std.mem.Allocator, vals: []const css.Value, font_size: f64, env: Env) ?Transform {
+    const none: Transform = .{ .translate = .{ .{ .px = 0 }, .{ .px = 0 } }, .fns = &.{} };
+    if (vals.len == 1) if (ident(vals[0])) |w| if (std.ascii.eqlIgnoreCase(w, "none")) return none;
+    var fns: std.ArrayList(TransformFn) = .empty;
+    var pure = true;
+    for (vals) |v| {
+        if (v != .function) return null;
+        const f = v.function;
+        var args: [6]css.Value = undefined;
+        var n: usize = 0;
+        for (f.values) |x| {
+            if (isWs(x) or (x == .token and x.token == .comma)) continue;
+            if (n == args.len) return null;
+            args[n] = x;
+            n += 1;
+        }
+        const eq = std.ascii.eqlIgnoreCase;
+        const num = struct {
+            fn of(x: css.Value) ?f64 {
+                if (x == .token and x.token == .number) return x.token.number.value;
+                if (x == .token and x.token == .percentage) return x.token.percentage.value / 100;
+                return null;
+            }
+        }.of;
+        var fnv: ?TransformFn = null;
+        if (eq(f.name, "translate") or eq(f.name, "translate3d")) {
+            if (n < 1) return null;
+            const x = lengthPercent(args[0], font_size, env) orelse return null;
+            const y: LengthPercent = if (n >= 2) (lengthPercent(args[1], font_size, env) orelse return null) else .{ .px = 0 };
+            fnv = .{ .translate = .{ x, y } };
+        } else if (eq(f.name, "translatex")) {
+            if (n != 1) return null;
+            fnv = .{ .translate = .{ lengthPercent(args[0], font_size, env) orelse return null, .{ .px = 0 } } };
+        } else if (eq(f.name, "translatey")) {
+            if (n != 1) return null;
+            fnv = .{ .translate = .{ .{ .px = 0 }, lengthPercent(args[0], font_size, env) orelse return null } };
+        } else if (eq(f.name, "translatez")) {
+            if (n != 1) return null;
+            fnv = .{ .translate = .{ .{ .px = 0 }, .{ .px = 0 } } };
+        } else if (eq(f.name, "scale") or eq(f.name, "scale3d")) {
+            if (n < 1) return null;
+            const x = num(args[0]) orelse return null;
+            const y = if (n >= 2) (num(args[1]) orelse return null) else x;
+            fnv = .{ .scale = .{ x, y } };
+            pure = false;
+        } else if (eq(f.name, "scalex")) {
+            if (n != 1) return null;
+            fnv = .{ .scale = .{ num(args[0]) orelse return null, 1 } };
+            pure = false;
+        } else if (eq(f.name, "scaley")) {
+            if (n != 1) return null;
+            fnv = .{ .scale = .{ 1, num(args[0]) orelse return null } };
+            pure = false;
+        } else if (eq(f.name, "rotate") or eq(f.name, "rotatez")) {
+            if (n != 1) return null;
+            fnv = .{ .rotate = angleDeg(args[0]) orelse return null };
+            pure = false;
+        } else if (eq(f.name, "rotate3d")) {
+            if (n != 4) return null;
+            fnv = .{ .rotate = angleDeg(args[3]) orelse return null };
+            pure = false;
+        } else if (eq(f.name, "rotatex") or eq(f.name, "rotatey")) {
+            // Out of the plane: taken as no rotation.
+            if (n != 1) return null;
+            fnv = .{ .rotate = 0 };
+        } else if (eq(f.name, "skew")) {
+            if (n < 1) return null;
+            const x = angleDeg(args[0]) orelse return null;
+            const y = if (n >= 2) (angleDeg(args[1]) orelse return null) else 0;
+            fnv = .{ .skew = .{ x, y } };
+            pure = false;
+        } else if (eq(f.name, "skewx")) {
+            if (n != 1) return null;
+            fnv = .{ .skew = .{ angleDeg(args[0]) orelse return null, 0 } };
+            pure = false;
+        } else if (eq(f.name, "skewy")) {
+            if (n != 1) return null;
+            fnv = .{ .skew = .{ 0, angleDeg(args[0]) orelse return null } };
+            pure = false;
+        } else if (eq(f.name, "matrix")) {
+            if (n != 6) return null;
+            var m: [6]f64 = undefined;
+            for (args[0..6], 0..) |x, i| {
+                if (x != .token or x.token != .number) return null;
+                m[i] = x.token.number.value;
+            }
+            m[4] *= px_scale;
+            m[5] *= px_scale;
+            fnv = .{ .matrix = m };
+            if (m[0] != 1 or m[1] != 0 or m[2] != 0 or m[3] != 1) pure = false;
+        } else if (eq(f.name, "matrix3d") or eq(f.name, "perspective")) {
+            // Accepted, not applied.
+            fnv = .{ .matrix = .{ 1, 0, 0, 1, 0, 0 } };
+        } else return null;
+        fns.append(a, fnv.?) catch return null;
+    }
+    if (pure) {
+        // The sum of the translations, as before: layout moves the box.
+        var out: [2]Mix = .{ .{ .px = 0, .pct = 0 }, .{ .px = 0, .pct = 0 } };
+        for (fns.items) |fv| switch (fv) {
+            .translate => |t| for (t, 0..) |lp, i| switch (lp) {
+                .px => |px| out[i].px += px,
+                .percent => |pc| out[i].pct += pc,
+                .calc => |c| {
+                    out[i].px += c.px;
+                    out[i].pct += c.pct;
+                },
+            },
+            .matrix => |m| {
+                out[0].px += m[4];
+                out[1].px += m[5];
+            },
+            else => {},
+        };
+        var res: [2]LengthPercent = undefined;
+        for (out, 0..) |m, i| res[i] = if (m.pct == 0) .{ .px = m.px } else if (m.px == 0) .{ .percent = m.pct } else .{ .calc = m };
+        return .{ .translate = res, .fns = &.{} };
+    }
+    return .{ .translate = .{ .{ .px = 0 }, .{ .px = 0 } }, .fns = fns.items };
+}
+
+/// A `<time>` in milliseconds (`s`, `ms`; a plain `0`).
+fn timeMs(v: css.Value) ?f64 {
+    if (v == .token and v.token == .number and v.token.number.value == 0) return 0;
+    if (v != .token or v.token != .dimension) return null;
+    const d = v.token.dimension;
+    if (std.ascii.eqlIgnoreCase(d.unit, "ms")) return d.num.value;
+    if (std.ascii.eqlIgnoreCase(d.unit, "s")) return d.num.value * 1000;
+    return null;
+}
+
+/// A timing function: a keyword, `cubic-bezier()`, `steps()`.
+fn timingOf(v: css.Value) ?TimingFn {
+    const eq = std.ascii.eqlIgnoreCase;
+    if (ident(v)) |w| {
+        if (eq(w, "linear")) return .linear;
+        if (eq(w, "ease")) return .ease;
+        if (eq(w, "ease-in")) return .ease_in;
+        if (eq(w, "ease-out")) return .ease_out;
+        if (eq(w, "ease-in-out")) return .ease_in_out;
+        if (eq(w, "step-start")) return .{ .steps = .{ .n = 1, .start = true } };
+        if (eq(w, "step-end")) return .{ .steps = .{ .n = 1, .start = false } };
+        return null;
+    }
+    if (v != .function) return null;
+    const f = v.function;
+    var args: [4]f64 = undefined;
+    var n: usize = 0;
+    var start = false;
+    for (f.values) |x| {
+        if (isWs(x) or (x == .token and x.token == .comma)) continue;
+        if (x == .token and x.token == .number) {
+            if (n == 4) return null;
+            args[n] = x.token.number.value;
+            n += 1;
+        } else if (ident(x)) |w| {
+            if (eq(w, "start") or eq(w, "jump-start")) start = true else if (!(eq(w, "end") or eq(w, "jump-end"))) return null;
+        } else return null;
+    }
+    if (eq(f.name, "cubic-bezier") and n == 4) return .{ .cubic = args };
+    if (eq(f.name, "steps") and n == 1 and args[0] >= 1) return .{ .steps = .{ .n = @intFromFloat(args[0]), .start = start } };
+    return null;
+}
+
+/// An angle in degrees (`deg`, `rad`, `turn`, `grad`; `0` alone).
+fn angleDeg(v: css.Value) ?f64 {
+    if (v == .token and v.token == .number and v.token.number.value == 0) return 0;
+    if (v != .token or v.token != .dimension) return null;
+    const d = v.token.dimension;
+    const eq = std.ascii.eqlIgnoreCase;
+    if (eq(d.unit, "deg")) return d.num.value;
+    if (eq(d.unit, "rad")) return d.num.value * 180 / std.math.pi;
+    if (eq(d.unit, "turn")) return d.num.value * 360;
+    if (eq(d.unit, "grad")) return d.num.value * 0.9;
+    return null;
+}
+
+/// `transform-origin`: one or two values, keywords or lengths (a third,
+/// the z offset, is ignored).
+fn transformOriginOf(vals: []const css.Value, font_size: f64, env: Env) ?[2]LengthPercent {
+    var out: [2]LengthPercent = .{ .{ .percent = 50 }, .{ .percent = 50 } };
+    var n: usize = 0;
+    for (vals) |v| {
+        if (isWs(v)) continue;
+        if (n >= 2) break;
+        if (ident(v)) |w| {
+            const eq = std.ascii.eqlIgnoreCase;
+            if (eq(w, "left")) out[0] = .{ .percent = 0 } else if (eq(w, "right")) out[0] = .{ .percent = 100 } else if (eq(w, "top")) out[1] = .{ .percent = 0 } else if (eq(w, "bottom")) out[1] = .{ .percent = 100 } else if (eq(w, "center")) {} else return null;
+        } else {
+            out[n] = lengthPercent(v, font_size, env) orelse return null;
+        }
+        n += 1;
+    }
+    return out;
+}
+
+/// `clip-path`: `none`, or a basic shape (`inset`, `circle`, `ellipse`,
+/// `polygon`); a shape with a geometry box or a url is `none`.
+fn clipPathOf(a: std.mem.Allocator, vals: []const css.Value, font_size: f64, env: Env) ?ClipPath {
+    const first = blk: {
+        for (vals) |v| if (!isWs(v)) break :blk v;
+        return null;
+    };
+    if (ident(first)) |w| return if (std.ascii.eqlIgnoreCase(w, "none")) .none else null;
+    if (first != .function) return null;
+    const f = first.function;
+    const eq = std.ascii.eqlIgnoreCase;
+    var args: [64]css.Value = undefined;
+    var n: usize = 0;
+    for (f.values) |x| {
+        if (isWs(x)) continue;
+        if (n == args.len) return null;
+        args[n] = x;
+        n += 1;
+    }
+    const isComma = struct {
+        fn is(x: css.Value) bool {
+            return x == .token and x.token == .comma;
+        }
+    }.is;
+    if (eq(f.name, "inset")) {
+        var sides: [4]LengthPercent = undefined;
+        var k: usize = 0;
+        var i: usize = 0;
+        var radius: LengthPercent = .{ .px = 0 };
+        while (i < n) : (i += 1) {
+            if (ident(args[i])) |w| if (eq(w, "round")) {
+                if (i + 1 < n) radius = lengthPercent(args[i + 1], font_size, env) orelse return null;
+                break;
+            };
+            if (k == 4) return null;
+            sides[k] = lengthPercent(args[i], font_size, env) orelse return null;
+            k += 1;
+        }
+        if (k == 0) return null;
+        const t = sides[0];
+        const r = if (k >= 2) sides[1] else t;
+        const b = if (k >= 3) sides[2] else t;
+        const l = if (k >= 4) sides[3] else r;
+        return .{ .inset = .{ .top = t, .right = r, .bottom = b, .left = l, .radius = radius } };
+    }
+    if (eq(f.name, "circle") or eq(f.name, "ellipse")) {
+        var radii: [2]?LengthPercent = .{ null, null };
+        var nr: usize = 0;
+        var cx: LengthPercent = .{ .percent = 50 };
+        var cy: LengthPercent = .{ .percent = 50 };
+        var i: usize = 0;
+        var at = false;
+        var npos: usize = 0;
+        while (i < n) : (i += 1) {
+            if (ident(args[i])) |w| {
+                if (eq(w, "at")) {
+                    at = true;
+                    continue;
+                }
+                if (eq(w, "closest-side") or eq(w, "farthest-side")) {
+                    if (!at and nr < 2) {
+                        radii[nr] = null;
+                        nr += 1;
+                    }
+                    continue;
+                }
+                if (at) {
+                    if (eq(w, "left")) cx = .{ .percent = 0 } else if (eq(w, "right")) cx = .{ .percent = 100 } else if (eq(w, "top")) cy = .{ .percent = 0 } else if (eq(w, "bottom")) cy = .{ .percent = 100 } else if (!eq(w, "center")) return null;
+                    npos += 1;
+                    continue;
+                }
+                return null;
+            }
+            const lp = lengthPercent(args[i], font_size, env) orelse return null;
+            if (at) {
+                if (npos == 0) cx = lp else cy = lp;
+                npos += 1;
+            } else {
+                if (nr == 2) return null;
+                radii[nr] = lp;
+                nr += 1;
+            }
+        }
+        if (eq(f.name, "circle")) return .{ .circle = .{ .r = radii[0], .cx = cx, .cy = cy } };
+        return .{ .ellipse = .{ .rx = radii[0], .ry = radii[1], .cx = cx, .cy = cy } };
+    }
+    if (eq(f.name, "polygon")) {
+        var pts: std.ArrayList([2]LengthPercent) = .empty;
+        var i: usize = 0;
+        if (n > 0) if (ident(args[0])) |w| if (eq(w, "nonzero") or eq(w, "evenodd")) {
+            i = 1;
+            if (i < n and isComma(args[i])) i += 1;
+        };
+        while (i < n) {
+            const x = lengthPercent(args[i], font_size, env) orelse return null;
+            if (i + 1 >= n) return null;
+            const y = lengthPercent(args[i + 1], font_size, env) orelse return null;
+            pts.append(a, .{ x, y }) catch return null;
+            i += 2;
+            if (i < n) {
+                if (!isComma(args[i])) return null;
+                i += 1;
+            }
+        }
+        if (pts.items.len < 3) return null;
+        return .{ .polygon = pts.items };
+    }
+    return null;
+}
+
 /// One side of a track size.
 fn trackSizeOf(v: css.Value, font_size: f64, env: Env) ?TrackSize {
     if (ident(v)) |w| {
@@ -2132,6 +2757,108 @@ pub fn propertyText(c: *const Computed, name: []const u8, buf: []u8) ?[]const u8
     return null;
 }
 
+// ------------------------------------------------------- animation
+
+fn lerp(x: f64, y: f64, t: f64) f64 {
+    return x + (y - x) * t;
+}
+
+fn lerpLP(x: LengthPercent, y: LengthPercent, t: f64) LengthPercent {
+    if (x == .px and y == .px) return .{ .px = lerp(x.px, y.px, t) };
+    if (x == .percent and y == .percent) return .{ .percent = lerp(x.percent, y.percent, t) };
+    return if (t < 0.5) x else y;
+}
+
+fn lerpLA(x: LengthAuto, y: LengthAuto, t: f64) LengthAuto {
+    if (x == .px and y == .px) return .{ .px = lerp(x.px, y.px, t) };
+    if (x == .percent and y == .percent) return .{ .percent = lerp(x.percent, y.percent, t) };
+    return if (t < 0.5) x else y;
+}
+
+fn lerpLN(x: LengthNone, y: LengthNone, t: f64) LengthNone {
+    if (x == .px and y == .px) return .{ .px = lerp(x.px, y.px, t) };
+    if (x == .percent and y == .percent) return .{ .percent = lerp(x.percent, y.percent, t) };
+    return if (t < 0.5) x else y;
+}
+
+fn lerpColor(x: Color, y: Color, t: f64) Color {
+    return .{ .r = lerp(x.r, y.r, t), .g = lerp(x.g, y.g, t), .b = lerp(x.b, y.b, t), .a = lerp(x.a, y.a, t) };
+}
+
+/// The computed values `t` of the way from one to the other: lengths,
+/// percentages, colours, numbers, the translation and a transform list
+/// of the same shape interpolate; anything else switches at the half
+/// (CSS Transitions §2, Web Animations' discrete interpolation). The
+/// result is a fresh value whose slices are the ends' (a transform
+/// list is allocated).
+pub fn interpolate(a: std.mem.Allocator, x: *const Computed, y: *const Computed, t: f64) Error!Computed {
+    var out = if (t < 0.5) x.* else y.*;
+    out.width = lerpLA(x.width, y.width, t);
+    out.height = lerpLA(x.height, y.height, t);
+    out.min_width = lerpLP(x.min_width, y.min_width, t);
+    out.min_height = lerpLP(x.min_height, y.min_height, t);
+    out.max_width = lerpLN(x.max_width, y.max_width, t);
+    out.max_height = lerpLN(x.max_height, y.max_height, t);
+    for (0..4) |i| {
+        out.margin[i] = lerpLA(x.margin[i], y.margin[i], t);
+        out.padding[i] = lerpLP(x.padding[i], y.padding[i], t);
+        out.border_width[i] = lerp(x.border_width[i], y.border_width[i], t);
+        out.inset[i] = lerpLA(x.inset[i], y.inset[i], t);
+        out.border_radius[i] = lerpLP(x.border_radius[i], y.border_radius[i], t);
+        if (x.border_color[i] != null and y.border_color[i] != null) out.border_color[i] = lerpColor(x.border_color[i].?, y.border_color[i].?, t);
+    }
+    out.color = lerpColor(x.color, y.color, t);
+    out.background_color = lerpColor(x.background_color, y.background_color, t);
+    out.font_size = lerp(x.font_size, y.font_size, t);
+    out.opacity = lerp(x.opacity, y.opacity, t);
+    out.flex_grow = lerp(x.flex_grow, y.flex_grow, t);
+    out.flex_shrink = lerp(x.flex_shrink, y.flex_shrink, t);
+    out.row_gap = lerpLP(x.row_gap, y.row_gap, t);
+    out.column_gap = lerpLP(x.column_gap, y.column_gap, t);
+    out.text_indent = lerpLP(x.text_indent, y.text_indent, t);
+    if (x.line_height == .px and y.line_height == .px) out.line_height = .{ .px = lerp(x.line_height.px, y.line_height.px, t) };
+    if (x.line_height == .number and y.line_height == .number) out.line_height = .{ .number = lerp(x.line_height.number, y.line_height.number, t) };
+    out.translate = .{ lerpLP(x.translate[0], y.translate[0], t), lerpLP(x.translate[1], y.translate[1], t) };
+    for (0..2) |i| out.transform_origin[i] = lerpLP(x.transform_origin[i], y.transform_origin[i], t);
+    if (x.z_index != null and y.z_index != null) out.z_index = @intFromFloat(@round(lerp(@floatFromInt(x.z_index.?), @floatFromInt(y.z_index.?), t)));
+    // A transform list interpolates function by function when the two
+    // lists have the same functions in the same order.
+    if (x.transform_fns.len > 0 and x.transform_fns.len == y.transform_fns.len) {
+        var same = true;
+        for (x.transform_fns, y.transform_fns) |fx, fy| if (std.meta.activeTag(fx) != std.meta.activeTag(fy)) {
+            same = false;
+        };
+        if (same) {
+            const fns = try a.alloc(TransformFn, x.transform_fns.len);
+            for (x.transform_fns, y.transform_fns, 0..) |fx, fy, i| fns[i] = switch (fx) {
+                .translate => |tx| .{ .translate = .{ lerpLP(tx[0], fy.translate[0], t), lerpLP(tx[1], fy.translate[1], t) } },
+                .scale => |sx| .{ .scale = .{ lerp(sx[0], fy.scale[0], t), lerp(sx[1], fy.scale[1], t) } },
+                .rotate => |rx| .{ .rotate = lerp(rx, fy.rotate, t) },
+                .skew => |kx| .{ .skew = .{ lerp(kx[0], fy.skew[0], t), lerp(kx[1], fy.skew[1], t) } },
+                .matrix => |mx| blk: {
+                    var m: [6]f64 = undefined;
+                    for (0..6) |k| m[k] = lerp(mx[k], fy.matrix[k], t);
+                    break :blk .{ .matrix = m };
+                },
+            };
+            out.transform_fns = fns;
+        }
+    } else if (x.transform_fns.len == 0 and y.transform_fns.len > 0 and t < 0.5) {
+        // From none: the identity is the other list with its functions
+        // at rest — approximated as a switch at the half.
+        out.transform_fns = &.{};
+    }
+    return out;
+}
+
+/// A keyframe's declarations applied over a base computed style (the
+/// element's, with its parent for `inherit`): the frame's values.
+pub fn applyKeyframe(a: std.mem.Allocator, base: *const Computed, parent: *const Computed, decls: []const Declaration, env: Env) Error!Computed {
+    var out = base.*;
+    for (decls) |d| try applyDeclared(a, &out, d.prop, d.value, parent, env);
+    return out;
+}
+
 pub const Styles = struct {
     computed: []*const Computed,
 
@@ -2239,6 +2966,11 @@ pub fn compute(a: std.mem.Allocator, doc: *const Document, sheets: []const Sheet
     const doc_style = try a.create(Computed);
     doc_style.* = .{};
     doc_style.color = env_text;
+    // Every slot reads: a node the walk does not reach (one a script made
+    // and never inserted, one under `display: none`) has the document's
+    // style rather than an undefined pointer (the animation engine's
+    // snapshot found one, 2026-10-07).
+    @memset(computed, doc_style);
     // The initial font size (`medium`), zoomed; `rem` is of it until
     // the root element has its own.
     doc_style.font_size = 16 * px_scale;
@@ -2815,7 +3547,7 @@ pub fn anonymous(parent: *const Computed) Computed {
     return out;
 }
 
-fn copyProp(out: *Computed, from: *const Computed, p: Prop) void {
+pub fn copyProp(out: *Computed, from: *const Computed, p: Prop) void {
     switch (p) {
         .display => out.display = from.display,
         .position => out.position = from.position,
@@ -2882,7 +3614,27 @@ fn copyProp(out: *Computed, from: *const Computed, p: Prop) void {
         .border_bottom_right_radius => out.border_radius[2] = from.border_radius[2],
         .border_bottom_left_radius => out.border_radius[3] = from.border_radius[3],
         .fill => out.fill = from.fill,
-        .transform => out.translate = from.translate,
+        .transform => {
+            out.translate = from.translate;
+            out.transform_fns = from.transform_fns;
+        },
+        .transform_origin => out.transform_origin = from.transform_origin,
+        .clip_path => out.clip_path = from.clip_path,
+        .transition_property => {
+            out.transition_property = from.transition_property;
+            out.transition_none = from.transition_none;
+        },
+        .transition_duration => out.transition_duration = from.transition_duration,
+        .transition_delay => out.transition_delay = from.transition_delay,
+        .transition_timing_function => out.transition_timing = from.transition_timing,
+        .animation_name => out.animation_name = from.animation_name,
+        .animation_duration => out.animation_duration = from.animation_duration,
+        .animation_delay => out.animation_delay = from.animation_delay,
+        .animation_timing_function => out.animation_timing = from.animation_timing,
+        .animation_iteration_count => out.animation_iterations = from.animation_iterations,
+        .animation_direction => out.animation_direction = from.animation_direction,
+        .animation_fill_mode => out.animation_fill = from.animation_fill,
+        .animation_play_state => out.animation_paused = from.animation_paused,
         .mask_image => {
             out.mask_image = from.mask_image;
             out.mask_base = from.mask_base;
@@ -3181,7 +3933,94 @@ fn applyValues(out: *Computed, p: Prop, vals_in: []const css.Value, parent: *con
             return true;
         },
         .transform => {
-            out.translate = translationOf(vals, font_size, env) orelse return error.Invalid;
+            const t = transformOf(a, vals, font_size, env) orelse return error.Invalid;
+            out.translate = t.translate;
+            out.transform_fns = t.fns;
+            return true;
+        },
+        .transform_origin => {
+            out.transform_origin = transformOriginOf(vals, font_size, env) orelse return error.Invalid;
+            return true;
+        },
+        .clip_path => {
+            out.clip_path = clipPathOf(a, vals, font_size, env) orelse return error.Invalid;
+            return true;
+        },
+        .transition_property => {
+            var props: std.ArrayList(?Prop) = .empty;
+            out.transition_none = false;
+            for (vals) |v| {
+                if (v == .token and v.token == .comma) continue;
+                const w = ident(v) orelse return error.Invalid;
+                if (std.ascii.eqlIgnoreCase(w, "none")) {
+                    out.transition_none = true;
+                } else if (std.ascii.eqlIgnoreCase(w, "all")) {
+                    try props.append(a, null);
+                } else try props.append(a, Prop.parse(w) orelse continue);
+            }
+            out.transition_property = props.items;
+            return true;
+        },
+        .transition_duration, .transition_delay => {
+            var times: std.ArrayList(f64) = .empty;
+            for (vals) |v| {
+                if (v == .token and v.token == .comma) continue;
+                try times.append(a, timeMs(v) orelse return error.Invalid);
+            }
+            if (p == .transition_duration) out.transition_duration = times.items else out.transition_delay = times.items;
+            return true;
+        },
+        .transition_timing_function => {
+            var fns: std.ArrayList(TimingFn) = .empty;
+            for (vals) |v| {
+                if (v == .token and v.token == .comma) continue;
+                try fns.append(a, timingOf(v) orelse return error.Invalid);
+            }
+            out.transition_timing = fns.items;
+            return true;
+        },
+        .animation_name => {
+            const v = vals[0];
+            if (ident(v)) |w| {
+                out.animation_name = if (std.ascii.eqlIgnoreCase(w, "none")) "" else w;
+            } else if (v == .token and v.token == .string) {
+                out.animation_name = v.token.string;
+            } else return error.Invalid;
+            return true;
+        },
+        .animation_duration => {
+            out.animation_duration = timeMs(vals[0]) orelse return error.Invalid;
+            return true;
+        },
+        .animation_delay => {
+            out.animation_delay = timeMs(vals[0]) orelse return error.Invalid;
+            return true;
+        },
+        .animation_timing_function => {
+            out.animation_timing = timingOf(vals[0]) orelse return error.Invalid;
+            return true;
+        },
+        .animation_iteration_count => {
+            const v = vals[0];
+            if (ident(v)) |w| {
+                if (!std.ascii.eqlIgnoreCase(w, "infinite")) return error.Invalid;
+                out.animation_iterations = std.math.inf(f64);
+            } else if (v == .token and v.token == .number and v.token.number.value >= 0) {
+                out.animation_iterations = v.token.number.value;
+            } else return error.Invalid;
+            return true;
+        },
+        .animation_direction => {
+            out.animation_direction = keyword(AnimationDirection, vals[0]) orelse return error.Invalid;
+            return true;
+        },
+        .animation_fill_mode => {
+            out.animation_fill = keyword(AnimationFill, vals[0]) orelse return error.Invalid;
+            return true;
+        },
+        .animation_play_state => {
+            const w = ident(vals[0]) orelse return error.Invalid;
+            out.animation_paused = if (std.ascii.eqlIgnoreCase(w, "paused")) true else if (std.ascii.eqlIgnoreCase(w, "running")) false else return error.Invalid;
             return true;
         },
         .mask_size => {
@@ -3476,7 +4315,7 @@ fn applyValues(out: *Computed, p: Prop, vals_in: []const css.Value, parent: *con
                 .current => .current,
             };
         },
-        .transform, .mask_image, .mask_position_x, .mask_position_y, .mask_size, .mask_repeat, .grid_template_columns, .grid_template_rows, .grid_template_areas, .grid_auto_columns, .grid_auto_rows, .grid_auto_flow, .grid_row_start, .grid_column_start, .grid_row_end, .grid_column_end => unreachable,
+        .transform, .transform_origin, .clip_path, .transition_property, .transition_duration, .transition_delay, .transition_timing_function, .animation_name, .animation_duration, .animation_delay, .animation_timing_function, .animation_iteration_count, .animation_direction, .animation_fill_mode, .animation_play_state, .mask_image, .mask_position_x, .mask_position_y, .mask_size, .mask_repeat, .grid_template_columns, .grid_template_rows, .grid_template_areas, .grid_auto_columns, .grid_auto_rows, .grid_auto_flow, .grid_row_start, .grid_column_start, .grid_row_end, .grid_column_end => unreachable,
         .justify_items => out.justify_items = keyword(AlignItems, v) orelse return error.Invalid,
         .justify_self => out.justify_self = keyword(AlignSelf, v) orelse return error.Invalid,
         .background_image, .background_size, .background_repeat, .background_attachment, .background_position_x, .background_position_y, .border_top_left_radius, .border_top_right_radius, .border_bottom_right_radius, .border_bottom_left_radius => unreachable,

@@ -73,6 +73,12 @@ pub const Document = struct {
     /// Slots a `sweep` reclaimed, for `add` to use again.
     free_ids: std.ArrayList(NodeId) = .empty,
     quirks: QuirksMode = .no_quirks,
+    /// The interaction state a host keeps on the document for the
+    /// selectors `:hover`, `:active` and `:focus`: the deepest element
+    /// under the pointer, the one pressed, the one focused.
+    hovered: ?NodeId = null,
+    active: ?NodeId = null,
+    focused: ?NodeId = null,
 
     pub fn init(a: std.mem.Allocator) Error!Document {
         var d: Document = .{ .a = a };
