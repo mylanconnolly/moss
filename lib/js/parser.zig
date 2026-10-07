@@ -1645,7 +1645,7 @@ pub const Parser = struct {
         var imp: ast.Import = .{ .source = "", .named = &.{} };
         if (p.at(.string)) {
             imp.source = try p.moduleSpecifier();
-            try p.skipImportAttributes();
+            imp.type_attr = try p.parseImportAttributes();
             try p.consumeSemicolon();
             return p.node(pos, .{ .import_decl = imp });
         }
@@ -1658,7 +1658,7 @@ pub const Parser = struct {
             if (!try p.eat(.comma)) {
                 try p.expectWord("from", "expected 'from'");
                 imp.source = try p.moduleSpecifier();
-                try p.skipImportAttributes();
+                imp.type_attr = try p.parseImportAttributes();
                 try p.consumeSemicolon();
                 return p.node(pos, .{ .import_decl = imp });
             }
@@ -1700,28 +1700,40 @@ pub const Parser = struct {
         try p.expectWord("from", "expected 'from'");
         imp.source = try p.moduleSpecifier();
         imp.named = named.items;
-        try p.skipImportAttributes();
+        imp.type_attr = try p.parseImportAttributes();
         try p.consumeSemicolon();
         return p.node(pos, .{ .import_decl = imp });
     }
 
-    /// `with { type: "json" }` after a specifier: accepted, not kept.
-    fn skipImportAttributes(p: *Parser) Error!void {
-        if (!p.atWord("with") and !(p.atWord("assert") and !p.tok.newline_before)) return;
+    /// `with { type: "json" }` after a specifier (§16.2.1.3): the value of
+    /// its `type` attribute, the one attribute this host supports. Any
+    /// other key is refused when the module loads, not here: the
+    /// specification's early error depends on the host's list, and
+    /// test262 expects a linking-phase error.
+    pub const unsupported_attribute = "\x00unsupported";
+
+    fn parseImportAttributes(p: *Parser) Error!?[]const u8 {
+        if (!p.atWord("with") and !(p.atWord("assert") and !p.tok.newline_before)) return null;
         try p.advance();
         try p.expect(.lbrace, "expected '{'");
         var keys: std.ArrayList([]const u8) = .empty;
+        var type_attr: ?[]const u8 = null;
+        var unsupported = false;
         while (!p.at(.rbrace)) {
             if (!p.at(.identifier) and !p.at(.string)) return p.fail("expected an attribute key", p.tok.start);
             for (keys.items) |k| if (std.mem.eql(u8, k, p.tok.text)) return p.fail("duplicate import attribute", p.tok.start);
             try keys.append(p.a, p.tok.text);
+            const is_type = std.mem.eql(u8, p.tok.text, "type");
+            if (!is_type) unsupported = true;
             try p.advance();
             try p.expect(.colon, "expected ':'");
             if (!p.at(.string)) return p.fail("expected an attribute value", p.tok.start);
+            if (is_type) type_attr = p.tok.text;
             try p.advance();
             if (!p.at(.rbrace)) try p.expect(.comma, "expected ','");
         }
         try p.expect(.rbrace, "expected '}'");
+        return if (unsupported) unsupported_attribute else type_attr;
     }
 
     /// Every exported name once; a string name must be well-formed UTF-16.
@@ -1755,9 +1767,9 @@ pub const Parser = struct {
             }
             try p.expectWord("from", "expected 'from'");
             const src = try p.moduleSpecifier();
-            try p.skipImportAttributes();
+            const type_attr = try p.parseImportAttributes();
             try p.consumeSemicolon();
-            return p.node(pos, .{ .export_decl = .{ .all = .{ .as = as, .source = src } } });
+            return p.node(pos, .{ .export_decl = .{ .all = .{ .as = as, .source = src, .type_attr = type_attr } } });
         }
         if (try p.eatWord("default")) {
             try p.noteExport("default", pos);
@@ -1823,15 +1835,16 @@ pub const Parser = struct {
             }
             try p.expect(.rbrace, "expected '}'");
             var src: ?[]const u8 = null;
+            var type_attr: ?[]const u8 = null;
             if (try p.eatWord("from")) {
                 src = try p.moduleSpecifier();
-                try p.skipImportAttributes();
+                type_attr = try p.parseImportAttributes();
             } else {
                 if (needs_from) return p.fail("a string or keyword export name needs 'from'", pos);
                 for (locals.items) |l| try p.export_locals.append(p.a, l);
             }
             try p.consumeSemicolon();
-            return p.node(pos, .{ .export_decl = .{ .named = .{ .specifiers = specs.items, .source = src } } });
+            return p.node(pos, .{ .export_decl = .{ .named = .{ .specifiers = specs.items, .source = src, .type_attr = type_attr } } });
         }
         // A declaration: its names are exported.
         var decl: *Node = undefined;

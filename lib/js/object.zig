@@ -172,7 +172,7 @@ pub const KeyContext = struct {
 /// internal methods differ, or an ordinary one with internal slots.
 /// `dom` is the embedder's: an ordinary object whose internal slot the
 /// host interprets (a page's node wrapper), traced like an ordinary one.
-pub const Class = enum(u8) { ordinary, array, function, bound_function, arguments, error_, boolean, number, string, symbol, bigint, date, regexp, map, set, weak_map, weak_set, promise, proxy, array_buffer, typed_array, data_view, iterator, iterator_helper, generator, namespace, global, dom };
+pub const Class = enum(u8) { ordinary, array, function, bound_function, arguments, error_, boolean, number, string, symbol, bigint, date, regexp, map, set, weak_map, weak_set, promise, proxy, array_buffer, typed_array, data_view, iterator, iterator_helper, generator, namespace, weak_ref, finalization_registry, global, dom };
 
 pub const Object = extern struct {
     header: Cell,
@@ -661,6 +661,19 @@ pub const Objects = struct {
             m.markCell(&e.header);
             for (e.items()) |v| m.markValue(v);
         }
+    }
+
+    /// Trace an object but not its elements' contents (the elements
+    /// vector itself stays): a weak collection's entry list, whose keys
+    /// and values the collector weighs in its ephemeron pass.
+    pub fn traceKeepingElements(o: *Object, m: *heap.Marker) void {
+        m.markCell(o.shape.cell());
+        for (o.inline_slots) |v| m.markValue(v);
+        if (o.overflow) |ov| {
+            m.markCell(&ov.header);
+            for (ov.items()) |v| m.markValue(v);
+        }
+        if (o.elements) |e| e.header.marked = true;
     }
 
     pub fn traceShape(s: *Shape, m: *heap.Marker) void {

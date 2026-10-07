@@ -380,7 +380,10 @@ barriers in the virtio drivers, and `user/vmm.zig`.
   (`RangeError`). The Unicode tables are `lib/js/unicode.bin`, vendored;
   `tools/fetch-ucd.sh` then `zig build ucdgen` regenerates them for a
   new Unicode version (test262's generated property-escape tests encode
-  the version they expect).
+  the version they expect); the emoji sequence files behind the
+  properties of strings come with the fetch, from `Public/<version>/emoji/`
+  beside the UCD. `zig build test262 -- test/language test/built-ins
+  test/annexB` asserts the floors in `tools/test262.zig`.
 
 - One OS test by hand, without the whole gate: `zig build -D<name>-test`
   then `zig-out/bin/moss-check <name> zig-out/bin/moss-kernel.bin`

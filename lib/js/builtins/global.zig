@@ -48,6 +48,7 @@ fn eval(vm: *Vm, _: Value, args: []const Value, _: Value) Error!Value {
         error.OutOfMemory => return error.OutOfMemory,
         error.SyntaxError => return vm.throwSyntaxError(compiler.last_error),
     };
+    try interp.evalDeclarationCheck(vm, null, code.data, false, false);
     return interp.runScript(vm, code, vm.global.asValue(), null, null, Value.undefined_);
 }
 

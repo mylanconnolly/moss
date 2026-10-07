@@ -135,7 +135,7 @@ const Runner = struct {
         vm.heap.stress = r.gc_stress;
         vm.print_fn = printHook;
         vm.host_data = r;
-        installHost(vm) catch return .{ .ok = false, .why = "host install failed" };
+        _ = installHost(vm) catch return .{ .ok = false, .why = "host install failed" };
         // The harness.
         if (!meta.raw) {
             const preludes = [_][]const u8{ "assert.js", "sta.js" };
@@ -207,7 +207,7 @@ const Runner = struct {
         vm.host_data = r;
         vm.host_load = hostLoad;
         vm.host_now = hostNow;
-        installHost(vm) catch return .{ .ok = false, .why = "host install failed" };
+        _ = installHost(vm) catch return .{ .ok = false, .why = "host install failed" };
         if (!meta.raw) {
             const preludes = [_][]const u8{ "assert.js", "sta.js" };
             for (preludes) |p| {
@@ -349,18 +349,34 @@ fn printHook(vm: *Vm, s: []const u8) void {
     r.printed.append(r.gpa, '\n') catch {};
 }
 
-/// `print` and the `$262` host object.
-fn installHost(vm: *Vm) !void {
+/// `print` and the `$262` host object, installed on the current realm's
+/// global; returns `$262`. Its natives are born in that realm, so a call
+/// through another realm's `$262` runs with that realm current.
+fn installHost(vm: *Vm) !*js.vm.Object {
     _ = try vm.defineNative(vm.global, "print", 1, hostPrint);
     const h = try vm.newObject();
     try vm.defineValue(vm.global, "$262", h.asValue(), .hidden);
     try vm.defineValue(h, "global", vm.global.asValue(), .hidden);
     _ = try vm.defineNative(h, "evalScript", 1, hostEvalScript);
     _ = try vm.defineNative(h, "gc", 0, hostGc);
-    _ = try vm.defineNative(h, "createRealm", 0, hostUnsupported);
+    _ = try vm.defineNative(h, "createRealm", 0, hostCreateRealm);
     _ = try vm.defineNative(h, "detachArrayBuffer", 1, hostDetach);
     const agent = try vm.newObject();
     try vm.defineValue(h, "agent", agent.asValue(), .hidden);
+    return h;
+}
+
+/// `$262.createRealm()`: a realm of its own, with its own `$262`; the
+/// caller's realm is current again when it returns.
+fn hostCreateRealm(vm: *Vm, _: Value, _: []const Value, _: Value) js.vm.Error!Value {
+    const caller = vm.realm;
+    _ = try vm.createRealm();
+    const h = installHost(vm) catch |e| switch (e) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return vm.throwTypeError("createRealm: host install failed"),
+    };
+    vm.switchRealm(caller);
+    return h.asValue();
 }
 
 fn hostPrint(vm: *Vm, _: Value, args: []const Value, _: Value) js.vm.Error!Value {
@@ -475,8 +491,32 @@ pub fn main(init: std.process.Init) !u8 {
     var it = by_dir.iterator();
     while (it.next()) |e| std.debug.print("test262: {s}: {d}/{d}\n", .{ e.key_ptr.*, e.value_ptr.pass, e.value_ptr.pass + e.value_ptr.fail });
     std.debug.print("test262: total {d}/{d} pass\n", .{ total.pass, total.pass + total.fail });
-    return 0;
+    // The floors (stage 10's exit): a top-level directory run whole and
+    // unfiltered may not pass fewer files than the count last recorded
+    // here — the numbers DESIGN.md carries. Raise a floor with the number;
+    // a drop fails the run.
+    var below = false;
+    if (filter == null) for (dirs.items) |sub| for (floors) |f| if (std.mem.eql(u8, f.dir, sub)) {
+        var pass: usize = 0;
+        var it2 = by_dir.iterator();
+        while (it2.next()) |e| {
+            const k = e.key_ptr.*;
+            if (std.mem.startsWith(u8, k, sub) and (k.len == sub.len or k[sub.len] == '/')) pass += e.value_ptr.pass;
+        }
+        if (pass < f.floor) {
+            std.debug.print("test262: {s}: {d} passed, BELOW the floor of {d}\n", .{ sub, pass, f.floor });
+            below = true;
+        } else std.debug.print("test262: {s}: {d} passed, floor {d}\n", .{ sub, pass, f.floor });
+    };
+    return if (below) 1 else 0;
 }
+
+/// The floors, by top-level directory (2026-10-07).
+const floors = [_]struct { dir: []const u8, floor: usize }{
+    .{ .dir = "test/language", .floor = 22950 },
+    .{ .dir = "test/built-ins", .floor = 18489 },
+    .{ .dir = "test/annexB", .floor = 768 },
+};
 
 fn hostNow() f64 {
     return @floatFromInt(@divTrunc(std.Io.Clock.real.now(io).nanoseconds, std.time.ns_per_ms));

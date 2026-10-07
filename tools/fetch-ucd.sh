@@ -19,4 +19,9 @@ for f in UnicodeData.txt DerivedCoreProperties.txt PropList.txt Scripts.txt \
          emoji/emoji-data.txt; do
   curl -fsS -o "$DIR/$f" "https://www.unicode.org/Public/$VERSION/ucd/$f"
 done
+# The emoji sequence files (properties of strings, `\p{RGI_Emoji}` under
+# the v flag) are published beside the UCD, not in it.
+for f in emoji-sequences.txt emoji-zwj-sequences.txt; do
+  curl -fsS -o "$DIR/emoji/$f" "https://www.unicode.org/Public/$VERSION/emoji/$f"
+done
 echo "ucd: fetched $VERSION"

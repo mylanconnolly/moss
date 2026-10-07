@@ -3,8 +3,11 @@
 //! the collector sees it) indexed by a hash table keyed by
 //! SameValueZero. Iterators walk the list by index, which gives the
 //! specification's semantics for entries added or removed during
-//! iteration. The weak collections hold their keys strongly for now:
-//! ephemeron support in the collector is the nursery's stage.
+//! iteration. The weak collections are ephemeron tables: their entry
+//! list is traced without its contents, the collector's ephemeron pass
+//! (`ephemerons`) marks the value of every live key until nothing new
+//! is marked, and its clear pass (`clearDead`) drops the entries whose
+//! keys died.
 const std = @import("std");
 const b = @import("../builtins.zig");
 const vmod = @import("../vm.zig");
@@ -48,7 +51,54 @@ pub const CollectionData = extern struct {
 };
 
 pub fn trace(o: *Object, m: *heap.Marker) void {
-    m.markValue(o.internal(CollectionData).entries);
+    const d = o.internal(CollectionData);
+    if (o.class == .weak_map or o.class == .weak_set) {
+        // Keys and values are weighed by the ephemeron pass; the entry
+        // list itself stays.
+        const arr = asObject(d.entries);
+        arr.header.marked = true;
+        @import("../object.zig").Objects.traceKeepingElements(arr, m);
+        return;
+    }
+    m.markValue(d.entries);
+}
+
+/// The ephemeron pass (`heap.WeakHooks`): a live key keeps its value.
+/// True when a value was newly marked.
+pub fn ephemerons(o: *Object, m: *heap.Marker) bool {
+    const d = o.internal(CollectionData);
+    const arr = asObject(d.entries);
+    const items = if (arr.elements) |e| e.items() else return false;
+    const n = Vm.arrayLength(arr);
+    var changed = false;
+    var i: usize = 0;
+    while (i + 1 < n) : (i += 2) {
+        const k = items[i];
+        if (k.isEmpty() or !k.isCell() or !k.asCell().marked) continue;
+        const v = items[i + 1];
+        if (v.isCell() and !v.asCell().marked) {
+            m.markCell(v.asCell());
+            changed = true;
+        }
+    }
+    return changed;
+}
+
+/// The clear pass, at the fixpoint: entries whose keys died go.
+pub fn clearDead(vm: *Vm, o: *Object) void {
+    const d = o.internal(CollectionData);
+    const arr = asObject(d.entries);
+    const items = if (arr.elements) |e| e.items() else return;
+    const n = Vm.arrayLength(arr);
+    var i: usize = 0;
+    while (i + 1 < n) : (i += 2) {
+        const k = items[i];
+        if (k.isEmpty() or !k.isCell() or k.asCell().marked) continue;
+        if (d.index) |ix| _ = ix.removeContext(k, .{ .vm = vm });
+        items[i] = Value.empty;
+        items[i + 1] = Value.empty;
+        d.size -= 1;
+    }
 }
 
 pub fn finalize(vm: *Vm, o: *Object) void {
@@ -154,6 +204,7 @@ fn initCollection(vm: *Vm, o: *Object) Error!void {
     const ix = try vm.meta.create(Index);
     ix.* = .empty;
     o.internal(CollectionData).* = .{ .entries = (try vm.newArray(0)).asValue(), .index = ix, .size = 0 };
+    if (o.class == .weak_map or o.class == .weak_set) try vm.weak_objects.append(vm.meta, o);
 }
 
 fn thisCollection(vm: *Vm, this: Value, class: vmod.Class, what: []const u8) Error!*CollectionData {
@@ -643,7 +694,7 @@ fn setIteratorNext(vm: *Vm, this: Value, _: []const Value, _: Value) Error!Value
 // ----------------------------------------------------------- Weak*
 
 /// CanBeHeldWeakly: objects and non-registered symbols.
-fn canBeHeldWeakly(v: Value) bool {
+pub fn canBeHeldWeakly(v: Value) bool {
     if (v.isObject()) return true;
     if (v.isSymbol()) return !Vm.asSymbol(v).registered;
     return false;

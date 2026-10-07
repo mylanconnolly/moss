@@ -42,6 +42,17 @@ pub const Root = struct {
     trace: *const fn (ctx: *anyopaque, gc: *Marker) void,
 };
 
+/// Weak references' hooks: `ephemerons` runs once the mark stack drains
+/// and marks what a marked key keeps alive (true when it marked anything
+/// — the collector drains and asks again, to the fixpoint); `clear`
+/// runs at the fixpoint, before the sweep, to drop the entries, targets
+/// and cells whose referents died.
+pub const WeakHooks = struct {
+    ctx: *anyopaque,
+    ephemerons: *const fn (ctx: *anyopaque, m: *Marker) bool,
+    clear: *const fn (ctx: *anyopaque) void,
+};
+
 /// What a tracer marks with.
 pub const Marker = struct {
     heap: *Heap,
@@ -112,6 +123,7 @@ pub const Heap = struct {
     /// cell heap read as full with ten megabytes free.)
     tracer: *const fn (heap: *Heap, cell: *Cell, m: *Marker) void,
     finalizer: ?*const fn (heap: *Heap, cell: *Cell) void = null,
+    weak: ?WeakHooks = null,
     collections: usize = 0,
     live_bytes: usize = 0,
     /// Set when an allocation found no room (after a collection): the
@@ -398,7 +410,14 @@ pub const Heap = struct {
             const lo = @min(@intFromPtr(&spill), @frameAddress());
             h.scanStack(&m, lo, h.stack_hi);
         }
-        while (m.stack.pop()) |c| h.traceCell(c, &m);
+        // Drain; then let weak tables mark what their live keys keep,
+        // and drain again, until nothing new is marked.
+        while (true) {
+            while (m.stack.pop()) |c| h.traceCell(c, &m);
+            const w = h.weak orelse break;
+            if (!w.ephemerons(w.ctx, &m)) break;
+        }
+        if (h.weak) |w| w.clear(w.ctx);
         var live: usize = 0;
         var w = h.walk();
         while (w.next()) |c| {

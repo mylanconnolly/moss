@@ -8851,6 +8851,64 @@ copy, the register clear) and the calls into natives; the object model
 is out of the picture. Twice the first row's mean, in a day, with
 test262 unchanged to the file.
 
+**Stage 10's residuals, the round (as built, 2026-10-07).** What the
+test262 numbers moved on, and how each piece is built. *Eval:* a sloppy
+direct eval's `var`/function bindings are `.unresolved` in the eval root
+(resolved by name at run time; `.global` only for a global or indirect
+eval), `declvar`/`declfunc` carry a deletable bit, the eval's own scope
+is no longer a variable environment (`ScopeInfo.is_function` is false
+for `.eval`; `is_params` marks a parameter-expression scope) so
+`declareVar` walks to the caller's, and `CodeData.eval_vars`/`eval_funcs`
+feed `interp.evalDeclarationCheck` — EvalDeclarationInstantiation's
+conflict and CanDeclareGlobal checks — before `runScript`; the `eval`
+instruction's top `c` bit says the call sits in a parameter expression,
+where the function's own environment is already on the chain and the
+parameter scope below it is what may not be shadowed (`arguments`
+included for a non-arrow function). *Weak references:* `heap.WeakHooks`
+— after the mark stack drains, the ephemeron hook marks the values of
+live keys and the collector drains again, to the fixpoint; the clear
+hook then empties dead entries, WeakRef targets and registry cells
+before the sweep. A weak collection's entry list is traced with
+`Objects.traceKeepingElements` (the array and its vector stay, the pairs
+are weighed by the pass); `Vm.weak_objects` lists the live weak maps,
+sets, refs and registries (pruned by the clear pass), `Vm.kept` is
+KeepDuringJob (cleared per job in `runJobs`), and `cleanup_pending` runs
+`weakref.runCleanups` once the queue drains. *Modules:*
+`Import.type_attr` and the export forms' `type_attr` from the parser (an
+unknown key is refused when the module loads, as test262 expects, not at
+parse); `Module.request_types` make (specifier, type) the request key;
+`createJson` builds a synthetic record — one `default` slot in an Env of
+its own, status evaluated, its promise resolved — remembered under the
+name with a `json` tag; `import(spec, { with })` evaluates the options
+as EvaluateImportCall step 7 says. *Realms:* `$262.createRealm()` makes
+a realm, installs `$262` on its global (natives born there switch to it
+when called) and returns to the caller's; `Vm.functionRealm` walks bound
+functions and proxies, and `prototypeFromConstructor` maps the default
+intrinsic to the constructor's realm field by field. *RegExp:* a
+`.modifiers` node scopes the parser's and the compiler's flags,
+`Class.ignore_case` and the anchors' and `\b`'s `a` operand carry the
+rule in force (the matcher no longer reads the program's flags);
+`GroupName.path` records each named group's alternation path so two of a
+name coexist when a disjunction keeps them apart, `nbackref` resolves
+`\k<name>` over a `name_sets` entry at match time, and the groups object
+keeps the participating one; the `v` flag's class sets are a grammar of
+their own (`parseClassV`: a `ClassSet` of ranges and strings; union,
+intersection and subtraction never mixed, a range never an operand,
+`\q{}`, properties of strings from `unicode.stringProperty`, negation
+refused where strings may be, ClassSetSyntaxCharacter and the doubled
+punctuators refused), and a set with strings compiles to the
+alternation the specification orders — longest strings first, then the
+code points, the empty string last. *Unicode data:* `tools/fetch-ucd.sh`
+fetches `emoji-sequences.txt` and `emoji-zwj-sequences.txt` (published
+beside the UCD, under `Public/<version>/emoji/`), `ucdgen` writes a
+`<property>/r` range table and a `<property>/s` string table per
+property of strings (RGI_Emoji the union of the six), and
+`sc=Unknown`/`scx=Unknown` as the complement of every script. *The
+floors:* `tools/test262.zig` holds a count per top-level directory; a
+whole, unfiltered run below it exits 1. Numbers: test/language
+22,950/23,726 (96.7%), test/built-ins 18,489/23,821 (77.6%), annexB
+768/1,086.
+
 ## Distribution: the fabric
 
 **No single system image.** Sprite/MOSIX/OpenSSI-style transparency fails on

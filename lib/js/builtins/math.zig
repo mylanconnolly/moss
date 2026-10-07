@@ -22,10 +22,11 @@ pub fn install(vm: *Vm) Error!void {
         .{ "abs", unaryFn(absF) },     .{ "acos", unaryFn(acosF) },   .{ "acosh", unaryFn(acoshF) },   .{ "asin", unaryFn(asinF) },
         .{ "asinh", unaryFn(asinhF) }, .{ "atan", unaryFn(atanF) },   .{ "atanh", unaryFn(atanhF) },   .{ "cbrt", unaryFn(cbrtF) },
         .{ "ceil", unaryFn(ceilF) },   .{ "cos", unaryFn(cosF) },     .{ "cosh", unaryFn(coshF) },     .{ "exp", unaryFn(expF) },
-        .{ "expm1", unaryFn(expm1F) }, .{ "floor", unaryFn(floorF) }, .{ "fround", unaryFn(froundF) }, .{ "log", unaryFn(logF) },
-        .{ "log1p", unaryFn(log1pF) }, .{ "log10", unaryFn(log10F) }, .{ "log2", unaryFn(log2F) },     .{ "round", unaryFn(roundF) },
-        .{ "sign", unaryFn(signF) },   .{ "sin", unaryFn(sinF) },     .{ "sinh", unaryFn(sinhF) },     .{ "sqrt", unaryFn(sqrtF) },
-        .{ "tan", unaryFn(tanF) },     .{ "tanh", unaryFn(tanhF) },   .{ "trunc", unaryFn(truncF) },   .{ "clz32", clz32 },
+        .{ "expm1", unaryFn(expm1F) }, .{ "floor", unaryFn(floorF) }, .{ "fround", unaryFn(froundF) }, .{ "f16round", unaryFn(f16roundF) },
+        .{ "log", unaryFn(logF) },     .{ "log1p", unaryFn(log1pF) }, .{ "log10", unaryFn(log10F) },   .{ "log2", unaryFn(log2F) },
+        .{ "round", unaryFn(roundF) }, .{ "sign", unaryFn(signF) },   .{ "sin", unaryFn(sinF) },       .{ "sinh", unaryFn(sinhF) },
+        .{ "sqrt", unaryFn(sqrtF) },   .{ "tan", unaryFn(tanF) },     .{ "tanh", unaryFn(tanhF) },     .{ "trunc", unaryFn(truncF) },
+        .{ "clz32", clz32 },
     }) |e| _ = try vm.defineNative(m, e[0], 1, e[1]);
     _ = try vm.defineNative(m, "atan2", 2, atan2);
     _ = try vm.defineNative(m, "hypot", 2, hypot);
@@ -118,6 +119,10 @@ fn log2F(x: f64) f64 {
 }
 fn froundF(x: f64) f64 {
     return @floatCast(@as(f32, @floatCast(x)));
+}
+/// Math.f16round (ES2025): the nearest binary16, ties to even.
+fn f16roundF(x: f64) f64 {
+    return @floatCast(@as(f16, @floatCast(x)));
 }
 fn roundF(x: f64) f64 {
     if (!std.math.isFinite(x) or x == 0) return x;

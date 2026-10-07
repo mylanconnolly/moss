@@ -1133,13 +1133,52 @@ supervises), and memory history per unit beside the CPU one.
       miss in the older `let` fast path): the mean 2,246 to 2,416,
       twice the first row; test262 unchanged. What is left in
       the profile is the call sequence; `web-eval` folds into stage 11.
-      Residuals of (b)–(d): the moving nursery (the barrier is in
-      place) and ephemeron keys for the weak collections, eval's
-      `arguments` early errors, rooting natives' locals so collection
-      can run at any depth (today only at native depth zero), import
-      attributes, `$262.createRealm` and `$262.agent` in the runner,
-      the regexp modifiers and `unicodeSets` string properties, time
-      zones for Date, Temporal (4,605 files, the last large block).
+      ✅ *The residuals of (b)–(d), a round* (2026-10-07; test/language
+      22,724 → 22,950 of 23,726, test/built-ins 18,059 → 18,489 of 23,821,
+      annexB 717 → 768): eval's declarations — a sloppy direct eval's
+      vars and functions land in the caller's variable environment (they
+      were compiled as globals, and `declvar` put them in the eval's own
+      scope: `eval("var x"); x` inside a function was a ReferenceError),
+      EvalDeclarationInstantiation's checks before the code runs (a var
+      over a lexical binding, over a parameter or the `arguments` a
+      parameter-expression eval would shadow, over a global lexical;
+      CanDeclareGlobalVar/Function), eval code refusing `return`, a
+      script's globals non-configurable and an eval's configurable
+      (eval-code 170 → 342 of 347); the weak collections as ephemeron
+      tables, WeakRef and FinalizationRegistry (`heap.WeakHooks`: an
+      ephemeron pass to the fixpoint and a clear pass before the sweep;
+      KeepDuringJob; cleanup callbacks after the job queue drains; all
+      pass under `TEST262_GC_STRESS`); import attributes and JSON modules
+      (`with { type: "json" }`, static and dynamic, a synthetic record
+      evaluated at load); `$262.createRealm` in the runner, and
+      GetFunctionRealm so a cross-realm constructor's missing `prototype`
+      falls back to its own realm's intrinsic (Proxy 274 → 311 of 311);
+      regexp modifiers `(?ims-ims:)`, duplicate named groups, and the `v`
+      flag's class sets in full — `\q{}` string literals, the properties
+      of strings (`RGI_Emoji` and the six it unites, from the emoji
+      sequence files `tools/fetch-ucd.sh` now fetches), strict
+      set-operation syntax, `Script=Unknown` (RegExp 1,681 → 1,876 of
+      1,879); `Promise.try` returning a promise of its constructor
+      unwrapped (the 2026 change), `Math.f16round`, ArraySetLength
+      deleting in index order (a non-configurable element below a dense
+      one was skipped), property escapes folding under `i` and `\P{}`
+      complementing the plain set in `u` mode, `String.raw`'s line
+      continuations. The exit's floors are in `tools/test262.zig`: a
+      top-level directory run whole may not drop below its recorded
+      count. Still open, each named: Temporal (4,605 files), `$262.agent`
+      and the multi-agent Atomics (118), time zones for Date, the moving
+      nursery (retired as a plan: the collector reads the native stack
+      conservatively since 2026-09-28, so a moving space would need
+      pinning — a non-moving generational scheme with sticky mark bits
+      is the shape if a profile ever asks), `Promise.allKeyed`,
+      `Array.fromAsync`, explicit resource management,
+      `Error.captureStackTrace`/`stack`, `JSON.rawJSON`,
+      `Math.sumPrecise`, `import.defer`/`import.source` (proposals
+      beyond the target, counted as misses), `String.prototype.normalize`
+      (no decomposition tables), `localeCompare` beyond code units, a
+      function's `toString` of class elements with comments, and an eval
+      declaring `arguments` from an arrow's parameter expression (five
+      eval-code files).
     - **(11) Scripts meet the page.** Bindings generated from one
       comptime interface table; the event loop in `webpage` (tasks,
       microtasks, timers on a kernel timer, animation frames on the

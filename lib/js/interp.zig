@@ -1722,7 +1722,7 @@ fn step(vm: *Vm, frame_p: **Frame, code_p: **bytecode.CodeData, regs_p: *[*]Valu
             },
             .declvar => {
                 frame.pc = pc;
-                try declareVar(vm, frame, asString(code.consts[insn.bc()]), null);
+                try declareVar(vm, frame, asString(code.consts[insn.bc()]), null, insn.a != 0);
                 if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
                 insn = code.insns[pc];
                 pc += 1;
@@ -1730,7 +1730,7 @@ fn step(vm: *Vm, frame_p: **Frame, code_p: **bytecode.CodeData, regs_p: *[*]Valu
             },
             .declfunc => {
                 frame.pc = pc;
-                try declareVar(vm, frame, asString(code.consts[insn.b]), regs[insn.c]);
+                try declareVar(vm, frame, asString(code.consts[insn.b]), regs[insn.c], insn.a != 0);
                 if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
                 insn = code.insns[pc];
                 pc += 1;
@@ -2012,9 +2012,9 @@ fn step(vm: *Vm, frame_p: **Frame, code_p: **bytecode.CodeData, regs_p: *[*]Valu
                 frame.pc = pc;
                 const f = regs[insn.b];
                 const args_base: u32 = frame.base + insn.b + 2;
-                const args = vm.stack[args_base .. args_base + insn.c];
+                const args = vm.stack[args_base .. args_base + (insn.c & 0x7fff)];
                 if (f.isObject() and asObject(f) == vm.intrinsics.eval) {
-                    regs[insn.a] = try directEval(vm, frame, if (args.len > 0) args[0] else Value.undefined_, code.strict);
+                    regs[insn.a] = try directEval(vm, frame, if (args.len > 0) args[0] else Value.undefined_, code.strict, insn.c & 0x8000 != 0);
                 } else {
                     regs[insn.a] = try callSlow(vm, f, Value.undefined_, args, pc);
                 }
@@ -2033,7 +2033,7 @@ fn step(vm: *Vm, frame_p: **Frame, code_p: **bytecode.CodeData, regs_p: *[*]Valu
             },
             .importcall => {
                 frame.pc = pc;
-                regs[insn.a] = try modules.dynamicImport(vm, code, regs[insn.b]);
+                regs[insn.a] = try modules.dynamicImport(vm, code, regs[insn.b], if (insn.c == 0xFFFF) Value.undefined_ else regs[insn.c]);
                 if (comptime builtin.os.tag != .freestanding) if (trace_enabled) continue;
                 insn = code.insns[pc];
                 pc += 1;
@@ -2532,7 +2532,10 @@ fn declareGlobalLexical(vm: *Vm, name: *String, is_const: bool) Error!void {
 
 /// Eval code's `var`/function declaration: into the nearest function
 /// environment's dictionary, or the global object.
-fn declareVar(vm: *Vm, frame: *Frame, name: *String, init: ?Value) Error!void {
+/// CreateGlobalVarBinding / CreateGlobalFunctionBinding, or the binding
+/// in the nearest variable environment; `deletable` is eval code's `D`
+/// (its globals are configurable, a script's are not).
+fn declareVar(vm: *Vm, frame: *Frame, name: *String, init: ?Value, deletable: bool) Error!void {
     var cur: ?*Env = frame.env;
     while (cur) |e| : (cur = e.parent) {
         if (e.info.is_with) continue;
@@ -2565,18 +2568,18 @@ fn declareVar(vm: *Vm, frame: *Frame, name: *String, init: ?Value) Error!void {
     if (init) |v| {
         const existing = try vm.getOwnProperty(vm.global, key);
         if (existing == null or existing.?.attrs.configurable) {
-            _ = try vm.defineOwnProperty(vm.global, key, .{ .value = v, .writable = true, .enumerable = true, .configurable = true }, true);
+            _ = try vm.defineOwnProperty(vm.global, key, .{ .value = v, .writable = true, .enumerable = true, .configurable = deletable }, true);
         } else {
             _ = try vm.defineOwnProperty(vm.global, key, .{ .value = v }, true);
         }
     } else if (!try vm.hasOwnProperty(vm.global, key)) {
         if (!vm.global.extensible) return vm.throwTypeError("Cannot define global variable");
-        _ = try vm.defineOwnProperty(vm.global, key, .{ .value = Value.undefined_, .writable = true, .enumerable = true, .configurable = true }, true);
+        _ = try vm.defineOwnProperty(vm.global, key, .{ .value = Value.undefined_, .writable = true, .enumerable = true, .configurable = deletable }, true);
     }
 }
 
 /// PerformEval for a direct eval (§19.2.1.1).
-fn directEval(vm: *Vm, frame: *Frame, x: Value, strict_caller: bool) Error!Value {
+fn directEval(vm: *Vm, frame: *Frame, x: Value, strict_caller: bool, in_params: bool) Error!Value {
     if (!x.isString()) return x;
     const src = try vm.utf8(asString(x), vm.meta);
     defer vm.meta.free(src);
@@ -2616,7 +2619,58 @@ fn directEval(vm: *Vm, frame: *Frame, x: Value, strict_caller: bool) Error!Value
         error.OutOfMemory => return error.OutOfMemory,
         error.SyntaxError => return vm.throwSyntaxError(compiler.last_error),
     };
+    try evalDeclarationCheck(vm, frame.env, code.data, in_function and !is_arrow, in_params);
     return runScript(vm, code, frame.this, frame.env, frame.func, frame.new_target);
+}
+
+/// EvalDeclarationInstantiation's checks (§19.2.1.3 steps 3, 8 and 10),
+/// before any of the eval code runs: a var the sloppy eval declares may
+/// not sit over a binding between the eval and its variable environment
+/// — a lexical one in the variable environment itself (a function's
+/// top-level `let`s share its environment here) — nor, for an eval in a
+/// parameter expression, over a parameter or the `arguments` a non-arrow
+/// function binds beside them; nor over a global lexical declaration;
+/// and a global var or function must be definable (CanDeclareGlobalVar /
+/// CanDeclareGlobalFunction).
+pub fn evalDeclarationCheck(vm: *Vm, env: ?*Env, data: *const bytecode.CodeData, fn_has_arguments: bool, in_params: bool) Error!void {
+    if (data.strict or (data.eval_vars.len == 0 and data.eval_funcs.len == 0)) return;
+    const lists = [_][]*String{ data.eval_vars, data.eval_funcs };
+    var cur: ?*Env = env;
+    while (cur) |e| : (cur = e.parent) {
+        if (e.info.is_with) continue;
+        if (in_params) {
+            // The function's own environment is already on the chain
+            // (its body's declarations are not instantiated yet); the
+            // parameter scope below it is what the eval may not shadow.
+            if (e.info.is_function and !e.info.is_params) continue;
+            for (e.info.names) |n| for (lists) |names| for (names) |nm| if (nm == n) return throwNamed(vm, .SyntaxError, nm, " has already been declared");
+            if (e.info.is_params) {
+                if (fn_has_arguments) {
+                    const arguments = try vm.strings.atom("arguments");
+                    for (lists) |names| for (names) |nm| if (nm == arguments) return throwNamed(vm, .SyntaxError, nm, " has already been declared");
+                }
+                break;
+            }
+            continue;
+        }
+        const var_env = e.info.is_function;
+        for (e.info.names, 0..) |n, i| {
+            if (var_env and !e.info.lexical[i]) continue;
+            for (lists) |names| for (names) |nm| if (nm == n) return throwNamed(vm, .SyntaxError, nm, " has already been declared");
+        }
+        if (e.info.is_function) break;
+    }
+    if (cur != null) return;
+    // The global object is the variable environment.
+    for (lists) |names| for (names) |nm| if (vm.global_lex.contains(nm)) return throwNamed(vm, .SyntaxError, nm, " has already been declared");
+    for (data.eval_funcs) |nm| {
+        const existing = try vm.getOwnProperty(vm.global, .{ .atom = nm });
+        const ok = if (existing) |p| p.attrs.configurable or (!p.attrs.accessor and p.attrs.writable and p.attrs.enumerable) else vm.global.extensible;
+        if (!ok) return throwNamed(vm, .TypeError, nm, " cannot be declared");
+    }
+    for (data.eval_vars) |nm| {
+        if (!vm.global.extensible and !try vm.hasOwnProperty(vm.global, .{ .atom = nm })) return throwNamed(vm, .TypeError, nm, " cannot be declared");
+    }
 }
 
 const interp_cases = [_]struct { src: []const u8, want: f64 }{

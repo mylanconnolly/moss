@@ -356,6 +356,12 @@ fn tryFn(vm: *Vm, this: Value, args: []const Value, _: Value) Error!Value {
         },
         else => return e,
     };
+    // A promise of this constructor comes back as it is, not wrapped
+    // (the 2026 change test262 carries: PromiseResolve's shortcut).
+    if (r.isObject() and asObject(r).class == .promise) {
+        const ctor = try vm.get(asObject(r), .{ .atom = vm.atoms.constructor }, r);
+        if (vm.sameValue(ctor, this)) return r;
+    }
     _ = try vm.call(cap.resolve, Value.undefined_, &.{r});
     return cap.promise;
 }

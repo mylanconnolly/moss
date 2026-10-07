@@ -400,7 +400,11 @@ pub fn builtinExec(vm: *Vm, o: *Object, s: *String) Error!Value {
         const g = try vm.objects.create(Value.null_, .ordinary, 0);
         for (prog.names) |gn| {
             const gv = a.elements.?.items()[gn.index];
-            _ = try vm.createDataProperty(g, .{ .atom = try vm.strings.intern(try vm.strings.fromUnits(gn.name)) }, gv);
+            const key: Key = .{ .atom = try vm.strings.intern(try vm.strings.fromUnits(gn.name)) };
+            // A name several groups share: the one that participated
+            // (the property keeps its first position).
+            if (gv.isUndefined() and (try vm.objects.getOwn(g, key)) != null) continue;
+            _ = try vm.createDataProperty(g, key, gv);
         }
         groups = g.asValue();
     }
@@ -421,7 +425,12 @@ pub fn builtinExec(vm: *Vm, o: *Object, s: *String) Error!Value {
         var igroups: Value = Value.undefined_;
         if (prog.names.len > 0) {
             const g = try vm.objects.create(Value.null_, .ordinary, 0);
-            for (prog.names) |gn| _ = try vm.createDataProperty(g, .{ .atom = try vm.strings.intern(try vm.strings.fromUnits(gn.name)) }, indices.elements.?.items()[gn.index]);
+            for (prog.names) |gn| {
+                const iv = indices.elements.?.items()[gn.index];
+                const key: Key = .{ .atom = try vm.strings.intern(try vm.strings.fromUnits(gn.name)) };
+                if (iv.isUndefined() and (try vm.objects.getOwn(g, key)) != null) continue;
+                _ = try vm.createDataProperty(g, key, iv);
+            }
             igroups = g.asValue();
         }
         _ = try vm.createDataProperty(indices, .{ .atom = vm.atoms.groups }, igroups);

@@ -21,6 +21,7 @@ const bytecode = @import("bytecode.zig");
 const compiler = @import("compiler.zig");
 const interp = @import("interp.zig");
 const realm = @import("realm.zig");
+const builtins = @import("builtins.zig");
 const module = @import("module.zig");
 pub const Cell = heap.Cell;
 pub const Heap = heap.Heap;
@@ -253,6 +254,16 @@ pub const Vm = struct {
     atoms: realm.Atoms = undefined,
     /// Pending promise jobs (stage c) — a queue of (function, args) pairs.
     jobs: std.ArrayList(Job) = .empty,
+    /// The weak collections, WeakRefs and finalization registries alive
+    /// (`heap.WeakHooks`): the ephemeron and clear passes walk them; the
+    /// clear pass drops the dead ones.
+    weak_objects: std.ArrayList(*Object) = .empty,
+    /// KeepDuringJob: WeakRef targets made or read in this job (roots
+    /// until the job ends).
+    kept: std.ArrayList(Value) = .empty,
+    /// A collection moved a finalization cell to its registry's ready
+    /// list: the cleanup callbacks run once the job queue drains.
+    cleanup_pending: bool = false,
     /// Native call depth, against runaway recursion.
     depth: u32 = 0,
     /// Set while the interpreter runs the top frame; `collect` only then.
@@ -347,6 +358,7 @@ pub const Vm = struct {
         vm.strings = Strings.init(&vm.heap, vm.meta);
         vm.objects = Objects.init(&vm.heap, &vm.strings, vm.meta);
         try vm.heap.addRoot(.{ .ctx = vm, .trace = traceRoots });
+        vm.heap.weak = .{ .ctx = vm, .ephemerons = weakEphemerons, .clear = weakClear };
         // The first realm: the shared atoms and symbols, then its own
         // intrinsics and global, kept in the VM's live fields.
         const main = try vm.meta.create(Realm);
@@ -406,6 +418,8 @@ pub const Vm = struct {
             vm.meta.destroy(r);
         }
         vm.realms.deinit(vm.meta);
+        vm.weak_objects.deinit(vm.meta);
+        vm.kept.deinit(vm.meta);
         vm.symbol_registry.deinit(vm.meta);
         vm.frames.deinit(vm.meta);
         vm.handlers.deinit(vm.meta);
@@ -511,7 +525,7 @@ pub const Vm = struct {
                 m.markValue(d.fulfill_reactions);
                 m.markValue(d.reject_reactions);
             },
-            .map, .set, .weak_map, .weak_set, .proxy, .regexp, .date, .array_buffer, .typed_array, .data_view, .iterator_helper, .namespace => {
+            .map, .set, .weak_map, .weak_set, .weak_ref, .finalization_registry, .proxy, .regexp, .date, .array_buffer, .typed_array, .data_view, .iterator_helper, .namespace => {
                 // Stage c/d classes trace through their own hooks.
                 realm.traceExtra(o, m);
             },
@@ -539,6 +553,7 @@ pub const Vm = struct {
 
     fn traceRoots(ctx: *anyopaque, m: *heap.Marker) void {
         const vm: *Vm = @ptrCast(@alignCast(ctx));
+        for (vm.kept.items) |v| m.markValue(v);
         vm.strings.markRoots(m);
         vm.objects.markRoots(m);
         realm.traceShared(vm, m);
@@ -591,6 +606,43 @@ pub const Vm = struct {
     pub inline fn tick(vm: *Vm) Error!void {
         vm.steps += 1;
         if (vm.steps > vm.step_limit) return vm.budgetExceeded();
+    }
+
+    /// The ephemeron pass (`heap.WeakHooks`): every live weak map's live
+    /// keys keep their values; true when any value was newly marked.
+    fn weakEphemerons(ctx: *anyopaque, m: *heap.Marker) bool {
+        const vm: *Vm = @ptrCast(@alignCast(ctx));
+        var changed = false;
+        for (vm.weak_objects.items) |o| {
+            if (!o.header.marked) continue;
+            if (o.class == .weak_map or o.class == .weak_set) {
+                if (builtins.map.ephemerons(o, m)) changed = true;
+            }
+        }
+        return changed;
+    }
+
+    /// The clear pass: dead weak objects leave the list (the sweep frees
+    /// them); live ones drop what died under them.
+    fn weakClear(ctx: *anyopaque) void {
+        const vm: *Vm = @ptrCast(@alignCast(ctx));
+        var n: usize = 0;
+        for (vm.weak_objects.items) |o| {
+            if (!o.header.marked) continue;
+            vm.weak_objects.items[n] = o;
+            n += 1;
+            switch (o.class) {
+                .weak_map, .weak_set => builtins.map.clearDead(vm, o),
+                .weak_ref, .finalization_registry => builtins.weakref.clearDead(vm, o),
+                else => {},
+            }
+        }
+        vm.weak_objects.shrinkRetainingCapacity(n);
+    }
+
+    /// AddToKeptObjects: a WeakRef target lives to the end of the job.
+    pub fn addKept(vm: *Vm, v: Value) Error!void {
+        try vm.kept.append(vm.meta, v);
     }
 
     /// A safe point: collect when the heap asks for it. Only the
@@ -1623,39 +1675,40 @@ pub const Vm = struct {
                 e.len = new_len_num;
             }
         } else {
-            // Delete from the end; stop at a non-configurable one.
-            if (o.elements) |e| {
-                var i: u32 = @min(old_len, e.cap);
-                while (i > new_len_num) : (i -= 1) e.items()[i - 1] = Value.empty;
-                e.len = new_len_num;
-            }
-            // A dense array has no index keys in its shape: the scan below
-            // (every own key, listed) was every `pop`'s cost (2026-09-25).
-            if (!o.sparse_indexes) {
-                if (desc.writable) |w| if (!w) try vm.setLengthWritable(o, false);
-                return true;
-            }
-            // Sparse index properties in the shape table.
-            var keys: std.ArrayList(Key) = .empty;
-            defer keys.deinit(vm.meta);
-            try vm.objects.ownKeys(o, &keys);
-            var i = keys.items.len;
-            var stopped: ?u32 = null;
-            while (i > 0) {
-                i -= 1;
-                const k = keys.items[i];
-                if (k != .index or k.index < new_len_num) continue;
-                if (o.elements != null and k.index < o.elements.?.cap) continue;
-                if (!try vm.objects.delete(o, k)) {
-                    stopped = k.index + 1;
-                    break;
+            // Delete from the end, in descending index order; a
+            // non-configurable one stops the deletion there and the length
+            // lands just above it. Index properties with other than the
+            // default attributes live in the shape table (`sparse_indexes`;
+            // a dense array has none, and the scan of every own key was
+            // every `pop`'s cost, 2026-09-25): those go first, then the
+            // dense part is cleared down to where the deletion stopped
+            // (it was cleared first, so a non-configurable element below
+            // a dense one looked dense and was skipped, 2026-10-07).
+            var stop: u32 = new_len_num;
+            if (o.sparse_indexes) {
+                var keys: std.ArrayList(Key) = .empty;
+                defer keys.deinit(vm.meta);
+                try vm.objects.ownKeys(o, &keys);
+                var i = keys.items.len;
+                while (i > 0) {
+                    i -= 1;
+                    const k = keys.items[i];
+                    if (k != .index or k.index < new_len_num) continue;
+                    // A dense element is not in the shape table.
+                    if (o.elements) |e| if (k.index < e.cap and !e.items()[k.index].isEmpty()) continue;
+                    if (!try vm.objects.delete(o, k)) {
+                        stop = k.index + 1;
+                        break;
+                    }
                 }
             }
-            if (stopped) |s| {
-                if (o.elements) |e| e.len = s;
-                if (desc.writable) |w| if (!w) try vm.setLengthWritable(o, false);
-                return false;
+            if (o.elements) |e| {
+                var i: u32 = @min(old_len, e.cap);
+                while (i > stop) : (i -= 1) e.items()[i - 1] = Value.empty;
+                e.len = stop;
             }
+            if (desc.writable) |w| if (!w) try vm.setLengthWritable(o, false);
+            return stop == new_len_num;
         }
         if (desc.writable) |w| if (!w) try vm.setLengthWritable(o, false);
         return true;
@@ -1844,9 +1897,32 @@ pub const Vm = struct {
         if (!ctor.isObject()) return default;
         const p = try vm.get(asObject(ctor), .{ .atom = vm.atoms.prototype }, ctor);
         if (p.isObject()) return asObject(p);
-        // A constructor from another realm would use its realm's
-        // intrinsic; there is one realm.
+        // A constructor from another realm: that realm's intrinsic of
+        // the same name (GetPrototypeFromConstructor step 4).
+        const r = try vm.functionRealm(asObject(ctor));
+        if (r == vm.realm) return default;
+        inline for (@typeInfo(realm.Intrinsics).@"struct".fields) |f| {
+            if (f.type == *Object) {
+                if (@field(vm.intrinsics, f.name) == default) return @field(r.intrinsics, f.name);
+            }
+        }
         return default;
+    }
+
+    /// GetFunctionRealm (§7.3.25): through bound functions and proxies
+    /// to the function's realm; a revoked proxy is a TypeError.
+    pub fn functionRealm(vm: *Vm, o: *Object) Error!*Realm {
+        var cur = o;
+        while (true) switch (cur.class) {
+            .function => return cur.internal(FunctionData).realm orelse vm.realm,
+            .bound_function => cur = cur.internal(BoundData).target,
+            .proxy => {
+                const pd = cur.internal(builtins.proxy.ProxyData);
+                if (!pd.target.isObject()) return vm.throwTypeError("Cannot perform operation on a revoked proxy");
+                cur = asObject(pd.target);
+            },
+            else => return vm.realm,
+        };
     }
 
     /// OrdinaryCreateFromConstructor.
@@ -1903,15 +1979,23 @@ pub const Vm = struct {
 
     /// Run the pending promise jobs (stage c).
     pub fn runJobs(vm: *Vm) Error!void {
-        while (vm.jobs.items.len > 0) {
-            const j = vm.jobs.orderedRemove(0);
-            _ = vm.callRooted(j.func, Value.undefined_, j.args[0..j.argc]) catch |e| switch (e) {
-                error.Exception => {
-                    // A job's exception is reported by the host; drop it.
-                    vm.exception = Value.undefined_;
-                },
-                else => return e,
-            };
+        while (true) {
+            while (vm.jobs.items.len > 0) {
+                const j = vm.jobs.orderedRemove(0);
+                _ = vm.callRooted(j.func, Value.undefined_, j.args[0..j.argc]) catch |e| switch (e) {
+                    error.Exception => {
+                        // A job's exception is reported by the host; drop it.
+                        vm.exception = Value.undefined_;
+                    },
+                    else => return e,
+                };
+                // ClearKeptObjects: the job is over.
+                vm.kept.clearRetainingCapacity();
+            }
+            vm.kept.clearRetainingCapacity();
+            // Finalization cleanups are jobs of their own, after the queue.
+            if (!vm.cleanup_pending) break;
+            try builtins.weakref.runCleanups(vm);
         }
     }
 

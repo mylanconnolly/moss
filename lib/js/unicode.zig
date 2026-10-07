@@ -49,6 +49,42 @@ fn rangesOf(e: Entry) []align(1) const Range {
     return p[0..e.n];
 }
 
+/// A property of strings (§22.2.2.9.7 table 68: `RGI_Emoji` and the six
+/// emoji sequence sets it unites; `v` mode only): its single code points
+/// as ranges, and its sequences as (n, n code points) records.
+pub const StringProperty = struct {
+    ranges: []align(1) const Range,
+    words: []align(1) const u32,
+
+    pub const Iterator = struct {
+        words: []align(1) const u32,
+        i: usize = 0,
+        pub fn next(it: *Iterator) ?[]align(1) const u32 {
+            if (it.i >= it.words.len) return null;
+            const n = it.words[it.i];
+            const s = it.words[it.i + 1 ..][0..n];
+            it.i += 1 + n;
+            return s;
+        }
+    };
+    pub fn strings(p: StringProperty) Iterator {
+        return .{ .words = p.words };
+    }
+};
+
+pub fn stringProperty(name: []const u8) ?StringProperty {
+    var buf: [40]u8 = undefined;
+    if (name.len + 2 > buf.len) return null;
+    @memcpy(buf[0..name.len], name);
+    buf[name.len] = '/';
+    buf[name.len + 1] = 'r';
+    const r = find(buf[0 .. name.len + 2]) orelse return null;
+    buf[name.len + 1] = 's';
+    const s = find(buf[0 .. name.len + 2]) orelse return null;
+    const words: [*]align(1) const u32 = @ptrCast(blob[s.offset..].ptr);
+    return .{ .ranges = rangesOf(r), .words = words[0..s.n] };
+}
+
 /// A property table by the names ECMA-262 §22.2.2.9.7 accepts: a
 /// binary property (`Alphabetic`, `AHex`, ...), a general category
 /// value with or without `General_Category=`/`gc=`, or a script under
@@ -195,4 +231,30 @@ test "unicode: properties, identifiers and case tables from the blob" {
     try std.testing.expect(out[0] == 'S' and out[1] == 'S');
     try std.testing.expectEqual(@as(usize, 1), toLowerFull('A', &out));
     try std.testing.expectEqual(@as(u32, 'a'), out[0]);
+}
+
+test "unicode: properties of strings" {
+    const rgi = stringProperty("RGI_Emoji").?;
+    try std.testing.expect(inRanges(rgi.ranges, 0x231A)); // ⌚, a Basic_Emoji code point
+    var it = rgi.strings();
+    var n: usize = 0;
+    var keycap = false;
+    while (it.next()) |s| {
+        n += 1;
+        if (s.len == 3 and s[0] == '#' and s[1] == 0xFE0F and s[2] == 0x20E3) keycap = true;
+    }
+    try std.testing.expect(n > 2000);
+    try std.testing.expect(keycap);
+    try std.testing.expect(stringProperty("Emoji_Keycap_Sequence").?.ranges.len == 0);
+    try std.testing.expect(stringProperty("Emoji") == null);
+    try std.testing.expect(property("RGI_Emoji", null) == null);
+}
+
+test "unicode: Script=Unknown is the code points no script claims" {
+    const unknown = property("Script", "Unknown").?;
+    try std.testing.expect(inRanges(unknown, 0x0378)); // unassigned in Greek's block
+    try std.testing.expect(!inRanges(unknown, 'a'));
+    try std.testing.expect(!inRanges(unknown, 0x3000)); // Common
+    try std.testing.expect(property("sc", "Zzzz") != null);
+    try std.testing.expect(property("scx", "Unknown") != null);
 }

@@ -229,12 +229,19 @@ const Parser = struct {
     }
 };
 
-fn parse(vm: *Vm, _: Value, args: []const Value, _: Value) Error!Value {
-    const text = try vm.strings.flatten(try vm.toString(arg(args, 0)));
+/// The value of a JSON text (a flat string), or a SyntaxError; what
+/// `JSON.parse` and a JSON module share.
+pub fn parseText(vm: *Vm, text: *String) Error!Value {
     var p = Parser{ .vm = vm, .s = text };
     const v = try p.value();
     p.skipWs();
     if (p.pos != text.len) return p.fail();
+    return v;
+}
+
+fn parse(vm: *Vm, _: Value, args: []const Value, _: Value) Error!Value {
+    const text = try vm.strings.flatten(try vm.toString(arg(args, 0)));
+    const v = try parseText(vm, text);
     const reviver = arg(args, 1);
     if (vm.isCallable(reviver)) {
         const root = try vm.newObject();

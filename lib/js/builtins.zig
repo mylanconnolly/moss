@@ -37,6 +37,7 @@ pub const bigint = @import("builtins/bigint.zig");
 pub const proxy = @import("builtins/proxy.zig");
 pub const promise = @import("builtins/promise.zig");
 pub const map = @import("builtins/map.zig");
+pub const weakref = @import("builtins/weakref.zig");
 pub const date = @import("builtins/date.zig");
 pub const arraybuffer = @import("builtins/arraybuffer.zig");
 pub const typedarray = @import("builtins/typedarray.zig");
@@ -62,6 +63,7 @@ pub fn install(vm: *Vm) Error!void {
     try bigint.install(vm);
     try proxy.install(vm);
     try map.install(vm);
+    try weakref.install(vm);
     try date.install(vm);
     try arraybuffer.install(vm);
     try typedarray.install(vm);
@@ -75,6 +77,7 @@ pub fn traceExtra(o: *Object, m: *heap.Marker) void {
         .generator => generator.trace(o, m),
         .proxy => proxy.trace(o, m),
         .map, .set, .weak_map, .weak_set => map.trace(o, m),
+        .weak_ref, .finalization_registry => weakref.trace(o, m),
         .array_buffer, .data_view => arraybuffer.trace(o, m),
         .typed_array => typedarray.trace(o, m),
         .iterator_helper => iterhelpers.trace(o, m),
@@ -87,6 +90,7 @@ pub fn finalizeExtra(vm: *Vm, o: *Object) void {
         .regexp => regexp.finalize(vm, o),
         .generator => generator.finalize(vm, o),
         .map, .set, .weak_map, .weak_set => map.finalize(vm, o),
+        .finalization_registry => weakref.finalize(vm, o),
         .array_buffer => arraybuffer.finalize(vm, o),
         .dom => if (vm.dom_finalizer) |f| f(vm, o),
         else => {},

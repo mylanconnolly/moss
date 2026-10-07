@@ -22,7 +22,10 @@ the as-built account with the test262 numbers.
   tagged, cells as pointers, the four constants).
 - `heap.zig` — cells in a region the embedder hands over, precisely
   collected (mark from explicit roots, sweep to size-class free lists);
-  collection only at the interpreter's safe points.
+  collection only at the interpreter's safe points. Weak references go
+  through its weak hooks: an ephemeron pass after the mark stack drains
+  (a live key keeps its value, to the fixpoint) and a clear pass before
+  the sweep (dead entries, WeakRef targets and finalization cells go).
 - `string.zig` — Latin-1 and UTF-16 strings, ropes for concatenation,
   atoms (interned property keys).
 - `object.zig` — objects behind hidden classes (`Shape`s shared by
@@ -45,7 +48,10 @@ the as-built account with the test262 numbers.
   or await, resumed by `next` or a promise reaction), RegExp
   (`builtins/regexp.zig`, the object and the string methods over the
   engine below), Map/Set/WeakMap/WeakSet (`map.zig`, with the ES2025 set
-  methods and `getOrInsert`), Proxy (every trap with its invariants),
+  methods and `getOrInsert`; the weak ones are ephemeron tables), WeakRef
+  and FinalizationRegistry (`weakref.zig`: a target lives to the end of
+  the job it was made or read in, cleanups run once the job queue
+  drains), Proxy (every trap with its invariants),
   BigInt (`bigint.zig`, cells of limbs over `std.math.big`), Date
   (`date.zig`, the calendar arithmetic of §21.4.1, the string formats
   and their parsers; local time is UTC until a host offers a zone),
@@ -60,19 +66,25 @@ the as-built account with the test262 numbers.
   helpers as native state machines that close what they hold open on
   `return`; `Iterator.from`, `concat`, `zip`, `chunks`, `windows`).
 - `regexp.zig` — the regular expression engine: a parser for the
-  ES2023 grammar with Annex B's tolerance (u/v modes, named groups,
-  lookbehind, property escapes), a compiler to a small instruction set
+  ES2025 grammar with Annex B's tolerance (u/v modes — the `v` flag's
+  class sets with string literals, properties of strings and set
+  operations — named groups that may share a name across alternatives,
+  modifiers `(?i:)`, lookbehind, property escapes), a compiler to a small
+  instruction set
   with counted loops and a greedy single-character fast path, and a
   backtracking matcher over UTF-16 units with an explicit backtrack
   stack and a step budget (a `RangeError` when exhausted, never a
   hang).
 - `unicode.zig` + `unicode.bin` — the Unicode Character Database the
-  engine needs (identifier classes, `\p{}` properties and scripts,
-  case folding and the full case mappings), distilled from Unicode
-  17.0.0 by `tools/ucdgen.zig` into a vendored table read in place.
+  engine needs (identifier classes, `\p{}` properties and scripts, the
+  emoji sequence sets behind the properties of strings, case folding
+  and the full case mappings), distilled from Unicode 17.0.0 by
+  `tools/ucdgen.zig` into a vendored table read in place.
 - `module.zig` — module records, linking with live import bindings,
   namespace objects, evaluation with top-level await, `import()` and
-  `import.meta`; sources come only from the embedder's `Vm.host_load`.
+  `import.meta`, import attributes (`with { type: "json" }` makes a JSON
+  module, static or dynamic); sources come only from the embedder's
+  `Vm.host_load`.
   Temporal is a later stage and counts as misses until it lands.
 
 ## Embedding it
@@ -306,6 +318,12 @@ directory. A file passes when every mode
 completes without an exception; a `negative:` file when it fails in the
 named phase with the named error type; an `async` file when it prints
 `Test262:AsyncTestComplete`. The counts are recorded in DESIGN.md as each
-stage lands; proposals beyond ES2023 stay in the count as misses rather
-than being filtered out. A runaway test is stopped by the VM's step
-budget (a `RangeError` after 20M backward jumps or native-loop steps).
+stage lands; proposals beyond the target stay in the count as misses
+rather than being filtered out. A runaway test is stopped by the VM's
+step budget (a `RangeError` after 20M backward jumps or native-loop
+steps). The runner also holds a floor per top-level directory
+(`tools/test262.zig`): a run of `test/language`, `test/built-ins` or
+`test/annexB` whole and unfiltered that passes fewer files than the
+floor exits 1 — raise a floor with its number when a round lands. On
+2026-10-07: test/language 22,950/23,726, test/built-ins 18,489/23,821,
+annexB 768/1,086.

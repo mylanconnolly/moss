@@ -71,6 +71,9 @@ pub const Range = struct { lo: u21, hi: u21 };
 pub const Class = struct {
     ranges: []Range,
     negate: bool,
+    /// The case rule in force where the class was written: a
+    /// `(?i:...)` modifier scopes it, so the program's flag cannot say.
+    ignore_case: bool = false,
 };
 
 // ----------------------------------------------------------------- AST
@@ -90,9 +93,27 @@ const Node = union(enum) {
     word_boundary: bool, // true: \b, false: \B
     look: struct { ahead: bool, negate: bool, body: *Node, caps_from: u32, caps_to: u32 },
     repeat: struct { min: u32, max: ?u32, greedy: bool, body: *Node, caps_from: u32, caps_to: u32 },
+    /// `(?ims-ims:body)` (ES2025): the flags in force inside.
+    modifiers: struct { flags: Flags, body: *Node },
 };
 
-pub const GroupName = struct { name: []const u16, index: u32 };
+/// A named group; `path` is where it sits in the pattern's alternations
+/// (each enclosing disjunction and the alternative taken), so two groups
+/// of one name are allowed when some disjunction keeps them apart —
+/// duplicate named groups, ES2025.
+pub const GroupName = struct { name: []const u16, index: u32, path: []const AltStep = &.{} };
+pub const AltStep = struct { disjunction: u32, alternative: u32 };
+
+/// Two groups may share a name when they can never both participate:
+/// at some disjunction they lie in different alternatives.
+fn pathsDistinct(a: []const AltStep, b: []const AltStep) bool {
+    const n = @min(a.len, b.len);
+    for (a[0..n], b[0..n]) |x, y| {
+        if (x.disjunction != y.disjunction) return false;
+        if (x.alternative != y.alternative) return true;
+    }
+    return false;
+}
 
 // -------------------------------------------------------------- parser
 
@@ -111,6 +132,9 @@ const Parser = struct {
     max_backref: u32 = 0,
     /// The group count from the pre-scan (Annex B decides `\N` by it).
     total_groups: u32 = 0,
+    /// The alternation path of the term being parsed (`GroupName.path`).
+    alt_path: std.ArrayList(AltStep) = .empty,
+    next_disjunction: u32 = 0,
 
     fn fail(p: *Parser, msg: []const u8) Error {
         if (p.err.len == 0) p.err = msg;
@@ -153,8 +177,15 @@ const Parser = struct {
 
     fn parseDisjunction(p: *Parser) Error!*Node {
         var alts: std.ArrayList(*Node) = .empty;
+        const id = p.next_disjunction;
+        p.next_disjunction += 1;
+        try p.alt_path.append(p.a, .{ .disjunction = id, .alternative = 0 });
+        defer _ = p.alt_path.pop();
         try alts.append(p.a, try p.parseAlternative());
-        while (p.eat('|')) try alts.append(p.a, try p.parseAlternative());
+        while (p.eat('|')) {
+            p.alt_path.items[p.alt_path.items.len - 1].alternative += 1;
+            try alts.append(p.a, try p.parseAlternative());
+        }
         if (alts.items.len == 1) return alts.items[0];
         return p.node(.{ .alt = alts.items });
     }
@@ -225,14 +256,24 @@ const Parser = struct {
                             } else {
                                 p.pos += 1;
                                 const name = try p.parseGroupName();
-                                for (p.names.items) |g| if (std.mem.eql(u16, g.name, name)) return p.fail("duplicate capture group name");
+                                const path = try p.a.dupe(AltStep, p.alt_path.items);
+                                for (p.names.items) |g| if (std.mem.eql(u16, g.name, name) and !pathsDistinct(g.path, path)) return p.fail("duplicate capture group name");
                                 const index = p.ncaps;
                                 p.ncaps += 1;
-                                try p.names.append(p.a, .{ .name = name, .index = index });
+                                try p.names.append(p.a, .{ .name = name, .index = index, .path = path });
                                 const body = try p.parseDisjunction();
                                 if (!p.eat(')')) return p.fail("unterminated group");
                                 atom = try p.node(.{ .group = .{ .index = index, .body = body } });
                             }
+                        },
+                        'i', 'm', 's', '-' => {
+                            const inner = try p.parseModifiers();
+                            const saved = p.flags;
+                            p.flags = inner;
+                            const body = try p.parseDisjunction();
+                            p.flags = saved;
+                            if (!p.eat(')')) return p.fail("unterminated group");
+                            atom = try p.node(.{ .modifiers = .{ .flags = inner, .body = body } });
                         },
                         else => return p.fail("invalid group"),
                     }
@@ -334,6 +375,49 @@ const Parser = struct {
         return p.node(.{ .repeat = .{ .min = min, .max = max, .greedy = greedy, .body = atom, .caps_from = caps_from, .caps_to = p.ncaps } });
     }
 
+    /// `(?ims-ims:` (§22.2.1 RegularExpressionModifiers): the flags in
+    /// force inside the group. Each of i, m, s at most once, never both
+    /// added and removed, and the two sets not both empty (`(?:` is the
+    /// plain group).
+    fn parseModifiers(p: *Parser) Error!Flags {
+        var add: u8 = 0;
+        var remove: u8 = 0;
+        add = try p.parseModifierSet(0);
+        if (p.eat('-')) {
+            remove = try p.parseModifierSet(add);
+            if (add == 0 and remove == 0) return p.fail("empty modifiers");
+        }
+        if (!p.eat(':')) return p.fail("invalid group");
+        var f = p.flags;
+        if (add & 1 != 0) f.ignore_case = true;
+        if (add & 2 != 0) f.multiline = true;
+        if (add & 4 != 0) f.dot_all = true;
+        if (remove & 1 != 0) f.ignore_case = false;
+        if (remove & 2 != 0) f.multiline = false;
+        if (remove & 4 != 0) f.dot_all = false;
+        return f;
+    }
+
+    /// One modifier set as bits (i=1, m=2, s=4); `other` is the set it
+    /// may not share a flag with.
+    fn parseModifierSet(p: *Parser, other: u8) Error!u8 {
+        var set: u8 = 0;
+        while (p.peek()) |c| {
+            const bit: u8 = switch (c) {
+                'i' => 1,
+                'm' => 2,
+                's' => 4,
+                else => 0,
+            };
+            if (bit == 0) break;
+            if (set & bit != 0) return p.fail("repeated modifier");
+            if (other & bit != 0) return p.fail("modifier both added and removed");
+            set |= bit;
+            p.pos += 1;
+        }
+        return set;
+    }
+
     fn parseGroupName(p: *Parser) Error![]const u16 {
         // After `<`: RegExpIdentifierName `>`.
         var name: std.ArrayList(u16) = .empty;
@@ -428,9 +512,24 @@ const Parser = struct {
                 return p.node(.{ .class = try p.classEscape(c) });
             },
             'p', 'P' => {
+                if (p.flags.unicode_sets) {
+                    p.pos += 1;
+                    return p.classSetNode(try p.parsePropertyEscapeSet(c == 'P'));
+                }
                 if (p.unicode) {
                     p.pos += 1;
-                    return p.node(.{ .class = try p.parsePropertyEscape(c == 'P') });
+                    var cls = try p.parsePropertyEscape(c == 'P');
+                    // Under `i` the matcher checks a character and its
+                    // canonical form against the set, so the set must hold
+                    // every case variant. `\P` is the complement of the
+                    // plain set in `u` mode (so `A` matches `\P{Lu}`
+                    // through `a`) and of the folded set in `v` mode
+                    // (MaybeSimpleCaseFolding, §22.2.2.9.1).
+                    if (cls.negate) {
+                        const base = if (p.flags.ignore_case and p.flags.unicode_sets) try p.foldRanges(cls.ranges) else cls.ranges;
+                        cls = .{ .ranges = try invertRanges(p.a, base), .negate = false };
+                    } else if (p.flags.ignore_case) cls.ranges = try p.foldRanges(cls.ranges);
+                    return p.node(.{ .class = cls });
                 }
                 p.pos += 1;
                 return p.node(.{ .char = c });
@@ -588,14 +687,18 @@ const Parser = struct {
             try (if (in_value) &value else &name).append(p.a, @intCast(c));
         }
         // A lone value name may only be a binary property or a general
-        // category; `Script=` needs its key.
+        // category; `Script=` needs its key. A property of strings needs
+        // the `v` flag.
+        if (!in_value and unicode.stringProperty(name.items) != null) return p.fail("a property of strings needs the v flag");
         const ranges = (try unicodeProperty(p.a, name.items, if (in_value) value.items else null)) orelse return p.fail("invalid property name");
         return .{ .ranges = ranges, .negate = negate };
     }
 
-    /// `[...]` (§22.2.2.9), with `v`-mode nested classes and set operations.
+    /// `[...]` (§22.2.2.9); the `v` flag's class sets are their own
+    /// grammar (`parseClassV`).
     fn parseClass(p: *Parser) Error!*Node {
         p.pos += 1; // [
+        if (p.flags.unicode_sets) return p.parseClassV();
         const negate = p.eat('^');
         var set = try p.parseClassContents();
         if (!p.eat(']')) return p.fail("unterminated character class");
@@ -685,6 +788,279 @@ const Parser = struct {
             first_operand = false;
         }
         return mergeRanges(p.a, out.items);
+    }
+
+    // ------------------------------------------------- v-mode classes
+
+    /// A `v`-mode class set: code points as ranges, and the strings of
+    /// other lengths (`\q{}` literals, properties of strings).
+    const ClassSet = struct { ranges: []Range, strings: []const []const u21 };
+
+    /// `[...]` under the `v` flag (§22.2.2.9.1 ClassSetExpression): a
+    /// union, an intersection (`&&`) or a subtraction (`--`) of operands —
+    /// never mixed — where an operand may be a nested class, a `\q{}`
+    /// string disjunction or a property of strings. A negated class may
+    /// hold no strings.
+    fn parseClassV(p: *Parser) Error!*Node {
+        const negate = p.eat('^');
+        const set = try p.parseClassSetContents();
+        if (!p.eat(']')) return p.fail("unterminated character class");
+        if (negate) {
+            if (set.strings.len > 0) return p.fail("negated character class may contain strings");
+            const base = if (p.flags.ignore_case) try p.foldRanges(set.ranges) else set.ranges;
+            return p.node(.{ .class = .{ .ranges = try invertRanges(p.a, base), .negate = false } });
+        }
+        return p.classSetNode(set);
+    }
+
+    /// The node for a class set: a class of its code points, or — with
+    /// strings — the alternation the specification prescribes: longest
+    /// strings first, then the code points, the empty string last.
+    fn classSetNode(p: *Parser, set: ClassSet) Error!*Node {
+        const ranges = if (p.flags.ignore_case) try p.foldRanges(set.ranges) else set.ranges;
+        if (set.strings.len == 0) return p.node(.{ .class = .{ .ranges = ranges, .negate = false } });
+        const sorted = try p.a.dupe([]const u21, set.strings);
+        std.mem.sort([]const u21, sorted, {}, struct {
+            fn longer(_: void, x: []const u21, y: []const u21) bool {
+                return x.len > y.len;
+            }
+        }.longer);
+        var alts: std.ArrayList(*Node) = .empty;
+        var has_empty = false;
+        for (sorted) |s| {
+            if (s.len == 0) {
+                has_empty = true;
+                continue;
+            }
+            var items: std.ArrayList(*Node) = .empty;
+            for (s) |ch| try items.append(p.a, try p.node(.{ .char = ch }));
+            try alts.append(p.a, try p.node(.{ .seq = items.items }));
+        }
+        if (ranges.len > 0) try alts.append(p.a, try p.node(.{ .class = .{ .ranges = ranges, .negate = false } }));
+        if (has_empty) try alts.append(p.a, try p.node(.empty));
+        if (alts.items.len == 1) return alts.items[0];
+        return p.node(.{ .alt = alts.items });
+    }
+
+    const SetOp = enum { none, intersect, subtract };
+
+    fn parseClassSetContents(p: *Parser) Error!ClassSet {
+        var acc: ClassSet = .{ .ranges = &.{}, .strings = &.{} };
+        var op: SetOp = .none;
+        var operands: usize = 0;
+        var after_op = false;
+        var last_range = false;
+        while (true) {
+            const c = p.peek() orelse return p.fail("unterminated character class");
+            if (c == ']') break;
+            const is_and = c == '&' and p.peekAt(1) == '&';
+            const is_minus = c == '-' and p.peekAt(1) == '-';
+            if (is_and or is_minus) {
+                const this_op: SetOp = if (is_and) .intersect else .subtract;
+                if (operands == 0 or after_op) return p.fail("set operation without an operand");
+                if (op == .none and operands > 1) return p.fail("set operation after a class union");
+                if (last_range) return p.fail("a range cannot be a set operand");
+                if (op != .none and op != this_op) return p.fail("mixed set operations in a character class");
+                op = this_op;
+                after_op = true;
+                p.pos += 2;
+                continue;
+            }
+            var is_range = false;
+            const operand = try p.parseClassSetOperand(&is_range);
+            if (op != .none) {
+                if (!after_op) return p.fail("set operation after a class union");
+                if (is_range) return p.fail("a range cannot be a set operand");
+            }
+            acc = switch (op) {
+                .none => try p.unionSets(acc, operand),
+                .intersect => try p.intersectSets(acc, operand),
+                .subtract => try p.subtractSets(acc, operand),
+            };
+            operands += 1;
+            after_op = false;
+            last_range = is_range;
+        }
+        if (after_op) return p.fail("set operation without an operand");
+        return acc;
+    }
+
+    /// One ClassSetOperand (or a ClassSetRange, flagged): a nested
+    /// class, a class escape, a property escape, a string disjunction,
+    /// or a character.
+    fn parseClassSetOperand(p: *Parser, is_range: *bool) Error!ClassSet {
+        const c = p.peek().?;
+        if (c == '[') {
+            p.pos += 1;
+            const negate = p.eat('^');
+            var inner = try p.parseClassSetContents();
+            if (!p.eat(']')) return p.fail("unterminated character class");
+            if (negate) {
+                if (inner.strings.len > 0) return p.fail("negated character class may contain strings");
+                const base = if (p.flags.ignore_case) try p.foldRanges(inner.ranges) else inner.ranges;
+                inner = .{ .ranges = try invertRanges(p.a, base), .strings = &.{} };
+            }
+            return inner;
+        }
+        if (c == '\\') {
+            switch (p.peekAt(1) orelse return p.fail("\\ at end of pattern")) {
+                'q' => {
+                    p.pos += 2;
+                    return p.parseClassStringDisjunction();
+                },
+                'p', 'P' => {
+                    const negate = p.peekAt(1) == 'P';
+                    p.pos += 2;
+                    return p.parsePropertyEscapeSet(negate);
+                },
+                'd', 'D', 's', 'S', 'w', 'W' => {
+                    const e: u16 = @intCast(p.peekAt(1).?);
+                    p.pos += 2;
+                    const cl = try p.classEscape(e);
+                    return .{ .ranges = if (cl.negate) try invertRanges(p.a, cl.ranges) else cl.ranges, .strings = &.{} };
+                },
+                else => {},
+            }
+        }
+        const lo = try p.parseClassSetCharacter();
+        var hi = lo;
+        if (p.peek() == '-' and p.peekAt(1) != '-') {
+            p.pos += 1;
+            hi = try p.parseClassSetCharacter();
+            if (hi < lo) return p.fail("range out of order in character class");
+            is_range.* = true;
+        }
+        const one = try p.a.alloc(Range, 1);
+        one[0] = .{ .lo = lo, .hi = hi };
+        return .{ .ranges = one, .strings = &.{} };
+    }
+
+    /// `\q{a|bc|}`: each alternative a string; one of length one is a
+    /// code point of the set.
+    fn parseClassStringDisjunction(p: *Parser) Error!ClassSet {
+        if (!p.eat('{')) return p.fail("expected '{' after \\q");
+        var ranges: std.ArrayList(Range) = .empty;
+        var strs: std.ArrayList([]const u21) = .empty;
+        var cur: std.ArrayList(u21) = .empty;
+        while (true) {
+            const c = p.peek() orelse return p.fail("unterminated \\q{}");
+            if (c == '|' or c == '}') {
+                if (cur.items.len == 1) {
+                    try ranges.append(p.a, .{ .lo = cur.items[0], .hi = cur.items[0] });
+                } else try strs.append(p.a, try p.a.dupe(u21, cur.items));
+                cur = .empty;
+                p.pos += 1;
+                if (c == '}') break;
+                continue;
+            }
+            try cur.append(p.a, try p.parseClassSetCharacter());
+        }
+        return .{ .ranges = try mergeRanges(p.a, ranges.items), .strings = try dedupeStrings(p.a, strs.items) };
+    }
+
+    /// `\p{...}` in `v` mode: a property of strings (never negated) or a
+    /// code point property.
+    fn parsePropertyEscapeSet(p: *Parser, negate: bool) Error!ClassSet {
+        if (!p.eat('{')) return p.fail("invalid property name");
+        var name: std.ArrayList(u8) = .empty;
+        var value: std.ArrayList(u8) = .empty;
+        var in_value = false;
+        while (true) {
+            const c = p.peek() orelse return p.fail("invalid property name");
+            p.pos += 1;
+            if (c == '}') break;
+            if (c == '=') {
+                if (in_value) return p.fail("invalid property name");
+                in_value = true;
+                continue;
+            }
+            if (c > 127) return p.fail("invalid property name");
+            try (if (in_value) &value else &name).append(p.a, @intCast(c));
+        }
+        if (!in_value) if (unicode.stringProperty(name.items)) |sp| {
+            if (negate) return p.fail("a property of strings cannot be negated");
+            const ranges = try p.a.alloc(Range, sp.ranges.len);
+            for (sp.ranges, 0..) |r, i| ranges[i] = .{ .lo = @intCast(r.lo), .hi = @intCast(r.hi) };
+            var strs: std.ArrayList([]const u21) = .empty;
+            var it = sp.strings();
+            while (it.next()) |s| {
+                const copy = try p.a.alloc(u21, s.len);
+                for (s, 0..) |cp, i| copy[i] = @intCast(cp);
+                try strs.append(p.a, copy);
+            }
+            return .{ .ranges = ranges, .strings = strs.items };
+        };
+        const ranges = (try unicodeProperty(p.a, name.items, if (in_value) value.items else null)) orelse return p.fail("invalid property name");
+        if (negate) {
+            const base = if (p.flags.ignore_case) try p.foldRanges(ranges) else ranges;
+            return .{ .ranges = try invertRanges(p.a, base), .strings = &.{} };
+        }
+        return .{ .ranges = ranges, .strings = &.{} };
+    }
+
+    /// A ClassSetCharacter: no unescaped syntax character, no doubled
+    /// punctuator (reserved for operators); the reserved punctuators
+    /// may be escaped.
+    fn parseClassSetCharacter(p: *Parser) Error!u21 {
+        const c = p.peek() orelse return p.fail("unterminated character class");
+        if (c == '\\') {
+            const e = p.peekAt(1) orelse return p.fail("\\ at end of pattern");
+            if (isClassSetReservedPunctuator(e) or isClassSetSyntaxCharacter(e)) {
+                p.pos += 2;
+                return @intCast(e);
+            }
+            const atom = try p.parseClassAtom();
+            return switch (atom) {
+                .char => |ch| ch,
+                .class => p.fail("a class escape is not a character"),
+            };
+        }
+        if (isClassSetSyntaxCharacter(c)) return p.fail("a syntax character must be escaped in a v-mode class");
+        if (isClassSetReservedDouble(c) and p.peekAt(1) == c) return p.fail("a doubled punctuator is reserved in a v-mode class");
+        return p.nextCp().?;
+    }
+
+    fn isClassSetSyntaxCharacter(c: u16) bool {
+        return switch (c) {
+            '(', ')', '[', ']', '{', '}', '/', '-', '\\', '|' => true,
+            else => false,
+        };
+    }
+
+    fn isClassSetReservedDouble(c: u16) bool {
+        return switch (c) {
+            '&', '!', '#', '$', '%', '*', '+', ',', '.', ':', ';', '<', '=', '>', '?', '@', '^', '`', '~' => true,
+            else => false,
+        };
+    }
+
+    fn isClassSetReservedPunctuator(c: u16) bool {
+        return switch (c) {
+            '&', '-', '!', '#', '%', ',', ':', ';', '<', '=', '>', '@', '`', '~' => true,
+            else => false,
+        };
+    }
+
+    fn unionSets(p: *Parser, a: ClassSet, b: ClassSet) Error!ClassSet {
+        var ranges: std.ArrayList(Range) = .empty;
+        try ranges.appendSlice(p.a, a.ranges);
+        try ranges.appendSlice(p.a, b.ranges);
+        var strs: std.ArrayList([]const u21) = .empty;
+        try strs.appendSlice(p.a, a.strings);
+        try strs.appendSlice(p.a, b.strings);
+        return .{ .ranges = try mergeRanges(p.a, ranges.items), .strings = try dedupeStrings(p.a, strs.items) };
+    }
+
+    fn intersectSets(p: *Parser, a: ClassSet, b: ClassSet) Error!ClassSet {
+        var strs: std.ArrayList([]const u21) = .empty;
+        for (a.strings) |s| if (hasString(b.strings, s)) try strs.append(p.a, s);
+        return .{ .ranges = try intersectRanges(p.a, try mergeRanges(p.a, a.ranges), try mergeRanges(p.a, b.ranges)), .strings = strs.items };
+    }
+
+    fn subtractSets(p: *Parser, a: ClassSet, b: ClassSet) Error!ClassSet {
+        var strs: std.ArrayList([]const u21) = .empty;
+        for (a.strings) |s| if (!hasString(b.strings, s)) try strs.append(p.a, s);
+        return .{ .ranges = try intersectRanges(p.a, try mergeRanges(p.a, a.ranges), try invertRanges(p.a, try mergeRanges(p.a, b.ranges))), .strings = strs.items };
     }
 
     const ClassAtom = union(enum) { char: u21, class: Class };
@@ -832,6 +1208,17 @@ fn unicodeProperty(a: std.mem.Allocator, name: []const u8, value: ?[]const u8) E
     return out;
 }
 
+fn hasString(list: []const []const u21, s: []const u21) bool {
+    for (list) |t| if (std.mem.eql(u21, t, s)) return true;
+    return false;
+}
+
+fn dedupeStrings(a: std.mem.Allocator, in: []const []const u21) Error![]const []const u21 {
+    var out: std.ArrayList([]const u21) = .empty;
+    for (in) |s| if (!hasString(out.items, s)) try out.append(a, s);
+    return out.items;
+}
+
 fn lessRange(_: void, a: Range, b: Range) bool {
     return a.lo < b.lo;
 }
@@ -951,7 +1338,7 @@ fn inverseCanonical(c: u21, unicode_mode: bool) [4]u21 {
 
 // ------------------------------------------------------------ program
 
-pub const Op = enum(u8) { char, char_i, any, any_nl, class, split, jmp, save, clear, assert_start, assert_end, word_b, nword_b, backref, backref_i, look, rep_init, rep_top, rep_enter, rep_end, match, fail, bchar, bchar_i, bany, bany_nl, bclass, bbackref, bbackref_i, star };
+pub const Op = enum(u8) { char, char_i, any, any_nl, class, split, jmp, save, clear, assert_start, assert_end, word_b, nword_b, backref, backref_i, look, rep_init, rep_top, rep_enter, rep_end, match, fail, bchar, bchar_i, bany, bany_nl, bclass, bbackref, bbackref_i, star, nbackref, nbackref_i, bnbackref, bnbackref_i };
 
 pub const Insn = struct {
     op: Op,
@@ -966,6 +1353,8 @@ pub const Program = struct {
     classes: []Class,
     ncaps: u32,
     names: []GroupName,
+    /// The groups behind each `nbackref` (a name several groups share).
+    name_sets: [][]const u32 = &.{},
     nloops: u32,
     flags: Flags,
     arena: std.heap.ArenaAllocator,
@@ -979,6 +1368,7 @@ const Compiler = struct {
     a: std.mem.Allocator,
     insns: std.ArrayList(Insn) = .empty,
     classes: std.ArrayList(Class) = .empty,
+    name_sets: std.ArrayList([]const u32) = .empty,
     nloops: u32 = 0,
     flags: Flags,
     unicode: bool,
@@ -1005,7 +1395,9 @@ const Compiler = struct {
             .any => _ = try c.emit(.{ .op = if (c.flags.dot_all) (if (backward) .bany_nl else .any_nl) else (if (backward) .bany else .any) }),
             .class => |cl| {
                 const idx: u32 = @intCast(c.classes.items.len);
-                try c.classes.append(c.a, cl);
+                var scoped = cl;
+                scoped.ignore_case = c.flags.ignore_case;
+                try c.classes.append(c.a, scoped);
                 _ = try c.emit(.{ .op = if (backward) .bclass else .class, .a = idx });
             },
             .seq => |items| {
@@ -1042,14 +1434,33 @@ const Compiler = struct {
             .backref => |idx| _ = try c.emit(.{ .op = if (c.flags.ignore_case) (if (backward) .bbackref_i else .backref_i) else (if (backward) .bbackref else .backref), .a = idx }),
             .named_backref => |name| {
                 var idx: u32 = 0;
+                var count: u32 = 0;
                 for (c.names) |g| if (std.mem.eql(u16, g.name, name)) {
                     idx = g.index;
+                    count += 1;
                 };
+                if (count > 1) {
+                    // Several groups of the name: the one that
+                    // participated is found at match time (`name_sets`).
+                    var set: std.ArrayList(u32) = .empty;
+                    for (c.names) |g| if (std.mem.eql(u16, g.name, name)) try set.append(c.a, g.index);
+                    const si: u32 = @intCast(c.name_sets.items.len);
+                    try c.name_sets.append(c.a, set.items);
+                    _ = try c.emit(.{ .op = if (c.flags.ignore_case) (if (backward) .bnbackref_i else .nbackref_i) else (if (backward) .bnbackref else .nbackref), .a = si });
+                    return;
+                }
                 _ = try c.emit(.{ .op = if (c.flags.ignore_case) (if (backward) .bbackref_i else .backref_i) else (if (backward) .bbackref else .backref), .a = idx });
             },
-            .assert_start => _ = try c.emit(.{ .op = .assert_start }),
-            .assert_end => _ = try c.emit(.{ .op = .assert_end }),
-            .word_boundary => |b| _ = try c.emit(.{ .op = if (b) .word_b else .nword_b }),
+            // `a`: the flag in force where the assertion was written.
+            .assert_start => _ = try c.emit(.{ .op = .assert_start, .a = @intFromBool(c.flags.multiline) }),
+            .assert_end => _ = try c.emit(.{ .op = .assert_end, .a = @intFromBool(c.flags.multiline) }),
+            .word_boundary => |b| _ = try c.emit(.{ .op = if (b) .word_b else .nword_b, .a = @intFromBool(c.flags.ignore_case) }),
+            .modifiers => |md| {
+                const saved = c.flags;
+                c.flags = md.flags;
+                defer c.flags = saved;
+                try c.compile(md.body, backward);
+            },
             .look => |l| {
                 // look negate ahead body_start body_end; the body ends in match.
                 const at = try c.emit(.{ .op = .look, .a = @intFromBool(l.negate), .b = @intFromBool(l.ahead) });
@@ -1084,7 +1495,9 @@ const Compiler = struct {
                             },
                             .class => |cl| {
                                 argv = @intCast(c.classes.items.len);
-                                try c.classes.append(c.a, cl);
+                                var scoped = cl;
+                                scoped.ignore_case = c.flags.ignore_case;
+                                try c.classes.append(c.a, scoped);
                             },
                             else => unreachable,
                         }
@@ -1167,7 +1580,7 @@ pub fn compile(gpa: std.mem.Allocator, source: []const u16, flags: Flags, err_ou
     _ = try c.emit(.{ .op = .save, .a = 1 });
     _ = try c.emit(.{ .op = .match });
     const prog = try a.create(Program);
-    prog.* = .{ .insns = c.insns.items, .classes = c.classes.items, .ncaps = p.ncaps, .names = p.names.items, .nloops = c.nloops, .flags = flags, .arena = arena };
+    prog.* = .{ .insns = c.insns.items, .classes = c.classes.items, .ncaps = p.ncaps, .names = p.names.items, .name_sets = c.name_sets.items, .nloops = c.nloops, .flags = flags, .arena = arena };
     return prog;
 }
 
@@ -1274,12 +1687,12 @@ pub const Matcher = struct {
         return .{ .c = c, .w = 1 };
     }
 
-    fn isWordAt(m: *Matcher, pos: u32) bool {
+    fn isWordAt(m: *Matcher, pos: u32, ignore_case: bool) bool {
         if (pos >= m.text.len) return false;
         const c = m.text[pos];
         if (c < 128) return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or (c >= '0' and c <= '9') or c == '_';
         // With `u` and `i`, the folds of word characters count too.
-        if (m.unicode and m.prog.flags.ignore_case) return c == 0x17f or c == 0x212a;
+        if (m.unicode and ignore_case) return c == 0x17f or c == 0x212a;
         return false;
     }
 
@@ -1290,7 +1703,7 @@ pub const Matcher = struct {
     fn classMatches(m: *Matcher, idx: u32, c: u21) bool {
         const cl = m.prog.classes[idx];
         var hit = inRanges(cl.ranges, c);
-        if (!hit and m.prog.flags.ignore_case) hit = inRanges(cl.ranges, canonicalize(c, m.unicode));
+        if (!hit and cl.ignore_case) hit = inRanges(cl.ranges, canonicalize(c, m.unicode));
         return hit != cl.negate;
     }
 
@@ -1412,26 +1825,46 @@ pub const Matcher = struct {
                     pc += 1;
                 },
                 .assert_start => {
-                    if (pos == 0 or (m.prog.flags.multiline and isLineTerminator(m.text[pos - 1]))) pc += 1 else ok = false;
+                    if (pos == 0 or (insn.a != 0 and isLineTerminator(m.text[pos - 1]))) pc += 1 else ok = false;
                 },
                 .assert_end => {
-                    if (pos == m.text.len or (m.prog.flags.multiline and isLineTerminator(m.text[pos]))) pc += 1 else ok = false;
+                    if (pos == m.text.len or (insn.a != 0 and isLineTerminator(m.text[pos]))) pc += 1 else ok = false;
                 },
                 .word_b, .nword_b => {
-                    const a = pos > 0 and m.isWordAt(pos - 1);
-                    const b = m.isWordAt(pos);
+                    const a = pos > 0 and m.isWordAt(pos - 1, insn.a != 0);
+                    const b = m.isWordAt(pos, insn.a != 0);
                     const at_boundary = a != b;
                     if (at_boundary == (insn.op == .word_b)) pc += 1 else ok = false;
                 },
-                .backref, .backref_i, .bbackref, .bbackref_i => {
-                    const s = m.caps[insn.a * 2];
-                    const e = m.caps[insn.a * 2 + 1];
+                .backref, .backref_i, .bbackref, .bbackref_i, .nbackref, .nbackref_i, .bnbackref, .bnbackref_i => {
+                    // A name several groups share: the one that
+                    // participated (at most one can have).
+                    var gi: u32 = insn.a;
+                    const named = switch (insn.op) {
+                        .nbackref, .nbackref_i, .bnbackref, .bnbackref_i => true,
+                        else => false,
+                    };
+                    if (named) {
+                        gi = m.prog.name_sets[insn.a][0];
+                        for (m.prog.name_sets[insn.a]) |g| if (m.caps[g * 2] != none and m.caps[g * 2 + 1] != none) {
+                            gi = g;
+                        };
+                    }
+                    const s = m.caps[gi * 2];
+                    const e = m.caps[gi * 2 + 1];
                     if (s == none or e == none) {
                         pc += 1; // an unset group matches empty
                     } else {
                         const len = e - s;
-                        const fold = insn.op == .backref_i or insn.op == .bbackref_i;
-                        if (insn.op == .backref or insn.op == .backref_i) {
+                        const fold = switch (insn.op) {
+                            .backref_i, .bbackref_i, .nbackref_i, .bnbackref_i => true,
+                            else => false,
+                        };
+                        const forward = switch (insn.op) {
+                            .backref, .backref_i, .nbackref, .nbackref_i => true,
+                            else => false,
+                        };
+                        if (forward) {
                             if (pos + len > m.text.len) {
                                 ok = false;
                             } else {
@@ -1634,6 +2067,35 @@ test "regexp: literals, classes, quantifiers, groups and backreferences" {
         .{ .p = "^\\w+$", .f = "", .t = "ab cd", .want = null },
         .{ .p = "^\\w+$", .f = "m", .t = "ab\ncd", .want = &.{ 0, 2 } },
         .{ .p = "ABC", .f = "i", .t = "xabcx", .want = &.{ 1, 4 } },
+        // Modifiers scope i, m and s to a group.
+        .{ .p = "(?i:a)b", .f = "", .t = "Ab", .want = &.{ 0, 2 } },
+        .{ .p = "(?i:a)b", .f = "", .t = "AB", .want = null },
+        .{ .p = "(?-i:a)b", .f = "i", .t = "aB", .want = &.{ 0, 2 } },
+        .{ .p = "(?-i:a)b", .f = "i", .t = "AB", .want = null },
+        .{ .p = "(?i:[a-c])d", .f = "", .t = "Bd", .want = &.{ 0, 2 } },
+        .{ .p = "(?m:^b)", .f = "", .t = "a\nb", .want = &.{ 2, 3 } },
+        .{ .p = "(?-m:^b)", .f = "m", .t = "a\nb", .want = null },
+        .{ .p = "(?s:.)b", .f = "", .t = "\nb", .want = &.{ 0, 2 } },
+        .{ .p = "(?i:\\w)", .f = "u", .t = "\u{17f}", .want = &.{ 0, 1 } },
+        // Property escapes fold under `i`; `\P` complements the plain set in `u` mode and the folded one in `v` mode.
+        .{ .p = "\\p{Lu}", .f = "iu", .t = "a", .want = &.{ 0, 1 } },
+        .{ .p = "\\P{Lu}", .f = "iu", .t = "A", .want = &.{ 0, 1 } },
+        .{ .p = "\\P{Lu}", .f = "iv", .t = "A", .want = null },
+        .{ .p = "(?i:\\p{Lu})", .f = "u", .t = "z", .want = &.{ 0, 1 } },
+        // Duplicate named groups (ES2025): one name per alternative; `\k` follows the one that matched.
+        .{ .p = "(?:(?<x>a)|(?<x>b))\\k<x>", .f = "", .t = "bb", .want = &.{ 0, 2, 0xFFFFFFFF, 0xFFFFFFFF, 0, 1 } },
+        .{ .p = "(?:(?<x>a)|(?<x>b))\\k<x>", .f = "", .t = "ab", .want = null },
+        // v-mode class sets: string literals, properties of strings, set operations.
+        .{ .p = "[\\q{abc|d}]", .f = "v", .t = "xabc", .want = &.{ 1, 4 } },
+        .{ .p = "^[\\q{abc|d}]$", .f = "v", .t = "d", .want = &.{ 0, 1 } },
+        .{ .p = "^[\\q{abc|d}]$", .f = "v", .t = "ab", .want = null },
+        .{ .p = "^[[a-z]--[aeiou]]+$", .f = "v", .t = "xyz", .want = &.{ 0, 3 } },
+        .{ .p = "^[[a-z]--[aeiou]]+$", .f = "v", .t = "xaz", .want = null },
+        .{ .p = "^[[a-z]&&[^aeiou]]+$", .f = "v", .t = "xyz", .want = &.{ 0, 3 } },
+        .{ .p = "^[\\q{ab|cd}--\\q{cd}]$", .f = "v", .t = "cd", .want = null },
+        .{ .p = "^\\p{Emoji_Keycap_Sequence}$", .f = "v", .t = "#\u{FE0F}\u{20E3}", .want = &.{ 0, 3 } },
+        .{ .p = "^\\p{RGI_Emoji}$", .f = "v", .t = "\u{231A}", .want = &.{ 0, 1 } },
+        .{ .p = "^[\\p{RGI_Emoji}--\\q{\u{231A}}]$", .f = "v", .t = "\u{231A}", .want = null },
         .{ .p = "[a-c]+", .f = "", .t = "xxabcabcd", .want = &.{ 2, 8 } },
         .{ .p = "[^a-c]+", .f = "", .t = "abcxyz", .want = &.{ 3, 6 } },
         .{ .p = "a(?=b)", .f = "", .t = "acab", .want = &.{ 2, 3 } },
@@ -1674,11 +2136,24 @@ test "regexp: literals, classes, quantifiers, groups and backreferences" {
 test "regexp: syntax errors and the step budget" {
     const gpa = std.testing.allocator;
     var err: []const u8 = "";
-    for ([_][]const u8{ "(", "a**", "[b-a]", "\\", "(?<n>a)(?<n>b)", "\\k<x>(?<n>a)" }) |bad| {
+    for ([_][]const u8{ "(", "a**", "[b-a]", "\\", "(?<n>a)(?<n>b)", "\\k<x>(?<n>a)", "(?-:a)", "(?ii:a)", "(?i-i:a)", "(?i-mm:a)", "(?x:a)", "(?i", "(?i:a", "(?<n>a)(?:(?<n>b)|c)", "(?:(?<n>a)|b)(?<n>c)" }) |bad| {
         var pat: std.ArrayList(u16) = .empty;
         defer pat.deinit(gpa);
         for (bad) |c| try pat.append(gpa, c);
         try std.testing.expectError(error.SyntaxError, compile(gpa, pat.items, .{}, &err));
+    }
+    for ([_][]const u8{ "[(]", "[}]", "[!!]", "[++]", "[_^^]", "[a&&b--c]", "[ab&&c]", "[a-z&&b]", "[^\\q{ab}]", "[\\P{RGI_Emoji}]", "\\P{RGI_Emoji}", "[a--]", "[&&a]" }) |bad| {
+        var pat: std.ArrayList(u16) = .empty;
+        defer pat.deinit(gpa);
+        for (bad) |c| try pat.append(gpa, c);
+        try std.testing.expectError(error.SyntaxError, compile(gpa, pat.items, .{ .unicode_sets = true }, &err));
+    }
+    // A property of strings needs the v flag.
+    {
+        var pat: std.ArrayList(u16) = .empty;
+        defer pat.deinit(gpa);
+        for ("\\p{RGI_Emoji}") |c| try pat.append(gpa, c);
+        try std.testing.expectError(error.SyntaxError, compile(gpa, pat.items, .{ .unicode = true }, &err));
     }
     // Catastrophic backtracking meets the budget.
     var pat: std.ArrayList(u16) = .empty;

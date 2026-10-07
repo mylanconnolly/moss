@@ -241,8 +241,15 @@ pub const GlobalSite = struct { name: *String, ic: InlineCache = .{} };
 pub const ScopeInfo = struct {
     names: []*String,
     consts: []bool,
-    /// A function scope (`var` declarations in an eval land here).
+    /// A variable environment: a function's, a parameter-expression
+    /// scope's, a module's (`var` declarations in an eval land here; an
+    /// eval's own scope is not one — EvalDeclarationInstantiation puts
+    /// sloppy eval's vars in the caller's).
     is_function: bool = false,
+    /// The parameter-expression scope of a function (its parameters and
+    /// `arguments` are bound here; a var an eval in a default declares
+    /// over one of them is the SyntaxError of §19.2.1.3 step 3.d).
+    is_params: bool = false,
     /// A `with` object environment (the slot holds the object).
     is_with: bool = false,
     /// Lexical (TDZ) slots start as the hole; others as undefined.
@@ -529,6 +536,12 @@ pub const CodeData = struct {
     /// each parameter index (`unmapped` for a duplicate name's earlier
     /// index); empty when the arguments object is unmapped.
     param_slots: []u32 = &.{},
+    /// Sloppy eval code: the names its `var` and function declarations
+    /// put in the caller's variable environment, checked against the
+    /// environments between (EvalDeclarationInstantiation) before the
+    /// code runs.
+    eval_vars: []*String = &.{},
+    eval_funcs: []*String = &.{},
 
     pub const unmapped: u32 = 0xFFFF_FFFF;
 
@@ -546,6 +559,8 @@ pub const CodeData = struct {
             a.destroy(s);
         }
         a.free(d.scopes);
+        a.free(d.eval_vars);
+        a.free(d.eval_funcs);
         for (d.templates) |t| {
             a.free(t.cooked);
             a.free(t.raw);

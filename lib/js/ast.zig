@@ -190,6 +190,8 @@ pub const Import = struct {
     default: ?[]const u8 = null,
     namespace: ?[]const u8 = null,
     named: []Named,
+    /// `with { type: "json" }`: the `type` attribute (the one supported).
+    type_attr: ?[]const u8 = null,
     pub const Named = struct { imported: []const u8, local: []const u8 };
 };
 
@@ -199,8 +201,8 @@ pub const Export = union(enum) {
     /// `export default expr` (an expression, or a function/class node).
     default: *Node,
     /// `export { a as b, c } [from "m"]`
-    named: struct { specifiers: []Named, source: ?[]const u8 },
+    named: struct { specifiers: []Named, source: ?[]const u8, type_attr: ?[]const u8 = null },
     /// `export * [as ns] from "m"`
-    all: struct { as: ?[]const u8, source: []const u8 },
+    all: struct { as: ?[]const u8, source: []const u8, type_attr: ?[]const u8 = null },
     pub const Named = struct { local: []const u8, exported: []const u8 };
 };

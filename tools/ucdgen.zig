@@ -13,7 +13,9 @@
 //! range table is count × (u32 lo, u32 hi); a pair table ("fold",
 //! "upper", "lower") is count × (u32 from, u32 to); a full-mapping
 //! table ("upper_full", "lower_full") is count × (u32 from, u32 n,
-//! 3 × u32 to).
+//! 3 × u32 to); a string table ("<property>/s": the sequences of a
+//! property of strings, beside "<property>/r" for its single code
+//! points) is count u32 words of (u32 n, n × u32 code point) records.
 const std = @import("std");
 
 var io: std.Io = undefined;
@@ -22,9 +24,10 @@ const Range = struct { lo: u32, hi: u32 };
 
 const Table = struct {
     name: []const u8,
-    kind: enum { ranges, pairs, full },
+    kind: enum { ranges, pairs, full, strings },
     ranges: std.ArrayList(Range) = .empty,
     full: std.ArrayList([5]u32) = .empty,
+    strings: std.ArrayList([]const u32) = .empty,
 };
 
 const Gen = struct {
@@ -60,6 +63,33 @@ const Gen = struct {
         }
         const v = std.fmt.parseInt(u32, f, 16) catch return null;
         return .{ .lo = v, .hi = v };
+    }
+
+    /// An emoji sequence file ("code points ; property ; ..."): a single
+    /// code point or range joins the property's "/r" table, a sequence
+    /// its "/s" table; RGI_Emoji unites them all (UTS #51).
+    fn eachSequence(g: *Gen, sub: []const u8) !void {
+        const text = try g.read(sub);
+        var lines = std.mem.splitScalar(u8, text, '\n');
+        while (lines.next()) |raw| {
+            const line = if (std.mem.indexOfScalar(u8, raw, '#')) |i| raw[0..i] else raw;
+            var it = std.mem.splitScalar(u8, line, ';');
+            const cps_field = std.mem.trim(u8, it.next() orelse continue, " \t\r");
+            const prop = std.mem.trim(u8, it.next() orelse continue, " \t\r");
+            if (cps_field.len == 0 or prop.len == 0) continue;
+            const targets = [_][]const u8{ prop, "RGI_Emoji" };
+            if (parseRange(cps_field)) |r| {
+                for (targets) |t| try g.add(try std.fmt.allocPrint(g.gpa, "{s}/r", .{t}), r.lo, r.hi);
+                continue;
+            }
+            var cps: std.ArrayList(u32) = .empty;
+            var words = std.mem.tokenizeAny(u8, cps_field, " \t");
+            while (words.next()) |w| try cps.append(g.gpa, try std.fmt.parseInt(u32, w, 16));
+            for (targets) |t| {
+                const tab = try g.table(try std.fmt.allocPrint(g.gpa, "{s}/s", .{t}), .strings);
+                try tab.strings.append(g.gpa, cps.items);
+            }
+        }
     }
 
     /// Lines of "range ; value [; ...] # comment" → callback(range, fields).
@@ -130,6 +160,10 @@ fn mergeInto(gpa: std.mem.Allocator, list: *std.ArrayList(Range)) !void {
     _ = gpa;
 }
 
+/// The properties of strings (§22.2.2.9.7, table 68): the emoji
+/// sequence sets of UTS #51, and their union.
+const string_props = [_][]const u8{ "Basic_Emoji", "Emoji_Keycap_Sequence", "RGI_Emoji_Modifier_Sequence", "RGI_Emoji_Flag_Sequence", "RGI_Emoji_Tag_Sequence", "RGI_Emoji_ZWJ_Sequence", "RGI_Emoji" };
+
 /// The binary properties ECMA-262 lets `\p{}` name (table 67), by their
 /// canonical names as the UCD files spell them.
 const binary_props = [_][]const u8{
@@ -178,12 +212,41 @@ pub fn main(init: std.process.Init) !u8 {
             if (lo <= r.hi) try g.add(scx_name, lo, r.hi);
         }
     }
+    // Script=Unknown (Zzzz): every code point no script claims — the
+    // complement of the scripts' union (Scripts.txt lists none of them);
+    // Script_Extensions=Unknown is the same set.
+    {
+        var all: std.ArrayList(Range) = .empty;
+        for (sc_tables.items) |t| try all.appendSlice(gpa, t.ranges.items);
+        try mergeInto(gpa, &all);
+        var lo: u32 = 0;
+        for (all.items) |r| {
+            if (r.lo > lo) {
+                try g.add("sc=Unknown", lo, r.lo - 1);
+                try g.add("scx=Unknown", lo, r.lo - 1);
+            }
+            lo = r.hi + 1;
+        }
+        if (lo <= 0x10FFFF) {
+            try g.add("sc=Unknown", lo, 0x10FFFF);
+            try g.add("scx=Unknown", lo, 0x10FFFF);
+        }
+    }
     // Binary properties.
     try g.eachLine("PropList.txt", &g, addProp);
     try g.eachLine("DerivedCoreProperties.txt", &g, addProp);
     try g.eachLine("emoji/emoji-data.txt", &g, addProp);
     try g.eachLine("extracted/DerivedBinaryProperties.txt", &g, addProp);
     try g.eachLine("DerivedNormalizationProps.txt", &g, addProp);
+    // Properties of strings (`\p{RGI_Emoji}` and the six it unites, v
+    // mode): both tables of each exist even when empty, so the engine
+    // can tell a property of strings from an unknown name.
+    for (string_props) |sp| {
+        _ = try g.table(try std.fmt.allocPrint(gpa, "{s}/r", .{sp}), .ranges);
+        _ = try g.table(try std.fmt.allocPrint(gpa, "{s}/s", .{sp}), .strings);
+    }
+    try g.eachSequence("emoji/emoji-sequences.txt");
+    try g.eachSequence("emoji/emoji-zwj-sequences.txt");
     // Case mappings (UnicodeData fields 12/13), folding, full mappings.
     {
         const upper = try g.table("upper", .pairs);
@@ -355,7 +418,7 @@ pub fn main(init: std.process.Init) !u8 {
     while (it.next()) |e| {
         const name = e.key_ptr.*;
         const t = e.value_ptr.*;
-        var keep = std.mem.startsWith(u8, name, "gc=") or std.mem.startsWith(u8, name, "sc=") or std.mem.startsWith(u8, name, "scx=") or t.kind != .ranges or std.mem.eql(u8, name, "Any") or std.mem.eql(u8, name, "ASCII") or std.mem.eql(u8, name, "Assigned");
+        var keep = std.mem.startsWith(u8, name, "gc=") or std.mem.startsWith(u8, name, "sc=") or std.mem.startsWith(u8, name, "scx=") or t.kind != .ranges or std.mem.eql(u8, name, "Any") or std.mem.eql(u8, name, "ASCII") or std.mem.eql(u8, name, "Assigned") or std.mem.endsWith(u8, name, "/r");
         if (!keep) {
             for (binary_props) |bp| if (std.mem.eql(u8, bp, t.name)) {
                 keep = true;
@@ -373,6 +436,7 @@ pub fn main(init: std.process.Init) !u8 {
                 return a[0] < b[0];
             }
         }.less),
+        .strings => {},
     };
     std.mem.sort([]const u8, names.items, {}, struct {
         fn less(_: void, a: []const u8, b: []const u8) bool {
@@ -396,13 +460,25 @@ pub fn main(init: std.process.Init) !u8 {
                     try blob.appendSlice(gpa, std.mem.asBytes(&std.mem.nativeToLittle(u32, r.hi)));
                 },
                 .full => for (t.full.items) |e| for (e) |v| try blob.appendSlice(gpa, std.mem.asBytes(&std.mem.nativeToLittle(u32, v))),
+                .strings => for (t.strings.items) |s| {
+                    try blob.appendSlice(gpa, std.mem.asBytes(&std.mem.nativeToLittle(u32, @intCast(s.len))));
+                    for (s) |cp| try blob.appendSlice(gpa, std.mem.asBytes(&std.mem.nativeToLittle(u32, cp)));
+                },
             }
         }
         const entry = blob.items[dir_start + i * 40 ..][0..40];
         @memset(entry, 0);
         if (name.len > 32) return error.NameTooLong;
         @memcpy(entry[0..name.len], name);
-        const count: u32 = @intCast(if (t.kind == .full) t.full.items.len else t.ranges.items.len);
+        const count: u32 = switch (t.kind) {
+            .full => @intCast(t.full.items.len),
+            .strings => blk: {
+                var words: u32 = 0;
+                for (t.strings.items) |s| words += 1 + @as(u32, @intCast(s.len));
+                break :blk words;
+            },
+            else => @intCast(t.ranges.items.len),
+        };
         std.mem.writeInt(u32, entry[32..36], offsets.get(t).?, .little);
         std.mem.writeInt(u32, entry[36..40], count, .little);
     }

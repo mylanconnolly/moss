@@ -60,6 +60,8 @@ pub const Intrinsics = struct {
     set_iterator_prototype: *Object,
     weak_map_prototype: *Object,
     weak_set_prototype: *Object,
+    weak_ref_prototype: *Object,
+    finalization_registry_prototype: *Object,
     date_prototype: *Object,
     array_buffer_prototype: *Object,
     array_buffer_ctor: *Object,
@@ -312,6 +314,8 @@ pub fn createIntrinsics(vm: *Vm) Error!void {
     i.set_iterator_prototype = try mk.proto(vm, i.iterator_prototype);
     i.weak_map_prototype = try mk.proto(vm, objp);
     i.weak_set_prototype = try mk.proto(vm, objp);
+    i.weak_ref_prototype = try mk.proto(vm, objp);
+    i.finalization_registry_prototype = try mk.proto(vm, objp);
     i.date_prototype = try mk.proto(vm, objp);
     // The global object.
     vm.global = try vm.objects.create(objp.asValue(), .global, 0);

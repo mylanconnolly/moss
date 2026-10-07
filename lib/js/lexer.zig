@@ -711,7 +711,15 @@ pub const Lexer = struct {
                     // its end without cooking.
                     if (l.pos < l.src.len and l.src[l.pos] != '`' and !(l.src[l.pos] == '$' and l.peekByte(1) == '{')) l.pos += 1;
                 }
-                if (raw_needs_copy) try raw_buf.appendSlice(l.a, l.src[esc_start..l.pos]);
+                // A line continuation's CR or CRLF is a LF in the raw text
+                // too (`String.raw` saw the CR, 2026-10-07).
+                if (l.src[esc_start + 1] == '\r') {
+                    if (!raw_needs_copy) {
+                        try raw_buf.appendSlice(l.a, l.src[raw_start..esc_start]);
+                        raw_needs_copy = true;
+                    }
+                    try raw_buf.appendSlice(l.a, "\\\n");
+                } else if (raw_needs_copy) try raw_buf.appendSlice(l.a, l.src[esc_start..l.pos]);
                 continue;
             }
             // A CR or CRLF in a template is a LF, cooked and raw both.

@@ -67,7 +67,7 @@ pub fn compile(a: std.mem.Allocator, h: *heap.Heap, strings: *string.Strings, sr
     var p = parser.Parser.init(scratch, src, .{
         .module = opts.module,
         .strict = opts.strict,
-        .in_function = opts.eval_ctx.has_this_function,
+        .in_function = false, // eval code is script code: no `return` at its top level
         .allow_new_target = opts.eval_ctx.allow_new_target,
         .allow_super_property = opts.eval_ctx.allow_super,
         .allow_super_call = opts.eval_ctx.allow_super_call,
@@ -258,6 +258,9 @@ const FuncState = struct {
     props: std.ArrayList(bytecode.PropSite) = .empty,
     globals: std.ArrayList(bytecode.GlobalSite) = .empty,
     scopes: std.ArrayList(*bytecode.ScopeInfo) = .empty,
+    /// A sloppy eval root: the var and function names it declares in the caller's variable environment.
+    eval_vars: std.ArrayList(*String) = .empty,
+    eval_funcs: std.ArrayList(*String) = .empty,
     templates: std.ArrayList(bytecode.TemplateSite) = .empty,
     positions: std.ArrayList(bytecode.Position) = .empty,
     controls: std.ArrayList(Control) = .empty,
@@ -473,6 +476,8 @@ pub const Compiler = struct {
         d.nregs = fs.max;
         d.nparams = fs.nparams;
         d.param_slots = fs.param_slots;
+        d.eval_vars = try c.a.dupe(*String, fs.eval_vars.items);
+        d.eval_funcs = try c.a.dupe(*String, fs.eval_funcs.items);
         d.kind = kind;
         d.strict = fs.strict;
         d.source = c.source;
@@ -526,8 +531,15 @@ pub const Compiler = struct {
                 continue;
             }
             if (is_eval_root and !fs.strict and (b.kind == .@"var" or b.kind == .function or b.kind == .implicit)) {
-                // eval's vars go to the caller's variable environment.
-                b.loc = .global;
+                // Sloppy eval's vars live in the caller's variable
+                // environment (EvalDeclarationInstantiation): the global
+                // object for an indirect or global eval, else wherever the
+                // runtime chain holds them — `declvar` puts them there
+                // before anything runs, and reads go by name (an eval in a
+                // function read them as globals before, 2026-10-07).
+                if (c.an.eval_ctx.global) b.loc = .global;
+                if (b.kind == .function) try fs.eval_funcs.append(c.scratch, try c.strings.atom(b.name));
+                if (b.kind == .@"var") try fs.eval_vars.append(c.scratch, try c.strings.atom(b.name));
                 continue;
             }
             if (b.captured or dyn or s.kind == .module or s.kind == .with) {
@@ -554,7 +566,8 @@ pub const Compiler = struct {
                 .consts = try consts.toOwnedSlice(c.a),
                 .lexical = try lexical.toOwnedSlice(c.a),
                 .imports = try imports.toOwnedSlice(c.a),
-                .is_function = s.kind == .function or s.kind == .params or s.kind == .eval or s.kind == .module,
+                .is_function = s.kind == .function or s.kind == .params or s.kind == .module,
+                .is_params = s.kind == .params,
                 .is_with = s.kind == .with,
                 .dynamic = s.kind == .function and s.func.has_direct_eval,
             };
@@ -575,8 +588,10 @@ pub const Compiler = struct {
         }
         // Sloppy eval code: EvalDeclarationInstantiation puts its vars in
         // the caller's variable environment before anything runs.
+        // (`a` = 1: deletable — a global var an eval declares is
+        // configurable, a script's is not.)
         if (is_eval_root and !fs.strict) {
-            for (s.bindings.values()) |b| if (b.kind == .@"var") try c.emitBc(.declvar, 0, try c.constString(b.name));
+            for (s.bindings.values()) |b| if (b.kind == .@"var") try c.emitBc(.declvar, 1, try c.constString(b.name));
         }
         // TDZ for lexical registers; block functions are not lexical.
         for (s.bindings.values()) |b| if (b.loc == .reg and b.lexical) try c.emit(.ldempty, b.loc.reg, 0, 0);
@@ -587,8 +602,11 @@ pub const Compiler = struct {
             const name = f.name orelse "*default*";
             const r = try c.tmp();
             try c.closureDecl(f, r, f.name orelse "default", fnode.data == .function_decl);
-            if (s.kind == .eval or s.kind == .script) {
-                try c.emit(.declfunc, 0, @intCast(try c.constString(name)), r);
+            if (s.kind == .script or (s.kind == .eval and !fs.strict)) {
+                // CreateGlobalFunctionBinding, or the sloppy eval's
+                // function in the caller's variable environment; a strict
+                // eval's functions are its own.
+                try c.emit(.declfunc, if (s.kind == .eval) 1 else 0, @intCast(try c.constString(name)), r);
             } else {
                 const ref = c.resolve(name);
                 try c.initialize(ref, r, name);
@@ -2334,7 +2352,9 @@ pub const Compiler = struct {
                 const d = dst orelse try c.tmp();
                 const top = c.fs.top;
                 const s = try c.expr(ic.source, null);
-                try c.emit(.importcall, d, s, 0);
+                // `c`: the options register, 0xFFFF for none.
+                const o: u16 = if (ic.options) |opt| try c.expr(opt, null) else 0xFFFF;
+                try c.emit(.importcall, d, s, o);
                 c.release(@max(top, d + 1));
                 return d;
             },
@@ -3010,7 +3030,9 @@ pub const Compiler = struct {
             const abase = try c.tmps(@intCast(args.len));
             for (args, 0..) |a, i| _ = try c.expr(a, abase + @as(u16, @intCast(i)));
             try c.pos(at);
-            try c.emit(.eval, d, base, @intCast(args.len));
+            // `c`'s top bit: the call sits in a parameter expression
+            // (EvalDeclarationInstantiation checks the parameter scope).
+            try c.emit(.eval, d, base, @as(u16, @intCast(args.len)) | if (c.fs.in_params) @as(u16, 0x8000) else 0);
             return d;
         }
         const base = try c.tmps(2);

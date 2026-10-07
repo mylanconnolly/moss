@@ -22,6 +22,7 @@ const parser = @import("parser.zig");
 const scope = @import("scope.zig");
 const generator = @import("builtins/generator.zig");
 const promise = @import("builtins/promise.zig");
+const json = @import("builtins/json.zig");
 const Vm = vmod.Vm;
 const Value = vmod.Value;
 const Error = vmod.Error;
@@ -76,6 +77,9 @@ pub const Module = struct {
     code: ?*Code = null,
     status: Status = .new,
     requests: std.ArrayList([]const u8) = .empty,
+    /// Each request's `type` attribute (`"json"` for a JSON module): a
+    /// specifier with a different attribute is a different request.
+    request_types: std.ArrayList(?[]const u8) = .empty,
     resolved: std.ArrayList(?*Module) = .empty,
     imports: std.ArrayList(ImportEntry) = .empty,
     local_exports: std.ArrayList(LocalExport) = .empty,
@@ -104,6 +108,7 @@ pub const Module = struct {
 
     pub fn deinit(m: *Module, a: std.mem.Allocator) void {
         m.requests.deinit(a);
+        m.request_types.deinit(a);
         m.resolved.deinit(a);
         m.imports.deinit(a);
         m.local_exports.deinit(a);
@@ -165,11 +170,17 @@ pub fn create(vm: *Vm, name: []const u8, source: []const u8) Error!*Module {
     return m;
 }
 
-fn requestIndex(vm: *Vm, m: *Module, spec: []const u8) Error!u32 {
-    for (m.requests.items, 0..) |r, i| if (std.mem.eql(u8, r, spec)) return @intCast(i);
+fn requestIndex(vm: *Vm, m: *Module, spec: []const u8, type_attr: ?[]const u8) Error!u32 {
+    for (m.requests.items, 0..) |r, i| if (std.mem.eql(u8, r, spec) and sameType(m.request_types.items[i], type_attr)) return @intCast(i);
     try m.requests.append(vm.meta, try m.arena.allocator().dupe(u8, spec));
+    try m.request_types.append(vm.meta, if (type_attr) |t| try m.arena.allocator().dupe(u8, t) else null);
     try m.resolved.append(vm.meta, null);
     return @intCast(m.requests.items.len - 1);
+}
+
+fn sameType(a: ?[]const u8, b: ?[]const u8) bool {
+    if (a == null or b == null) return a == null and b == null;
+    return std.mem.eql(u8, a.?, b.?);
 }
 
 fn boundNames(vm: *Vm, m: *Module, n: *ast.Node, kind: enum { local }) Error!void {
@@ -192,7 +203,7 @@ fn collectEntries(vm: *Vm, m: *Module, prog: *ast.Node) Error!void {
     const a = m.arena.allocator();
     for (prog.data.program.body) |st| switch (st.data) {
         .import_decl => |im| {
-            const req = try requestIndex(vm, m, im.source);
+            const req = try requestIndex(vm, m, im.source, im.type_attr);
             if (im.default) |d| try m.imports.append(vm.meta, .{ .request = req, .import_name = "default", .local = try a.dupe(u8, d) });
             if (im.namespace) |ns| try m.imports.append(vm.meta, .{ .request = req, .import_name = null, .local = try a.dupe(u8, ns) });
             for (im.named) |nm| try m.imports.append(vm.meta, .{ .request = req, .import_name = try a.dupe(u8, nm.imported), .local = try a.dupe(u8, nm.local) });
@@ -220,14 +231,14 @@ fn collectEntries(vm: *Vm, m: *Module, prog: *ast.Node) Error!void {
             },
             .named => |nm| {
                 if (nm.source) |src| {
-                    const req = try requestIndex(vm, m, src);
+                    const req = try requestIndex(vm, m, src, nm.type_attr);
                     for (nm.specifiers) |sp| try m.indirect_exports.append(vm.meta, .{ .export_name = try a.dupe(u8, sp.exported), .request = req, .import_name = try a.dupe(u8, sp.local) });
                 } else {
                     for (nm.specifiers) |sp| try m.local_exports.append(vm.meta, .{ .export_name = try a.dupe(u8, sp.exported), .local = try a.dupe(u8, sp.local) });
                 }
             },
             .all => |al| {
-                const req = try requestIndex(vm, m, al.source);
+                const req = try requestIndex(vm, m, al.source, al.type_attr);
                 if (al.as) |as| {
                     try m.indirect_exports.append(vm.meta, .{ .export_name = try a.dupe(u8, as), .request = req, .import_name = null });
                 } else try m.star_exports.append(vm.meta, req);
@@ -264,10 +275,56 @@ fn loadTree(vm: *Vm, m: *Module) Error!void {
             vm.meta.free(loaded.name);
             vm.meta.free(loaded.source);
         }
-        const dep = try create(vm, loaded.name, loaded.source);
+        const dep = try createTyped(vm, loaded.name, loaded.source, m.request_types.items[i]);
         m.resolved.items[i] = dep;
         if (dep.status == .new) try loadTree(vm, dep);
     }
+}
+
+/// The record for a loaded source under its request's `type` attribute:
+/// a JSON module for `"json"`, source text otherwise; any other type is
+/// one this host does not load.
+fn createTyped(vm: *Vm, name: []const u8, source: []const u8, type_attr: ?[]const u8) Error!*Module {
+    const t = type_attr orelse return create(vm, name, source);
+    if (std.mem.eql(u8, t, parser.Parser.unsupported_attribute)) return vm.throwSyntaxError("unsupported import attribute");
+    if (!std.mem.eql(u8, t, "json")) return vm.throwTypeError("unsupported module type");
+    return createJson(vm, name, source);
+}
+
+/// A JSON module (`with { type: "json" }`, §16.2.1.7 synthetic module
+/// records): one export, `default`, the parsed text — evaluated here,
+/// remembered under the name with a `json` tag so the same file imported
+/// as a script is another record. Bad JSON is a SyntaxError at load.
+pub fn createJson(vm: *Vm, name: []const u8, source: []const u8) Error!*Module {
+    const key = try std.fmt.allocPrint(vm.meta, "{s}\x00json", .{name});
+    defer vm.meta.free(key);
+    if (vm.modules.get(key)) |m| return m;
+    const text = try vm.strings.fromUtf8(source);
+    const value = try json.parseText(vm, text);
+    const m = try vm.meta.create(Module);
+    m.* = .{ .name = try vm.meta.dupe(u8, name), .source = &.{}, .arena = std.heap.ArenaAllocator.init(vm.meta) };
+    errdefer {
+        m.deinit(vm.meta);
+        vm.meta.destroy(m);
+    }
+    const a = m.arena.allocator();
+    const info = try a.create(bytecode.ScopeInfo);
+    const names = try a.alloc(*String, 1);
+    names[0] = try vm.strings.atom("default");
+    info.* = .{ .names = names, .consts = try a.dupe(bool, &.{true}), .lexical = try a.dupe(bool, &.{false}), .imports = try a.dupe(bool, &.{false}), .is_function = true };
+    const env = try interp.newEnv(vm, info, null, null);
+    env.slots()[0] = value;
+    m.env = env;
+    try m.local_exports.append(vm.meta, .{ .export_name = "default", .local = "default" });
+    const cap = try promise.newCapability(vm, vm.intrinsics.promise_ctor.asValue());
+    m.promise = cap.promise;
+    m.resolve_fn = cap.resolve;
+    m.reject_fn = cap.reject;
+    _ = try vm.call(cap.resolve, Value.undefined_, &.{Value.undefined_});
+    m.status = .evaluated;
+    m.index = @intCast(vm.modules.count());
+    try vm.modules.put(vm.meta, try a.dupe(u8, key), m);
+    return m;
 }
 
 // ------------------------------------------------------------ linking
@@ -660,10 +717,10 @@ pub fn importMeta(vm: *Vm, code: *bytecode.CodeData) Error!Value {
 
 /// `import(specifier)` (§13.3.10, HostLoadImportedModule): a promise
 /// of the namespace; every failure rejects it.
-pub fn dynamicImport(vm: *Vm, code: *bytecode.CodeData, specifier: Value) Error!Value {
+pub fn dynamicImport(vm: *Vm, code: *bytecode.CodeData, specifier: Value, options: Value) Error!Value {
     const cap = try promise.newCapability(vm, vm.intrinsics.promise_ctor.asValue());
     const referrer: ?[]const u8 = if (code.module) |mp| @as(*Module, @ptrCast(@alignCast(mp))).name else if (code.source) |src| src.name else null;
-    dynamicImportInner(vm, referrer, specifier, cap) catch |e| switch (e) {
+    dynamicImportInner(vm, referrer, specifier, options, cap) catch |e| switch (e) {
         error.Exception => {
             const ex = vm.exception;
             vm.exception = Value.undefined_;
@@ -674,10 +731,33 @@ pub fn dynamicImport(vm: *Vm, code: *bytecode.CodeData, specifier: Value) Error!
     return cap.promise;
 }
 
-fn dynamicImportInner(vm: *Vm, referrer: ?[]const u8, specifier: Value, cap: promise.Capability) Error!void {
+fn dynamicImportInner(vm: *Vm, referrer: ?[]const u8, specifier: Value, options: Value, cap: promise.Capability) Error!void {
     const spec_s = try vm.toString(specifier);
     const spec = try vm.utf8(spec_s, vm.meta);
     defer vm.meta.free(spec);
+    // EvaluateImportCall step 7: the options' `with` object, every
+    // enumerable own string key a string-valued attribute, `type` the
+    // one this host supports.
+    var type_attr: ?[]u8 = null;
+    defer if (type_attr) |t| vm.meta.free(t);
+    if (!options.isUndefined()) {
+        if (!options.isObject()) return vm.throwTypeError("The second argument of import() must be an object");
+        const with = try vm.get(asObject(options), .{ .atom = try vm.atom("with") }, options);
+        if (!with.isUndefined()) {
+            if (!with.isObject()) return vm.throwTypeError("The 'with' option of import() must be an object");
+            var keys: std.ArrayList(Key) = .empty;
+            defer keys.deinit(vm.meta);
+            try vm.enumerableOwnKeys(asObject(with), &keys);
+            const type_key = try vm.atom("type");
+            for (keys.items) |k| {
+                const v = try vm.get(asObject(with), k, with);
+                if (!v.isString()) return vm.throwTypeError("Import attribute values must be strings");
+                if (k != .atom or k.atom != type_key) return vm.throwTypeError("unsupported import attribute");
+                if (type_attr) |t| vm.meta.free(t);
+                type_attr = try vm.utf8(asString(v), vm.meta);
+            }
+        }
+    }
     const host = vm.host_load orelse return vm.throwTypeError("no module loader");
     const loaded = (try host(vm, referrer, spec)) orelse {
         var buf: [256]u8 = undefined;
@@ -688,7 +768,7 @@ fn dynamicImportInner(vm: *Vm, referrer: ?[]const u8, specifier: Value, cap: pro
         vm.meta.free(loaded.name);
         vm.meta.free(loaded.source);
     }
-    const m = try create(vm, loaded.name, loaded.source);
+    const m = try createTyped(vm, loaded.name, loaded.source, type_attr);
     try link(vm, m);
     const p = try evaluate(vm, m);
     // Resolve with the namespace once evaluation settles.
