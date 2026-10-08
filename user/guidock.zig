@@ -130,7 +130,7 @@ pub fn runDock(it: *mshl.Interp, view: Value, update: Value, init_state: Value, 
     try epoch.begin(it, .{ .list = &.{ view, update, init_state } });
     defer epoch.deinit();
     wf.fontReady();
-    wf.refreshAppearance();
+    _ = wf.refreshAppearance();
     wf.useOrdinaryChannel();
     const pill_h = lineOf(R_UI) + 2 * item_vpad;
     wf.win_w = wf.scanout_w;
@@ -189,6 +189,7 @@ pub fn runDock(it: *mshl.Interp, view: Value, update: Value, init_state: Value, 
         input: while (true) {
             const ev = wf.nextInput() orelse return it.fail("gui: the display channel closed", .{});
             if (ev.kind == 2 or ev.kind == 7) {
+                _ = wf.refreshAppearance(); // the appearance tick: the next render wears the new palette
                 tree = try it.callValue(view, &.{state}, null, null); // tick refresh
                 evaluated = true;
                 break :input;

@@ -2758,11 +2758,16 @@ supervises), and memory history per unit beside the CPU one.
   labels, weighted rows, and stable focus IDs landed on 2026-09-12; grid
   tracks with per-child alignment, switches and checkboxes, and modal
   dialogs as data in the view landed on 2026-10-08 (DESIGN, "Switches,
-  grids and sheets"). Carry the visual system through Files, login,
-  terminal, dock, and top bar; validate all themes/scales. Still the
-  runtime's own: `drawButton` paints beside the toolkit's `paint.button`
-  (hover, press and the danger variant are not in the toolkit's style
-  yet), list rows and breadcrumbs.
+  grids and sheets"); the same day, one button painter (the dock's
+  pills included), widget identity and lifetime by render with every
+  limit named, and the visual system carried to the edges — the
+  popup rows, the compositor's ground, live palette refresh in every
+  resident loop and open window, a high-contrast pass over the whole
+  desktop in the guishellro drill (DESIGN, "The visual system carried
+  to the edges"). Still the runtime's own painters: list rows and
+  breadcrumbs. Not validated yet: the light theme end to end (the
+  drills' system config locks the theme dark; a light-theme pass needs
+  a profile whose config does not).
 
 **GUI resource capacity**
 

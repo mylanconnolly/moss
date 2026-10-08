@@ -3631,11 +3631,15 @@ fn guishellDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     // from the launcher adds a seventh pill, which toggles its window like
     // any other, and the pill goes when the app closes (2026-09-24).
     const activity_before = countOccurrences(readLog(log_path), "activity: machine cores=");
+    // The dock announces its pills again when one comes or goes; wait for
+    // the announce this launch causes, not the first seven-pill one in the
+    // log (an earlier step's), or the click below aims at a stale pill.
+    const seven_before = countOccurrences(readLog(log_path), "dock: ready n=7");
     if (!q.chord("meta_l", "spc")) return sfail(spec, log_path, "open the launcher for Activity");
     if (!try waitLogN(log_path, launcher_ready_line, 7, "the launcher did not open for Activity", spec, polls)) return false;
     if (!q.typeText("activity") or !q.sendKey("ret")) return sfail(spec, log_path, "launch Activity");
     if (!try waitLogN(log_path, "activity: machine cores=", activity_before + 1, "Activity never came up for alice", spec, polls)) return false;
-    if (!try waitLogN(log_path, "dock: ready n=7", 1, "the dock did not add a pill for the running Activity", spec, polls)) return false;
+    if (!try waitLogN(log_path, "dock: ready n=7", seven_before + 1, "the dock did not add a pill for the running Activity", spec, polls)) return false;
     sleepMs(500);
     const act_pill = parseDockItem(readLog(log_path), 6) orelse return sfail(spec, log_path, "parse the Activity pill");
     const min_before = countOccurrences(readLog(log_path), "gui: minimized");
@@ -3714,6 +3718,37 @@ fn guishellroDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         if (pass == 0 and current[1] == initial_small[1]) return sfail(spec, log_path, "scale did not reflow Settings");
         if (pass == 1 and current[1] != initial_small[1]) return sfail(spec, log_path, "font geometry drifted after round trip");
         _ = q.screendump(if (pass == 0) check_dir ++ "/settings-scale-100.ppm" else check_dir ++ "/settings-scale-150.ppm");
+    }
+    // High contrast, applied live, must reach every piece of chrome: the
+    // top bar, the dock, Settings' own title band and the compositor's
+    // ground all paint the palette's extreme (pure black in the dark
+    // theme), and the slate ground comes back when the switch is turned
+    // off again. Probed at points no text or pill covers.
+    for ([_]bool{ true, false }, 0..) |high, pass| {
+        const contrast = widgetCenter(readLog(log_path), "contrast") orelse return sfail(spec, log_path, "contrast switch geometry");
+        if (!clickScanout(&q, contrast[0], contrast[1])) return sfail(spec, log_path, "flip the contrast switch");
+        sleepMs(150);
+        const apply = widgetCenter(readLog(log_path), "apply") orelse return sfail(spec, log_path, "Apply geometry");
+        if (!clickScanout(&q, apply[0], apply[1])) return sfail(spec, log_path, "apply the contrast");
+        if (!try waitLogN(log_path, "gui: ready", 5 + pass, "Settings did not reopen after the contrast change", spec, polls)) return false;
+        sleepMs(700); // the bar, the dock and the ground follow the appearance tick
+        const ppm = if (high) check_dir ++ "/settings-contrast-high.ppm" else check_dir ++ "/settings-contrast-normal.ppm";
+        if (!q.screendump(ppm)) return sfail(spec, log_path, "contrast screendump");
+        const img = readPpm(ppm) orelse return sfail(spec, log_path, "contrast screendump unreadable");
+        const Probe = struct { x: usize, y: usize, what: []const u8, high: [3]u8, normal: [3]u8 };
+        const probes = [_]Probe{
+            .{ .x = 600, .y = 4, .what = "top bar", .high = .{ 0, 0, 0 }, .normal = .{ 0x22, 0x25, 0x2a } },
+            .{ .x = 20, .y = 1020, .what = "dock", .high = .{ 0, 0, 0 }, .normal = .{ 0x22, 0x25, 0x2a } },
+            .{ .x = 100, .y = 300, .what = "desktop ground", .high = .{ 0, 0, 0 }, .normal = .{ 0x20, 0x28, 0x30 } },
+        };
+        for (probes) |pr| {
+            const want = if (high) pr.high else pr.normal;
+            const got = pixelAt(img, pr.x, pr.y);
+            if (!eqRgb(got, want[0], want[1], want[2])) {
+                std.debug.print("[FAIL] {s}: {s} at ({d},{d}) is {any}, wanted {any} with high contrast {}\n", .{ spec.name, pr.what, pr.x, pr.y, got, want, high });
+                return sfail(spec, log_path, "chrome did not follow the contrast change");
+            }
+        }
     }
     // A non-administrator's Activity: the session init refuses the unit's
     // introspect grant, and the System tab says so instead of listing the

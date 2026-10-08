@@ -173,7 +173,7 @@ const pend_cap = 64;
 var surfaces: [max_surfaces]Surface = @splat(.{});
 var next_z: u32 = 1;
 /// The compositor's ground, seen wherever no surface covers the scanout.
-const bg_word: u32 = 0x0020_2830; // a dark slate
+var bg_word: u32 = 0x0020_2830; // a dark slate until the session's chrome declares its theme's
 
 // The trusted path. The compositor holds a boot-provisioned token; a
 // client that echoes it over `attach_trusted` gets a channel badged
@@ -1525,6 +1525,18 @@ fn serveSurfaces(chan_h: u64) noreturn {
             },
             .output_monitor => {
                 _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .monitor = .{ .a = monitor_id[0], .b = monitor_id[1], .c = monitor_id[2] } }, 0, token);
+            },
+            .set_ground => |q| {
+                // The desktop's ground follows the session's theme: the top
+                // bar declares it (per-session chrome authority, like a strut).
+                const ok = badge == control_badge and q.word <= 0xffffff;
+                if (ok and bg_word != @as(u32, @intCast(q.word))) {
+                    bg_word = @intCast(q.word);
+                    _ = composite();
+                    var l: [40]u8 = undefined;
+                    _ = usys.log(comp_log, std.fmt.bufPrint(&l, "comp: ground {x:0>6}", .{bg_word}) catch "comp: ground");
+                }
+                _ = usys.replyTypedTo(shared.GpuResp, chan_h, if (ok) .ok else .{ .gpu_err = .{ .code = 23 } }, 0, token);
             },
             .work_area => {
                 const wa = workArea();

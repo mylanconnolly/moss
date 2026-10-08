@@ -4511,6 +4511,35 @@ six possibilities. *Lesson (the third time this repo has paid for it):*
 a fixed table that falls back silently is a bug waiting for the view
 that grows; name the fallback where it happens.
 
+**The visual system carried to the edges (2026-10-08).** What was
+still painted on its own: the top bar's popup rows (their own band and
+ink arithmetic), the dock's pills (fixed above), the compositor's
+ground (a slate constant), and the resident chrome's palette (resolved
+once at start, so a contrast change reached the bar and the dock only
+when they restarted, and an open window only when reopened). Now the
+popup's rows are `paint.menuItem`/`menuSeparator` (pixel-tested: the
+selected band inset from the edges, the muted disabled row, the
+shortcut at the right), the palette carries a `desktop` token — the
+slate the desktop always wore in the dark theme, a lighter grey in the
+light one, the extreme at high contrast — and the bar declares it to
+the compositor (`set_ground`, control-badge only, probed by the comp
+drill beside `set_strut`) with its strut and again whenever the
+appearance changes. The appearance tick that already woke every
+parked reader now makes each of them ask fontsvc for the palette
+(`refreshAppearance` says whether it changed): the bar repaints and
+re-declares the ground, the dock repaints, and every open window
+repaints its chrome and widgets live. The guishellro drill flips High
+contrast, applies, and probes the bar, the dock and the ground for
+pure black, then flips it back and probes for the slate and the
+surface grey — one pass over the whole desktop at the palette's
+extreme. Found by its first screenshot: at high contrast the raised
+surface *is* the ground, so the outline-less pills vanished; a pill
+keeps its outline when the palette has no raised surface to show it
+with. Kept as it was, on purpose: the terminal's grid is white on
+black at every theme — a terminal's own convention, as on every
+other desktop — while its window chrome follows the theme like any
+window's.
+
 ### GUIs in mshl
 
 The console arc gave the substrate — surfaces, a compositor, keyboard

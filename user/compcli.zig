@@ -100,6 +100,10 @@ fn menuProbe(control: u64, log_h: u64) void {
     demand(snapshot() == first); // titleless popup retains application identity
     demand(call(disp, .{ .menu_bar = .{ .surface = popup } }) == .gpu_err);
     demand(call(control, .{ .menu_bar = .{ .surface = popup } }) == .ok);
+    // The ground is chrome authority too: a window cannot repaint the desktop.
+    demand(call(disp, .{ .set_ground = .{ .word = 0x101010 } }) == .gpu_err);
+    demand(call(control, .{ .set_ground = .{ .word = 0x1000000 } }) == .gpu_err); // not a colour
+    demand(call(control, .{ .set_ground = .{ .word = 0x202830 } }) == .ok);
     title(popup, "Second Probe");
     const second = snapshot();
     demand(second != first);

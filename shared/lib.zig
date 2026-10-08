@@ -1102,6 +1102,10 @@ pub const GpuReq = union(enum(u64)) {
     /// seat's size when there is no EDID), so a resolution preference can
     /// be kept per monitor. -> `monitor`.
     output_monitor: void,
+    /// Control capability only: the ground the compositor paints wherever
+    /// no surface covers the scanout (0x00RRGGBB), so the desktop follows
+    /// the session's theme. The top bar declares it with its strut.
+    set_ground: struct { word: u64 },
 };
 pub const GpuResp = union(enum(u64)) {
     menu: struct { token: u64, profile: u64, enabled: u64 },

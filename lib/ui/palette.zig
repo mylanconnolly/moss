@@ -13,6 +13,7 @@ pub const ColorMode = enum(u8) { default = 0, cb_safe = 1 };
 
 pub const Palette = struct {
     bg: u32, // the window ground
+    desktop: u32, // the compositor's ground behind every window
     surface: u32, // an elevated area (titlebar, cards)
     surface_hi: u32, // a raised element's fill (a default button)
     text: u32, // body text
@@ -49,6 +50,7 @@ pub fn resolve(theme: Theme, contrast: Contrast, cmode: ColorMode) Palette {
     var p: Palette = switch (theme) {
         .dark => .{
             .bg = 0x17191d,
+            .desktop = 0x202830, // the slate the desktop has always worn
             .surface = 0x22252a,
             .surface_hi = 0x30343b,
             .text = 0xe6e9f0,
@@ -67,6 +69,7 @@ pub fn resolve(theme: Theme, contrast: Contrast, cmode: ColorMode) Palette {
         },
         .light => .{
             .bg = 0xf3f3f1,
+            .desktop = 0xd6dae0,
             .surface = 0xffffff,
             .surface_hi = 0xedeef0,
             .text = 0x1a1f2b,
@@ -89,6 +92,7 @@ pub fn resolve(theme: Theme, contrast: Contrast, cmode: ColorMode) Palette {
     if (contrast == .high) {
         const dark = theme == .dark;
         p.bg = if (dark) 0x000000 else 0xffffff;
+        p.desktop = p.bg;
         p.surface = p.bg;
         p.surface_hi = p.bg;
         p.field_bg = p.bg;
@@ -123,6 +127,9 @@ test "every palette keeps ink legible on its grounds and high contrast at the ex
                 const pd = @max(luma(p.primary_ink), luma(p.primary)) - @min(luma(p.primary_ink), luma(p.primary));
                 try std.testing.expect(pd >= 90); // a label on the primary fill
                 try std.testing.expect(p.focus != p.bg and p.border != p.bg);
+                // The desktop ground sits a step away from the window ground
+                // so a window's edge reads; at high contrast both are the extreme.
+                if (contrast == .high) try std.testing.expectEqual(p.bg, p.desktop) else try std.testing.expect(p.desktop != p.bg);
                 if (contrast == .high) {
                     try std.testing.expect(p.bg == 0 or p.bg == 0xffffff);
                     try std.testing.expect(p.border_w > resolve(theme, .normal, cmode).border_w);

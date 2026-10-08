@@ -131,7 +131,7 @@ fn enterRow() void {
 }
 fn draw(saving: bool) void {
     wf.setMenuProfile(.picker, shared.menus.offered(.picker));
-    wf.refreshAppearance();
+    _ = wf.refreshAppearance();
     wf.clipReset();
     wf.fillAll(wf.pal.bg);
     wf.drawChrome(if (saving) "Save document" else "Open document");

@@ -397,15 +397,23 @@ pub fn fontOk() bool {
 /// accessibility), so a window follows the system/user settings and a live
 /// change is picked up when it next opens. A no-op without a font service —
 /// the compiled-in dark default stands.
-pub fn refreshAppearance() void {
-    if (font_chan == 0) return;
+/// True when the palette changed, so a resident loop can repaint (and
+/// the bar re-declare the desktop ground) on the appearance tick.
+pub fn refreshAppearance() bool {
+    if (font_chan == 0) return false;
     switch (usys.callTyped(shared.FontReq, shared.FontResp, font_chan, .appearance, 0)) {
         .ok => |rep| switch (rep) {
-            .appearance => |ap| pal = resolveTheme(shared.apTheme(ap.flags), shared.apContrast(ap.flags), shared.apColors(ap.flags)),
+            .appearance => |ap| {
+                const next = resolveTheme(shared.apTheme(ap.flags), shared.apContrast(ap.flags), shared.apColors(ap.flags));
+                const changed = !std.meta.eql(next, pal);
+                pal = next;
+                return changed;
+            },
             else => {},
         },
         .err => {},
     }
+    return false;
 }
 
 /// Report the effective appearance flags fontsvc is applying (theme,

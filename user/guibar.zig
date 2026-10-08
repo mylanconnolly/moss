@@ -173,7 +173,7 @@ fn menuAt(lx: usize) ?usize {
 }
 
 fn popEntryHeight(index: usize) usize {
-    return if (pop_entries[index].separator) @max(9, lineOf(R_UI) / 3) else pop_item_h;
+    return if (pop_entries[index].separator) ui.paint.menuSeparatorHeight(wf.brush()) else pop_item_h;
 }
 fn popEntryY(index: usize) usize {
     var y: usize = 4;
@@ -196,21 +196,16 @@ fn renderPopup() void {
     const saved = wf.retarget(pop_px, pop_w, pop_h);
     defer wf.restoreTarget(saved);
     panel(0, 0, pop_w, pop_h, 8, pal.surface, pal.border, pal.border_w);
-    const cyoff = (pop_item_h -| lineOf(R_UI)) / 2;
+    // The rows are the toolkit's (`paint.menuItem`), so a popup here and
+    // any other menu a program paints are the same rows.
+    const b = wf.brush();
     for (pop_entries[0..pop_count], 0..) |entry, i| {
-        const y = popEntryY(i);
+        const row: ui.Rect = .{ .x = 0, .y = popEntryY(i), .w = pop_w, .h = popEntryHeight(i) };
         if (entry.separator) {
-            fillRect(menu_hpad, y + popEntryHeight(i) / 2, pop_w -| (2 * menu_hpad), pal.border_w, pal.border);
+            ui.paint.menuSeparator(b, row);
             continue;
         }
-        const selected = pop_selected == i and entry.enabled;
-        const bg = if (selected) pal.primary else pal.surface;
-        const ink = if (!entry.enabled) pal.text_muted else if (selected) pal.primary_ink else pal.text;
-        if (selected) fillRoundRect(4, y, pop_w -| 8, pop_item_h, 4, bg);
-        const shortcut_w = strW(R_UI, entry.shortcut);
-        const shortcut_gap: usize = if (shortcut_w > 0) 24 else 0;
-        drawStrTrunc(menu_hpad, y + cyoff, R_UI, entry.label[0..entry.len], pop_w -| (2 * menu_hpad + shortcut_w + shortcut_gap), ink, bg);
-        if (shortcut_w > 0 and shortcut_w + 2 * menu_hpad < pop_w) drawStr(pop_w - menu_hpad - shortcut_w, y + cyoff, R_UI, entry.shortcut, ink, bg);
+        ui.paint.menuItem(b, row, entry.label[0..entry.len], entry.shortcut, .{ .selected = pop_selected == i, .enabled = entry.enabled });
     }
 }
 
@@ -240,7 +235,7 @@ fn openPopup(m: MenuHit) void {
     pop_app_token = if (m.app_items.len > 0) bar_app.token else 0;
     pop_focus_token = bar_app.token;
     pop_selected = null;
-    pop_item_h = lineOf(R_UI) + 2 * item_vpad;
+    pop_item_h = ui.paint.menuRowHeight(wf.brush());
     var maxw: usize = 80;
     for (0..pop_count) |i| {
         var entry: PopupItem = .{};
@@ -333,6 +328,15 @@ fn mkMenuEvent(it: *mshl.Interp, menu: []const u8, item: []const u8) mshl.Error!
     return .{ .record = .{ .keys = keys, .vals = vals } };
 }
 
+/// The desktop's ground is the palette's: declared to the compositor
+/// with the strut (per-session chrome authority), and again whenever the
+/// appearance changes, so a high-contrast or light session is one to the
+/// edges of the scanout rather than a set of windows on a fixed slate.
+fn declareGround() void {
+    if (core.output_control == 0) return;
+    _ = usys.callTyped(shared.GpuReq, shared.GpuResp, core.output_control, .{ .set_ground = .{ .word = pal.desktop } }, 0);
+}
+
 /// The resident top-bar loop (`gui { bar: true, ... }`): render the bar,
 /// tick the clock, open/close dropdowns, and fire the selected menu item.
 pub fn runBar(it: *mshl.Interp, view: Value, update: Value, init_state: Value) mshl.Error!Value {
@@ -343,7 +347,7 @@ pub fn runBar(it: *mshl.Interp, view: Value, update: Value, init_state: Value) m
     try epoch.begin(it, .{ .list = &.{ view, update, init_state } });
     defer epoch.deinit();
     wf.fontReady();
-    wf.refreshAppearance();
+    _ = wf.refreshAppearance();
     wf.useOrdinaryChannel();
     wf.pointer_tracking = true;
     wf.tick_ms = 100; // focus/menu state follows the compositor promptly
@@ -358,6 +362,7 @@ pub fn runBar(it: *mshl.Interp, view: Value, update: Value, init_state: Value) m
     if (!wf.openSurface(false)) return it.fail("gui: cannot open the bar surface", .{});
     _ = usys.callTyped(shared.GpuReq, shared.GpuResp, core.output_control, .{ .menu_bar = .{ .surface = wf.surf } }, 0);
     declareStrut(0, wf.win_h);
+    declareGround();
     defer wf.closeSurface();
     defer closePopup();
 
@@ -416,6 +421,14 @@ pub fn runBar(it: *mshl.Interp, view: Value, update: Value, init_state: Value) m
             const ev = wf.nextInput() orelse return it.fail("gui: the display channel closed", .{});
             if (ev.kind == 2 or ev.kind == 7) {
                 clock_ticks += 1;
+                // The appearance tick: re-resolve the palette, repaint, and
+                // hand the compositor the new ground.
+                if (wf.refreshAppearance()) {
+                    if (pop_open) dismissPopup(true);
+                    declareGround();
+                    bar_dirty = true;
+                    break :input;
+                }
                 if (!pop_open and clock_ticks >= 10) {
                     tree = try it.callValue(view, &.{state}, null, null);
                     evaluated = true;

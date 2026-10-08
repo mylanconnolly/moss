@@ -1033,7 +1033,7 @@ fn windowedMain(log_h: u64, chan_h: u64) noreturn {
     // is not enough: attach its atlas/metrics before chrome establishes the
     // title height used by the terminal grid.
     wf.fontReady();
-    wf.refreshAppearance();
+    _ = wf.refreshAppearance();
     wf.useOrdinaryChannel(); // a badged compositor channel, like any window
     wf.win_w = 760;
     wf.win_h = 520;

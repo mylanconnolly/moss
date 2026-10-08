@@ -827,7 +827,7 @@ export fn umain(log_cap: u64, chan_h: u64, arg: u64) callconv(.c) noreturn {
     active.initial_placeholder = true;
     wf.setup(setup.cap(.display), log_h, setup.secret(), setup.cap(.font));
     wf.fontReady();
-    wf.refreshAppearance();
+    _ = wf.refreshAppearance();
     wf.useOrdinaryChannel();
     _ = wf.refreshOutput();
     const work = wf.workArea();
@@ -861,7 +861,7 @@ export fn umain(log_cap: u64, chan_h: u64, arg: u64) callconv(.c) noreturn {
             hidden = true; // the dock hid us; a restore brings us back
         } else if (ev.kind == 2) {
             if (wf.refreshFontMetrics()) {
-                wf.refreshAppearance();
+                _ = wf.refreshAppearance();
                 for (tabs.items) |tab| tab.needs_reveal = true;
             } else repaint = false;
         } else if (ev.kind == 1) pointer(ev) else key(ev.ch);

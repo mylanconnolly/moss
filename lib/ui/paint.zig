@@ -70,8 +70,12 @@ pub fn button(b: Brush, r: Rect, label: []const u8, icon: ?icons.Icon, style: Bu
     if (!style.disabled and style.hovered) bg = palette.shade(bg, 9, 8);
     if (!style.disabled and style.pressed and style.hovered) bg = palette.shade(bg, 4, 5);
     const radius = if (style.pill) r.h / 2 else control.radius;
-    const ring = if (style.focused) p.focus else if (style.pill) bg else p.border;
-    const ring_w = if (style.focused) p.focus_w else if (style.pill) 0 else p.border_w;
+    // A pill has no outline — unless the palette has no raised surface to
+    // show its shape with (high contrast: the surface is the ground), when
+    // the outline is what makes it a pill at all.
+    const flat = p.surface_hi == p.bg;
+    const ring = if (style.focused) p.focus else if (style.pill and !flat) bg else p.border;
+    const ring_w = if (style.focused) p.focus_w else if (style.pill and !flat) 0 else p.border_w;
     b.canvas.panel(r.x, r.y, r.w, r.h, radius, bg, ring, ring_w);
     // A soft top highlight inside the rounded fill — a hint of depth, not
     // a hard bar (kept clear of the corners so it never pokes past them).
@@ -221,6 +225,38 @@ pub fn scrim(b: Brush, r: Rect) void {
 pub fn sheet(b: Brush, r: Rect) void {
     const p = b.pal;
     b.canvas.panel(r.x, r.y, r.w, r.h, sheet_radius, p.surface, p.window_border, @max(1, p.border_w));
+}
+
+// ------------------------------------------------------------ menu rows
+
+pub const MenuItemStyle = struct { selected: bool = false, enabled: bool = true };
+/// A menu row's height: a text line with the item padding; a separator
+/// is a third of a line.
+pub fn menuRowHeight(b: Brush) usize {
+    return b.line() + 16;
+}
+pub fn menuSeparatorHeight(b: Brush) usize {
+    return @max(9, b.line() / 3);
+}
+/// A rule between groups, inset from the popup's edges.
+pub fn menuSeparator(b: Brush, r: Rect) void {
+    b.canvas.fillRect(r.x + 12, r.y + r.h / 2, r.w -| 24, b.pal.border_w, b.pal.border);
+}
+/// One menu row: the label at the left, a shortcut hint at the right, the
+/// selected row lifted on a rounded primary band inset from the popup's
+/// edges, a disabled row in muted ink. `r` is the whole row across the
+/// popup; the painter knows nothing of which popup.
+pub fn menuItem(b: Brush, r: Rect, label: []const u8, shortcut: []const u8, style: MenuItemStyle) void {
+    const p = b.pal;
+    const selected = style.selected and style.enabled;
+    const bg = if (selected) p.primary else p.surface;
+    const ink = if (!style.enabled) p.text_muted else if (selected) p.primary_ink else p.text;
+    if (selected) b.canvas.fillRoundRect(r.x + 4, r.y, r.w -| 8, r.h, 4, bg);
+    const ty = r.y + (r.h -| b.line()) / 2;
+    const sw = b.width(shortcut);
+    const gap: usize = if (sw > 0) 24 else 0;
+    b.face.drawTrunc(b.canvas, r.x + 12, ty, .ui, label, r.w -| (24 + sw + gap), ink, bg);
+    if (sw > 0 and sw + 24 < r.w) b.face.draw(b.canvas, r.x + r.w - 12 - sw, ty, .ui, shortcut, ink, bg);
 }
 
 // ------------------------------------------------------------ tab strip
@@ -549,4 +585,34 @@ test "a button's hover lifts and its press sinks the fill; danger and pills have
     try std.testing.expectEqual(p.surface_hi, bench.canvas.at(r.x + r.w / 2, r.y));
     try std.testing.expectEqual(@as(u32, 0x010101), bench.canvas.at(r.x, r.y));
     try std.testing.expectEqual(@as(u32, 0x010101), bench.canvas.at(r.x + 2, r.y + 2));
+    // At high contrast the raised surface is the ground, so a pill keeps
+    // its shape with an outline instead.
+    var hc: Bench = .{ .pal = palette.resolve(.dark, .high, .default) };
+    const hb = hc.brush();
+    hc.canvas.fillAll(0x010101);
+    button(hb, r, "Files", null, .{ .pill = true });
+    try std.testing.expectEqual(hb.pal.border, hc.canvas.at(r.x + r.w / 2, r.y));
+}
+
+test "a menu row lifts its selection on the primary band, mutes a disabled one, and keeps the shortcut at the right" {
+    var bench: Bench = .{};
+    const b = bench.brush();
+    const p = b.pal;
+    const r: Rect = .{ .x = 0, .y = 0, .w = 200, .h = menuRowHeight(b) };
+    menuItem(b, r, "Save", "Cmd S", .{});
+    try std.testing.expectEqual(@as(usize, 0), countColor(&bench.canvas, r, p.primary));
+    try std.testing.expect(countColor(&bench.canvas, .{ .x = 12, .y = 0, .w = 60, .h = r.h }, p.text) > 0); // the label
+    try std.testing.expect(countColor(&bench.canvas, .{ .x = 140, .y = 0, .w = 60, .h = r.h }, p.text) > 0); // the shortcut
+    menuItem(b, r, "Save", "Cmd S", .{ .selected = true });
+    try std.testing.expectEqual(p.primary, bench.canvas.at(100, 2));
+    try std.testing.expectEqual(@as(u32, 0x010101), bench.canvas.at(1, 2)); // the band is inset
+    try std.testing.expect(countColor(&bench.canvas, r, p.primary_ink) > 0);
+    bench.canvas.fillAll(0x010101);
+    menuItem(b, r, "Save", "", .{ .selected = true, .enabled = false });
+    try std.testing.expectEqual(@as(usize, 0), countColor(&bench.canvas, r, p.primary)); // no band for a disabled row
+    try std.testing.expect(countColor(&bench.canvas, r, p.text_muted) > 0);
+    const sep: Rect = .{ .x = 0, .y = 30, .w = 200, .h = menuSeparatorHeight(b) };
+    menuSeparator(b, sep);
+    try std.testing.expectEqual(p.border, bench.canvas.at(100, 30 + sep.h / 2));
+    try std.testing.expectEqual(@as(u32, 0x010101), bench.canvas.at(2, 30 + sep.h / 2));
 }

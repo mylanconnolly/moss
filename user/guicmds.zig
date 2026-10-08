@@ -2411,7 +2411,7 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
     }
     wf.win_x = (wf.scanout_w - wf.win_w) / 2;
     wf.fontReady(); // attach the system font once (bitmap fallback if absent)
-    wf.refreshAppearance(); // resolve the palette from the system/user settings
+    _ = wf.refreshAppearance(); // resolve the palette from the system/user settings
     var epoch: @import("guieval.zig").Epoch = .{};
     try epoch.begin(it, .{ .record = spec });
     defer epoch.deinit();
@@ -2663,6 +2663,14 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
                     break :input;
                 }
                 if (guipage.dirty() and !minimized and !wf.dragging) break :input;
+                // The appearance tick reaches every parked window: a theme
+                // or contrast change repaints an open window live, not
+                // when it is next opened.
+                if (wf.refreshAppearance()) {
+                    hovered = null;
+                    pressed = null;
+                    break :input;
+                }
                 if (app_tick_ms == 0) continue :input;
                 if (wf.dragging or minimized or pressed != null) continue :input;
                 ticked = true;
