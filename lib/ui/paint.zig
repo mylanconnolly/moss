@@ -42,19 +42,40 @@ pub fn controlHeight(b: Brush) usize {
 
 pub const ButtonStyle = struct {
     focused: bool = false,
+    /// The accent fill: the one action a form is for.
     primary: bool = false,
+    /// The destructive fill: a button that deletes or discards.
+    danger: bool = false,
     disabled: bool = false,
+    /// The pointer is over it (the fill lifts) / it is held down over it
+    /// (the fill sinks) — the feedback a hand expects before the release
+    /// that fires it.
+    hovered: bool = false,
+    pressed: bool = false,
+    /// A pill: fully rounded ends, no outline, no highlight — the dock's
+    /// launchers, which read as a row of tokens rather than form buttons.
+    pill: bool = false,
 };
 
-/// A raised button: a rounded panel, an optional leading icon, a centred
-/// (or icon-led) label ellipsized to fit. Disabled buttons keep their
-/// shape and mute their ink; focus thickens the outline in the focus
-/// colour — never the only cue, the label still says what it is.
+/// A raised button: a rounded panel with a soft highlight along its top
+/// edge, an optional leading icon, a centred (or icon-led) label
+/// ellipsized to fit. Primary and danger give it semantic colour;
+/// disabled keeps the shape and mutes the ink; focus thickens the
+/// outline in the focus colour — never the only cue, the label still
+/// says what it is; hover lifts the fill and a press sinks it.
 pub fn button(b: Brush, r: Rect, label: []const u8, icon: ?icons.Icon, style: ButtonStyle) void {
     const p = b.pal;
-    const bg = if (style.primary and !style.disabled) p.primary else p.surface_hi;
-    const ink = if (style.disabled) p.text_muted else if (style.primary) p.primary_ink else p.text;
-    b.canvas.panel(r.x, r.y, r.w, r.h, control.radius, bg, if (style.focused) p.focus else p.border, if (style.focused) p.focus_w else p.border_w);
+    var bg = if (style.disabled) (if (style.pill) p.surface_hi else p.surface) else if (style.primary) p.primary else if (style.danger) p.danger else p.surface_hi;
+    const ink = if (style.disabled) p.text_muted else if (style.primary and !style.disabled) p.primary_ink else if (style.danger) p.danger_ink else p.text;
+    if (!style.disabled and style.hovered) bg = palette.shade(bg, 9, 8);
+    if (!style.disabled and style.pressed and style.hovered) bg = palette.shade(bg, 4, 5);
+    const radius = if (style.pill) r.h / 2 else control.radius;
+    const ring = if (style.focused) p.focus else if (style.pill) bg else p.border;
+    const ring_w = if (style.focused) p.focus_w else if (style.pill) 0 else p.border_w;
+    b.canvas.panel(r.x, r.y, r.w, r.h, radius, bg, ring, ring_w);
+    // A soft top highlight inside the rounded fill — a hint of depth, not
+    // a hard bar (kept clear of the corners so it never pokes past them).
+    if (!style.pill) b.canvas.fillRect(r.x + radius, r.y + ring_w, r.w -| (2 * radius), 1, palette.shade(bg, 6, 5));
     const size = b.icon_px;
     const has_icon = icon != null and r.w >= size + 16 + (if (label.len > 0) b.width(label) + @as(usize, 8) else 0);
     const inset: usize = if (has_icon) size + 8 else 0;
@@ -499,4 +520,33 @@ test "a sheet floats on a scrim that dims what is behind it" {
     try std.testing.expectEqual(b.pal.surface, bench.canvas.at(100, 30));
     try std.testing.expectEqual(b.pal.window_border, bench.canvas.at(100, 10));
     try std.testing.expectEqual(dimmed, bench.canvas.at(5, 5)); // the scrim outside the sheet stays
+}
+
+test "a button's hover lifts and its press sinks the fill; danger and pills have their own look" {
+    var bench: Bench = .{};
+    const b = bench.brush();
+    const p = b.pal;
+    const r: Rect = .{ .x = 10, .y = 10, .w = 120, .h = controlHeight(b) };
+    button(b, r, "", null, .{});
+    const plain = bench.canvas.at(20, r.y + 6);
+    try std.testing.expectEqual(p.surface_hi, plain);
+    button(b, r, "", null, .{ .hovered = true });
+    const lifted = bench.canvas.at(20, r.y + 6);
+    try std.testing.expect(lifted != plain);
+    button(b, r, "", null, .{ .hovered = true, .pressed = true });
+    const sunk = bench.canvas.at(20, r.y + 6);
+    try std.testing.expect(sunk != lifted and sunk != plain);
+    // A press with the pointer elsewhere is no press (the release will cancel).
+    button(b, r, "", null, .{ .pressed = true });
+    try std.testing.expectEqual(plain, bench.canvas.at(20, r.y + 6));
+    button(b, r, "Delete", null, .{ .danger = true });
+    try std.testing.expectEqual(p.danger, bench.canvas.at(20, r.y + 6));
+    try std.testing.expect(countColor(&bench.canvas, r, p.danger_ink) > 0);
+    // A pill has no outline: its top-edge pixel is the fill, and the corner
+    // is fully round (the ground shows at the corner's own pixel).
+    bench.canvas.fillAll(0x010101);
+    button(b, r, "Files", null, .{ .pill = true });
+    try std.testing.expectEqual(p.surface_hi, bench.canvas.at(r.x + r.w / 2, r.y));
+    try std.testing.expectEqual(@as(u32, 0x010101), bench.canvas.at(r.x, r.y));
+    try std.testing.expectEqual(@as(u32, 0x010101), bench.canvas.at(r.x + 2, r.y + 2));
 }

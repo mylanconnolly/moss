@@ -1263,10 +1263,8 @@ fn layoutLabel(rec: mshl.Record, x: usize, y: usize, avail_w: usize, paint: bool
     return .{ .w = width, .h = @max(1, lines) * lineOf(role) };
 }
 
-/// A raised button: a filled box with a lighter top edge and a darker
-/// bottom edge (a little depth, not flat), a border, and — when focused —
-/// a bright ring. `variant` gives it semantic colour: primary
-/// (the accent), danger (destructive), or the neutral surface default.
+/// A button's icon: `icon: "name"` from the catalog, `icon_only: true`
+/// to drop the label (the label still names the button for a drill).
 fn hasIcon(rec: mshl.Record) bool {
     return ui.icons.parse(strField(rec, "icon")) != null;
 }
@@ -1410,31 +1408,16 @@ fn drawButton(rec: mshl.Record, x: usize, y: usize, avail_w: usize) Size {
     const focused = !disabled and wf.win_focused and nfoc == sel_focus;
     const w = @min(avail_w, iconLabelWidth(rec, "label") + 2 * bpx);
     const h = @max(lineOf(R_UI), wf.iconSize()) + 2 * bpy;
-
-    var fill: u32 = pal.surface_hi;
-    var ink: u32 = pal.text;
-    if (std.mem.eql(u8, variant, "primary")) {
-        fill = pal.primary;
-        ink = pal.primary_ink;
-    } else if (std.mem.eql(u8, variant, "danger")) {
-        fill = pal.danger;
-        ink = pal.danger_ink;
-    }
-    if (disabled) {
-        fill = pal.surface;
-        ink = pal.text_muted;
-    }
-    // A rounded panel. Focus is a double cue (never colour alone): the
-    // border becomes a bright, thicker ring. Hover and press change the fill.
-    const ring = if (focused) pal.focus else pal.border;
-    const ring_w = if (focused) pal.focus_w else pal.border_w;
-    if (!disabled and hovered == nfoc) fill = shade(fill, 9, 8);
-    if (!disabled and pressed == nfoc and hovered == nfoc) fill = shade(fill, 4, 5);
-    panel(x, y, w, h, r_btn, fill, ring, ring_w);
-    // A soft top highlight inside the rounded fill — a hint of depth, not
-    // a hard bar (kept clear of the corners so it never pokes past them).
-    fillRect(x + r_btn, y + ring_w, w -| (2 * r_btn), 1, shade(fill, 6, 5));
-    drawIconLabel(rec, "label", x + bpx, y, w -| (2 * bpx), h, ink, fill);
+    // The toolkit paints it (lib/ui/paint.zig); this is the binding: the
+    // record's fields and the runtime's focus/hover/press state as a style.
+    ui.paint.button(wf.brush(), .{ .x = x, .y = y, .w = w, .h = h }, if (iconOnly(rec)) "" else strField(rec, "label"), ui.icons.parse(strField(rec, "icon")), .{
+        .focused = focused,
+        .primary = std.mem.eql(u8, variant, "primary"),
+        .danger = std.mem.eql(u8, variant, "danger"),
+        .disabled = disabled,
+        .hovered = !disabled and hovered == nfoc,
+        .pressed = !disabled and pressed == nfoc,
+    });
     if (!disabled and nfoc < focusables.len) {
         recordFocus(.{ .id = strField(rec, "id"), .is_field = false, .is_button = true, .bx = x, .by = y, .bw = w, .bh = h });
     }

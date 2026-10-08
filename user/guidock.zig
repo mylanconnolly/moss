@@ -15,11 +15,9 @@ const Value = core.Value;
 const declareStrut = core.declareStrut;
 const dockHeight = core.dockHeight;
 const dock_vpad = core.dock_vpad;
-const drawIconLabel = core.drawIconLabel;
 const fillAll = core.fillAll;
 const fillDot = core.fillDot;
 const fillRect = core.fillRect;
-const fillRoundRect = core.fillRoundRect;
 const iconLabelWidth = core.iconLabelWidth;
 const isDone = core.isDone;
 const item_vpad = core.item_vpad;
@@ -72,10 +70,10 @@ fn renderDock(tree: Value) void {
         const natural = iconLabelWidth(r, "title") + 2 * dock_hpad;
         const w = ui.flow.trackWidth(fitted, natural_width, before, natural);
         before += natural;
-        const fill = if (running) pal.primary else pal.surface_hi;
-        const ink = if (running) pal.primary_ink else pal.text;
-        fillRoundRect(x, py, w, pill_h, 10, fill);
-        drawIconLabel(r, "title", x + dock_hpad, py, w -| (2 * dock_hpad), pill_h, ink, fill);
+        // A pill is the toolkit's button in its pill style — the same
+        // painter as every window's buttons, so the dock wears the theme
+        // the windows do; a running app's pill takes the primary fill.
+        ui.paint.button(wf.brush(), .{ .x = x, .y = py, .w = w, .h = pill_h }, strField(r, "title"), ui.icons.parse(strField(r, "icon")), .{ .primary = running, .pill = true });
         if (running and wf.win_h > 4) fillDot(x + w / 2, wf.win_h - 4, 2, pal.primary);
         if (dock_nitems < dock_items.len) {
             // Log a pill's running state only when it flips (never the

@@ -3514,13 +3514,19 @@ fn guishellDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     if (!q.chord2("shift", "meta_l", "w")) return false;
     if (!try waitLogN(log_path, "editor: exit", 1, "clean handed-off tabs did not close", spec, polls)) return false;
     // Opening the first file again proves the save used the handed-off view.
+    // The 22-byte load was already logged once (the claimed handoff's tab),
+    // so wait for the next one, not the first: waiting for the first let
+    // the close chord below go out before the reopened Editor existed
+    // whenever the relaunch was slow (a load-dependent flake, 2026-10-08).
+    const loaded_before = countOccurrences(readLog(log_path), "editor: loaded zz-one.txt bytes=22");
     if (!clickScanout(&q, files[0], files[1])) return false;
     if (!try waitLogN(log_path, "dock: running explorer=true", 3, "Files did not relaunch for persistence check", spec, polls)) return false;
     sleepMs(200);
     if (!clickScanout(&q, fg[0], one_y)) return false;
     sleepMs(80);
     if (!clickScanout(&q, fg[0], one_y)) return false;
-    if (!try waitLogN(log_path, "editor: loaded zz-one.txt bytes=22", 1, "handoff save did not persist across Editor restart", spec, polls)) return false;
+    if (!try waitLogN(log_path, "editor: loaded zz-one.txt bytes=22", loaded_before + 1, "handoff save did not persist across Editor restart", spec, polls)) return false;
+    sleepMs(200); // the reopened Editor's window takes the focus a beat after it loads
     if (!q.chord2("shift", "meta_l", "w")) return false;
     if (!try waitLogN(log_path, "editor: exit", 2, "reopened Editor did not close", spec, polls)) return false;
 
