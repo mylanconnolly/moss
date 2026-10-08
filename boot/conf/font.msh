@@ -29,10 +29,12 @@
   contrast:     normal
   colors:       default
   # Keys a user's layer may NOT override — an administrator's enforced
-  # appearance. `theme` is locked here (the organisation mandates the dark
-  # theme): a user's font.msh can change scale, contrast and colours, but a
-  # `theme` it sets is ignored and the system value above (dark) stands.
+  # appearance. `colors` is locked here (the organisation mandates its
+  # own hues): a user's font.msh can change scale, theme and contrast,
+  # but a `colors` it sets is ignored and the system value above stands.
   # fontsvc reads this list and lib/settings honours it in every per-user
   # merge, so the lock holds for every program's type and palette at once.
-  locked: ["theme"]
+  # (The theme was the locked key until 2026-10-08; the desktop drills
+  # validate the light theme end to end now, so the lock moved.)
+  locked: ["colors"]
 }

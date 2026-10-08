@@ -3736,29 +3736,39 @@ fn guishellroDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     // ground all paint the palette's extreme (pure black in the dark
     // theme), and the slate ground comes back when the switch is turned
     // off again. Probed at points no text or pill covers.
-    for ([_]bool{ true, false }, 0..) |high, pass| {
-        const contrast = widgetCenter(readLog(log_path), "contrast") orelse return sfail(spec, log_path, "contrast switch geometry");
-        if (!clickScanout(&q, contrast[0], contrast[1])) return sfail(spec, log_path, "flip the contrast switch");
+    // Then the light theme the same way (the drill config locks colours,
+    // not the theme): the bar and the dock paint the light surface, the
+    // ground the light grey, and the dark slate comes back.
+    const Pass = struct { id: []const u8, name: []const u8, bar: [3]u8, ground: [3]u8 };
+    const passes = [_]Pass{
+        .{ .id = "contrast", .name = "contrast-high", .bar = .{ 0, 0, 0 }, .ground = .{ 0, 0, 0 } },
+        .{ .id = "contrast", .name = "contrast-normal", .bar = .{ 0x22, 0x25, 0x2a }, .ground = .{ 0x20, 0x28, 0x30 } },
+        .{ .id = "theme", .name = "theme-light", .bar = .{ 0xff, 0xff, 0xff }, .ground = .{ 0xd6, 0xda, 0xe0 } },
+        .{ .id = "theme", .name = "theme-dark", .bar = .{ 0x22, 0x25, 0x2a }, .ground = .{ 0x20, 0x28, 0x30 } },
+    };
+    for (passes, 0..) |pass, i| {
+        const sw = widgetCenter(readLog(log_path), pass.id) orelse return sfail(spec, log_path, "appearance switch geometry");
+        if (!clickScanout(&q, sw[0], sw[1])) return sfail(spec, log_path, "flip an appearance switch");
         sleepMs(150);
         const apply = widgetCenter(readLog(log_path), "apply") orelse return sfail(spec, log_path, "Apply geometry");
-        if (!clickScanout(&q, apply[0], apply[1])) return sfail(spec, log_path, "apply the contrast");
-        if (!try waitLogN(log_path, "gui: ready", 5 + pass, "Settings did not reopen after the contrast change", spec, polls)) return false;
+        if (!clickScanout(&q, apply[0], apply[1])) return sfail(spec, log_path, "apply the appearance");
+        if (!try waitLogN(log_path, "gui: ready", 5 + i, "Settings did not reopen after the appearance change", spec, polls)) return false;
         sleepMs(700); // the bar, the dock and the ground follow the appearance tick
-        const ppm = if (high) check_dir ++ "/settings-contrast-high.ppm" else check_dir ++ "/settings-contrast-normal.ppm";
-        if (!q.screendump(ppm)) return sfail(spec, log_path, "contrast screendump");
-        const img = readPpm(ppm) orelse return sfail(spec, log_path, "contrast screendump unreadable");
-        const Probe = struct { x: usize, y: usize, what: []const u8, high: [3]u8, normal: [3]u8 };
+        var pb: [80]u8 = undefined;
+        const ppm = std.fmt.bufPrint(&pb, "{s}/settings-{s}.ppm", .{ check_dir, pass.name }) catch return false;
+        if (!q.screendump(ppm)) return sfail(spec, log_path, "appearance screendump");
+        const img = readPpm(ppm) orelse return sfail(spec, log_path, "appearance screendump unreadable");
+        const Probe = struct { x: usize, y: usize, what: []const u8, want: [3]u8 };
         const probes = [_]Probe{
-            .{ .x = 600, .y = 4, .what = "top bar", .high = .{ 0, 0, 0 }, .normal = .{ 0x22, 0x25, 0x2a } },
-            .{ .x = 20, .y = 1020, .what = "dock", .high = .{ 0, 0, 0 }, .normal = .{ 0x22, 0x25, 0x2a } },
-            .{ .x = 100, .y = 300, .what = "desktop ground", .high = .{ 0, 0, 0 }, .normal = .{ 0x20, 0x28, 0x30 } },
+            .{ .x = 600, .y = 4, .what = "top bar", .want = pass.bar },
+            .{ .x = 20, .y = 1020, .what = "dock", .want = pass.bar },
+            .{ .x = 100, .y = 300, .what = "desktop ground", .want = pass.ground },
         };
         for (probes) |pr| {
-            const want = if (high) pr.high else pr.normal;
             const got = pixelAt(img, pr.x, pr.y);
-            if (!eqRgb(got, want[0], want[1], want[2])) {
-                std.debug.print("[FAIL] {s}: {s} at ({d},{d}) is {any}, wanted {any} with high contrast {}\n", .{ spec.name, pr.what, pr.x, pr.y, got, want, high });
-                return sfail(spec, log_path, "chrome did not follow the contrast change");
+            if (!eqRgb(got, pr.want[0], pr.want[1], pr.want[2])) {
+                std.debug.print("[FAIL] {s}: {s} at ({d},{d}) is {any}, wanted {any} after {s}\n", .{ spec.name, pr.what, pr.x, pr.y, got, pr.want, pass.name });
+                return sfail(spec, log_path, "chrome did not follow the appearance change");
             }
         }
     }
@@ -3782,6 +3792,16 @@ fn guishellroDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         if (!try waitLogN(log_path, "gui: menu item contrast", fired_before + 1, "the submenu item did not reach Settings", spec, polls)) return false;
         if (!try waitLogN(log_path, "accepted=true", 1, "the compositor refused the application key", spec, polls)) return false;
         sleepMs(200);
+        // Flip the switch back by hand, then Cmd S: the chord the "Apply
+        // changes" item names as its shortcut fires it (a no-op apply here).
+        const contrast = widgetCenter(readLog(log_path), "contrast") orelse return sfail(spec, log_path, "contrast switch geometry");
+        if (!clickScanout(&q, contrast[0], contrast[1])) return sfail(spec, log_path, "unflip the contrast switch");
+        sleepMs(150);
+        const ready = countOccurrences(readLog(log_path), "gui: ready");
+        if (!q.chord("meta_l", "s")) return sfail(spec, log_path, "press Cmd S");
+        if (!try waitLogN(log_path, "gui: shortcut apply", 1, "Cmd S did not fire the Apply item", spec, polls)) return false;
+        if (!try waitLogN(log_path, "gui: ready", ready + 1, "Settings did not reopen after the shortcut apply", spec, polls)) return false;
+        sleepMs(300);
     }
     // A non-administrator's Activity: the session init refuses the unit's
     // introspect grant, and the System tab says so instead of listing the

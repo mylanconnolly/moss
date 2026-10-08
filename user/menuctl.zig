@@ -65,16 +65,40 @@ pub fn menuSlot(token: u64, slot: u8) [shared.menus.title_bytes]u8 {
     }
     return result;
 }
-pub const CustomItem = struct { used: bool = false, menu: u8 = 0, key: u8 = 0, sub: u8 = 0, label: [shared.menus.label_bytes]u8 = @splat(0), len: u8 = 0 };
-/// A custom menu's item by index, its label read in two parts.
+pub const CustomItem = struct {
+    used: bool = false,
+    menu: u8 = 0,
+    key: u8 = 0,
+    sub: u8 = 0,
+    label: [shared.menus.label_bytes]u8 = @splat(0),
+    len: u8 = 0,
+    shortcut: [shared.menus.shortcut_bytes]u8 = @splat(0),
+    shortcut_len: u8 = 0,
+};
+/// A custom menu's item by index: its label read in two parts, then its
+/// shortcut hint (empty for none).
 pub fn menuItem(token: u64, index: u8) CustomItem {
     var item: CustomItem = .{};
-    for ([_]u1{ 0, 1 }) |part| {
-        const rep = call(wf.chan, .{ .menu_item = .{ .meta = shared.menus.packItemMeta(.{ .surface = @intCast(token & 0xffff_ffff), .index = index, .part = part, .menu = 0, .key = 0, .sub = 0 }) } }) orelse return item;
+    if (menuItemParts(token, index, &item)) {
+        const rep = call(wf.chan, .{ .menu_item = .{ .meta = shared.menus.packItemMeta(.{ .surface = @intCast(token & 0xffff_ffff), .index = index, .part = shared.menus.part_shortcut, .menu = 0, .key = 0, .sub = 0 }) } }) orelse return item;
+        if (rep == .menu_item) {
+            var buf: [24]u8 = undefined;
+            const text = shared.wordsToStr(&buf, .{ rep.menu_item.a, rep.menu_item.b, 0 });
+            const n = @min(text.len, item.shortcut.len);
+            @memcpy(item.shortcut[0..n], text[0..n]);
+            item.shortcut_len = @intCast(n);
+        }
+    }
+    return item;
+}
+/// The label parts; true when the item is in use.
+fn menuItemParts(token: u64, index: u8, item: *CustomItem) bool {
+    for ([_]u2{ 0, 1 }) |part| {
+        const rep = call(wf.chan, .{ .menu_item = .{ .meta = shared.menus.packItemMeta(.{ .surface = @intCast(token & 0xffff_ffff), .index = index, .part = part, .menu = 0, .key = 0, .sub = 0 }) } }) orelse return item.used;
         switch (rep) {
             .menu_item => |it| {
                 const meta = shared.menus.unpackItemMeta(it.meta);
-                if (meta.surface == 0) return item; // unused
+                if (meta.surface == 0) return false; // unused
                 item.used = true;
                 item.menu = meta.menu;
                 item.key = meta.key;
@@ -84,12 +108,12 @@ pub fn menuItem(token: u64, index: u8) CustomItem {
                 const n = @min(text.len, item.label.len - item.len);
                 @memcpy(item.label[item.len .. item.len + n], text[0..n]);
                 item.len += @intCast(n);
-                if (text.len < shared.menus.label_bytes / 2) return item; // no second part
+                if (text.len < shared.menus.label_bytes / 2) return true; // no second part
             },
-            else => return item,
+            else => return item.used,
         }
     }
-    return item;
+    return true;
 }
 
 /// Invoke a menu item on the application the token names. The

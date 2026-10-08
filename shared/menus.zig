@@ -29,17 +29,34 @@ pub fn appItemKey(index: usize) u8 {
 pub fn appItemIndex(key: u8) ?usize {
     return if (key >= app_item_base and key < app_item_base + max_app_items) key - app_item_base else null;
 }
-/// What `set_menu_item` and `menu_item` carry beside the label words:
-/// the surface (or, in a reply, nothing), the item's index, which half of
-/// the label the words hold, the menu slot it sits in, its key (0 for a
-/// separator or a submenu header) and the slot it opens (`sub`, 1-based,
-/// 0 for none).
-pub const ItemMeta = struct { surface: u32 = 0, index: u8, part: u1 = 0, menu: u8, key: u8, sub: u8 };
+/// What `set_menu_item` and `menu_item` carry beside the text words: the
+/// surface (or, in a reply, nothing), the item's index, which part the
+/// words hold (0 and 1 the label's halves, 2 the shortcut hint), the menu
+/// slot it sits in, its key (0 for a separator or a submenu header) and
+/// the slot it opens (`sub`, 1-based, 0 for none).
+pub const ItemMeta = struct { surface: u32 = 0, index: u8, part: u2 = 0, menu: u8, key: u8, sub: u8 };
+pub const part_shortcut: u2 = 2;
+pub const shortcut_bytes: usize = 16;
 pub fn packItemMeta(m: ItemMeta) u64 {
-    return @as(u64, m.surface) | (@as(u64, m.index) << 32) | (@as(u64, m.part) << 40) | (@as(u64, m.menu & 0xf) << 41) | (@as(u64, m.key) << 48) | (@as(u64, m.sub) << 56);
+    return @as(u64, m.surface) | (@as(u64, m.index) << 32) | (@as(u64, m.part) << 40) | (@as(u64, m.menu & 0xf) << 42) | (@as(u64, m.key) << 48) | (@as(u64, m.sub) << 56);
 }
 pub fn unpackItemMeta(w: u64) ItemMeta {
-    return .{ .surface = @truncate(w), .index = @truncate(w >> 32), .part = @truncate(w >> 40), .menu = @truncate((w >> 41) & 0xf), .key = @truncate(w >> 48), .sub = @truncate(w >> 56) };
+    return .{ .surface = @truncate(w), .index = @truncate(w >> 32), .part = @truncate(w >> 40), .menu = @truncate((w >> 42) & 0xf), .key = @truncate(w >> 48), .sub = @truncate(w >> 56) };
+}
+/// The chords a custom item's shortcut hint can name and have the window
+/// act on: the registry's own (`k.save_document` for "Cmd S" …), so the
+/// hint is the truth — pressing it fires the item. Null for a hint that
+/// is only text (the app handles its own chord, or none does).
+pub fn shortcutKey(hint: []const u8) ?u8 {
+    const table = [_]struct { hint: []const u8, key: u8 }{
+        .{ .hint = "Cmd S", .key = k.save_document },
+        .{ .hint = "Shift Cmd S", .key = k.save_as },
+        .{ .hint = "Cmd O", .key = k.open_document },
+        .{ .hint = "Cmd N", .key = k.new_document },
+        .{ .hint = "Cmd F", .key = k.find },
+    };
+    for (table) |row| if (std.mem.eql(u8, row.hint, hint)) return row.key;
+    return null;
 }
 /// `set_menu_title` / `menu_slot`: the surface (or token) and the slot.
 pub fn packSlot(surface_or_token: u64, slot: u8) u64 {
@@ -204,7 +221,9 @@ test "the custom profile offers its application keys and the Window menu, by the
     try std.testing.expect(profileFromInt(@intFromEnum(Profile.custom)) == .custom);
 }
 test "item and slot metadata survive packing" {
-    const m: ItemMeta = .{ .surface = 7, .index = 31, .part = 1, .menu = 5, .key = appItemKey(9), .sub = 3 };
+    const m: ItemMeta = .{ .surface = 7, .index = 31, .part = part_shortcut, .menu = 5, .key = appItemKey(9), .sub = 3 };
+    try std.testing.expectEqual(k.save_document, shortcutKey("Cmd S").?);
+    try std.testing.expect(shortcutKey("Cmd C") == null); // a field's own, never claimed
     const back = unpackItemMeta(packItemMeta(m));
     try std.testing.expectEqual(m, back);
     const sl = unpackSlot(packSlot(0x1234_5678_9abc, 7));

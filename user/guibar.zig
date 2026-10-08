@@ -421,10 +421,11 @@ fn fillFromMenu(p: *Popup, m: MenuHit) void {
 /// A custom menu slot's rows, in published order: a key item, a rule, or
 /// a submenu header.
 fn fillFromSlot(p: *Popup, slot: u8) void {
-    for (bar_custom.items) |item| {
+    for (&bar_custom.items) |*item| {
         if (!item.used or item.menu != slot or p.count == p.entries.len) continue;
         var entry: PopupItem = .{ .key = item.key, .sub = item.sub };
         setEntryLabel(&entry, item.label[0..item.len]);
+        entry.shortcut = item.shortcut[0..item.shortcut_len]; // the owned cache outlives the popup
         entry.separator = item.key == 0 and item.sub == 0;
         entry.enabled = item.sub != 0 or (item.key != 0 and shared.menus.allows(.custom, bar_app.enabled, item.key));
         p.entries[p.count] = entry;

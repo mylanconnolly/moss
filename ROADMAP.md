@@ -231,9 +231,9 @@ starting more than one guest (the second NIC is the one guest's).
 **Menu extensions.** ✅ Landed 2026-10-08 (DESIGN, "Menus beyond the
 profiles"): an application's own menus as the `custom` profile over
 application keys the compositor still validates, nested one level,
-popups that scroll past the room. Left for a later pass: shortcut
-hints on custom items, deeper nesting, items that change while a
-window is open.
+popups that scroll past the room; shortcut hints (real for the
+registry's chords) the same day. Left for a later pass: deeper
+nesting, items that change while a window is open.
 
 **Network settings (2026-09-17, in progress).** A Network tab in
 Settings — every NIC, DHCP or static addresses, gateway, resolvers —
@@ -2756,9 +2756,9 @@ supervises), and memory history per unit beside the CPU one.
   a component gallery, captured GUI pointer gestures, and Settings adoption. Keep GUI definitions in mshl and
   rendering/interaction in the toolkit; no new ambient authority or local-only
   protocol. See DESIGN's shared GUI layout section.
-- Next: what the 2026-10-08 passes left (above and under "Menu
-  extensions"): the light theme end to end, list rows and breadcrumbs
-  as toolkit painters, shortcut hints on custom menu items. Vertical
+- Next: what the 2026-10-08 passes left: list rows and breadcrumbs as
+  toolkit painters (the light theme is validated end to end and custom
+  items carry shortcut hints since the same day). Vertical
   viewports, focus reveal, wrapped labels, weighted rows, and stable
   focus IDs landed on 2026-09-12; menus beyond the built-in profiles
   and widget identity/lifetime landed on 2026-10-08; grid
@@ -2766,14 +2766,13 @@ supervises), and memory history per unit beside the CPU one.
   dialogs as data in the view landed on 2026-10-08 (DESIGN, "Switches,
   grids and sheets"); the same day, one button painter (the dock's
   pills included), widget identity and lifetime by render with every
-  limit named, and the visual system carried to the edges — the
-  popup rows, the compositor's ground, live palette refresh in every
-  resident loop and open window, a high-contrast pass over the whole
-  desktop in the guishellro drill (DESIGN, "The visual system carried
-  to the edges"). Still the runtime's own painters: list rows and
-  breadcrumbs. Not validated yet: the light theme end to end (the
-  drills' system config locks the theme dark; a light-theme pass needs
-  a profile whose config does not).
+  limit named, the visual system carried to the edges — the popup
+  rows, the compositor's ground, live palette refresh in every
+  resident loop and open window, high-contrast and light-theme passes
+  over the whole desktop in the guishellro drill (DESIGN, "The visual
+  system carried to the edges", "Shortcut hints, and the light theme
+  validated"). Still the runtime's own painters: list rows and
+  breadcrumbs.
 
 **GUI resource capacity**
 

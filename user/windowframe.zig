@@ -801,7 +801,7 @@ pub fn setMenuProfile(profile: shared.menus.Profile, enabled: u64) void {
 /// surface (a re-created surface is published again), before
 /// `setMenuProfile(.custom, mask)`. Labels longer than 16 bytes go in two
 /// parts, titles are 16 bytes.
-pub const MenuItemSpec = struct { menu: u8, key: u8, sub: u8, label: []const u8 };
+pub const MenuItemSpec = struct { menu: u8, key: u8, sub: u8, label: []const u8, shortcut: []const u8 = "" };
 var menu_items_surface: u64 = 0;
 pub fn publishMenu(titles: []const []const u8, items: []const MenuItemSpec) bool {
     if (surf == 0 or menu_items_surface == surf) return false;
@@ -818,6 +818,10 @@ pub fn publishMenu(titles: []const []const u8, items: []const MenuItemSpec) bool
             const rest = item.label[half..@min(item.label.len, shared.menus.label_bytes)];
             const w1 = shared.strToWords(rest);
             _ = menuCall(chan, .{ .set_menu_item = .{ .meta = shared.menus.packItemMeta(.{ .surface = @intCast(surf), .index = @intCast(i), .part = 1, .menu = item.menu, .key = item.key, .sub = item.sub }), .a = w1[0], .b = w1[1] } });
+        }
+        if (item.shortcut.len > 0) {
+            const w2 = shared.strToWords(item.shortcut[0..@min(item.shortcut.len, shared.menus.shortcut_bytes)]);
+            _ = menuCall(chan, .{ .set_menu_item = .{ .meta = shared.menus.packItemMeta(.{ .surface = @intCast(surf), .index = @intCast(i), .part = shared.menus.part_shortcut, .menu = item.menu, .key = item.key, .sub = item.sub }), .a = w2[0], .b = w2[1] } });
         }
     }
     menu_items_surface = surf;

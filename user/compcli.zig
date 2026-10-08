@@ -126,6 +126,8 @@ fn menuProbe(control: u64, log_h: u64) void {
     const l1 = shared.strToWords("by one, now");
     demand(call(disp, .{ .set_menu_item = .{ .meta = shared.menus.packItemMeta(.{ .surface = @intCast(a), .index = 0, .part = 0, .menu = 0, .key = shared.menus.appItemKey(0), .sub = 0 }), .a = l0[0], .b = l0[1] } }) == .ok);
     demand(call(disp, .{ .set_menu_item = .{ .meta = shared.menus.packItemMeta(.{ .surface = @intCast(a), .index = 0, .part = 1, .menu = 0, .key = shared.menus.appItemKey(0), .sub = 0 }), .a = l1[0], .b = l1[1] } }) == .ok);
+    const sc = shared.strToWords("Cmd S");
+    demand(call(disp, .{ .set_menu_item = .{ .meta = shared.menus.packItemMeta(.{ .surface = @intCast(a), .index = 0, .part = shared.menus.part_shortcut, .menu = 0, .key = shared.menus.appItemKey(0), .sub = 0 }), .a = sc[0], .b = sc[1] } }) == .ok);
     const l2 = shared.strToWords("Disabled");
     demand(call(disp, .{ .set_menu_item = .{ .meta = shared.menus.packItemMeta(.{ .surface = @intCast(a), .index = 1, .part = 0, .menu = 0, .key = shared.menus.appItemKey(1), .sub = 0 }), .a = l2[0], .b = l2[1] } }) == .ok);
     demand(call(disp, .{ .set_menu = .{ .surface = a, .profile = custom, .enabled = ~shared.menus.bit(shared.menus.appItemKey(1)) } }) == .ok);
@@ -152,6 +154,13 @@ fn menuProbe(control: u64, log_h: u64) void {
         else => usys.exit(195),
     };
     demand(std.mem.eql(u8, label[0..label_len], "Increment count by one, now"));
+    switch (call(control, .{ .menu_item = .{ .meta = shared.menus.packItemMeta(.{ .surface = @intCast(custom_token), .index = 0, .part = shared.menus.part_shortcut, .menu = 0, .key = 0, .sub = 0 }) } })) {
+        .menu_item => |it| {
+            var sb: [24]u8 = undefined;
+            demand(std.mem.eql(u8, shared.wordsToStr(&sb, .{ it.a, it.b, 0 }), "Cmd S"));
+        },
+        else => usys.exit(197),
+    }
     demand(call(control, .{ .menu_invoke = .{ .token = custom_token, .key = shared.menus.appItemKey(1) } }) == .gpu_err); // disabled in the mask
     demand(call(control, .{ .menu_invoke = .{ .token = custom_token, .key = shared.keyboard.save_document } }) == .gpu_err); // not the custom profile's
     // Back to a catalog profile: the schema is gone with it.

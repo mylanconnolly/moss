@@ -33,9 +33,12 @@ def loc-sample [tag] {
   }
 }
 
-def theme-locked [] {
-  (appearance) | get "theme_locked"
+# An appearance axis the system layer locks (`locked:` in conf/font.msh):
+# its switch is shown managed and disabled.
+def locked [k] {
+  (appearance) | get ($k + "_locked")
 }
+def theme-locked [] { (locked "theme") }
 
 # An action ends the window (`done`); the loop below acts on it and may
 # reopen the window on the same tab.
@@ -54,9 +57,9 @@ def personal-page [state] {
               { kind: "button", id: "larger", label: "Larger" }
             ] }
           { kind: "column", gap: 8, children: [
-              { kind: "toggle", id: "theme", label: (match (theme-locked) { true => "Light theme (managed)"; _ => "Light theme" }), on: ($state.theme == "light"), disabled: (theme-locked) }
-              { kind: "toggle", id: "contrast", label: "High contrast", on: ($state.contrast == "high") }
-              { kind: "toggle", id: "colors", label: "Colourblind-safe colours", on: ($state.colors == "cb-safe") }
+              { kind: "toggle", id: "theme", label: (match (locked "theme") { true => "Light theme (managed)"; _ => "Light theme" }), on: ($state.theme == "light"), disabled: (locked "theme") }
+              { kind: "toggle", id: "contrast", label: (match (locked "contrast") { true => "High contrast (managed)"; _ => "High contrast" }), on: ($state.contrast == "high"), disabled: (locked "contrast") }
+              { kind: "toggle", id: "colors", label: (match (locked "colors") { true => "Colourblind-safe colours (managed)"; _ => "Colourblind-safe colours" }), on: ($state.colors == "cb-safe"), disabled: (locked "colors") }
             ] }
           { kind: "row", children: [
               { kind: "button", id: "myloc", label: ("Language: " + $state.myloc) }
@@ -242,7 +245,7 @@ while $running {
   let r = (gui {
       menus: {
         Settings: [
-          { text: "Apply changes", id: "apply" }
+          { text: "Apply changes", id: "apply", shortcut: "Cmd S" }
           "-"
           { text: "Appearance", items: [
               { text: "High contrast", id: "contrast" }

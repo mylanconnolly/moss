@@ -770,6 +770,11 @@ const CustomItem = struct {
     sub: u8 = 0,
     id: [32]u8 = @splat(0),
     id_len: u8 = 0,
+    /// The shortcut hint shown beside the label; a chord the registry
+    /// produces (`shared.menus.shortcutKey`) also fires the item here.
+    shortcut: [shared.menus.shortcut_bytes]u8 = @splat(0),
+    shortcut_len: u8 = 0,
+    chord: u8 = 0,
 };
 const CustomMenus = struct {
     titles: [shared.menus.max_menus][shared.menus.title_bytes]u8 = @splat(@splat(0)),
@@ -792,13 +797,16 @@ fn customSlot(title: []const u8) ?u8 {
     c.nslots += 1;
     return @intCast(c.nslots - 1);
 }
-fn customItem(slot: u8, label: []const u8, key: u8, sub: u8, id: []const u8) void {
+fn customItem(slot: u8, label: []const u8, key: u8, sub: u8, id: []const u8, shortcut: []const u8) void {
     const c = &custom_menus;
     if (c.nitems == shared.menus.max_app_items) {
         warn("custom menu items (32); this one is dropped", label);
         return;
     }
     var item: CustomItem = .{ .menu = slot, .key = key, .sub = sub };
+    item.shortcut_len = @intCast(@min(shortcut.len, item.shortcut.len));
+    @memcpy(item.shortcut[0..item.shortcut_len], shortcut[0..item.shortcut_len]);
+    if (key != 0) item.chord = shared.menus.shortcutKey(shortcut) orelse 0;
     item.label_len = @intCast(@min(label.len, item.label.len));
     @memcpy(item.label[0..item.label_len], label[0..item.label_len]);
     item.id_len = @intCast(@min(id.len, item.id.len));
@@ -808,7 +816,7 @@ fn customItem(slot: u8, label: []const u8, key: u8, sub: u8, id: []const u8) voi
 }
 fn customItems(slot: u8, list: []const Value, depth: usize) void {
     for (list) |entry| switch (entry) {
-        .str => |s| if (std.mem.eql(u8, s, "-")) customItem(slot, "", 0, 0, ""),
+        .str => |s| if (std.mem.eql(u8, s, "-")) customItem(slot, "", 0, 0, "", ""),
         .record => |r| {
             const text = strField(r, "text");
             const nested = if (r.get("items")) |v| (if (v == .list) v.list else null) else null;
@@ -818,7 +826,7 @@ fn customItems(slot: u8, list: []const Value, depth: usize) void {
                     continue;
                 }
                 const sub = customSlot(text) orelse continue;
-                customItem(slot, text, 0, sub + 1, "");
+                customItem(slot, text, 0, sub + 1, "", "");
                 customItems(sub, sub_list, depth + 1);
                 continue;
             }
@@ -826,7 +834,7 @@ fn customItems(slot: u8, list: []const Value, depth: usize) void {
             // routes it back as that application key.
             const key = shared.menus.appItemKey(custom_menus.nitems);
             if (custom_menus.nitems < shared.menus.max_app_items and (if (r.get("disabled")) |d| d.asBool() else false)) custom_menus.disabled |= shared.menus.bit(key);
-            customItem(slot, text, key, 0, strField(r, "id"));
+            customItem(slot, text, key, 0, strField(r, "id"), strField(r, "shortcut"));
         },
         else => {},
     };
@@ -848,7 +856,7 @@ fn publishCustomMenus() void {
     var titles: [shared.menus.max_menus][]const u8 = undefined;
     for (0..c.nslots) |i| titles[i] = c.titles[i][0..c.title_len[i]];
     var items: [shared.menus.max_app_items]wf.MenuItemSpec = undefined;
-    for (0..c.nitems) |i| items[i] = .{ .menu = c.items[i].menu, .key = c.items[i].key, .sub = c.items[i].sub, .label = c.items[i].label[0..c.items[i].label_len] };
+    for (0..c.nitems) |i| items[i] = .{ .menu = c.items[i].menu, .key = c.items[i].key, .sub = c.items[i].sub, .label = c.items[i].label[0..c.items[i].label_len], .shortcut = c.items[i].shortcut[0..c.items[i].shortcut_len] };
     if (wf.publishMenu(titles[0..c.nslots], items[0..c.nitems])) {
         var lb: [80]u8 = undefined;
         _ = usys.log(log_h, std.fmt.bufPrint(&lb, "gui: menus published slots={d} items={d}", .{ c.nslots, c.nitems }) catch "gui: menus published");
@@ -2970,6 +2978,16 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
                     _ = usys.log(log_h, std.fmt.bufPrint(&lb, "gui: menu item {s}", .{fired.?}) catch "gui: menu item");
                 }
                 break :input;
+            };
+            // A chord a custom item names as its shortcut (Cmd S for an
+            // "Apply" item): the hint is the truth, the chord fires it.
+            if (menu_profile == .custom and ch != 0) for (custom_menus.items[0..custom_menus.nitems]) |item| {
+                if (item.chord == ch and item.id_len > 0 and (custom_menus.disabled & shared.menus.bit(item.key)) == 0) {
+                    fired = item.id[0..item.id_len];
+                    var lb: [96]u8 = undefined;
+                    _ = usys.log(log_h, std.fmt.bufPrint(&lb, "gui: shortcut {s}", .{fired.?}) catch "gui: shortcut");
+                    break :input;
+                }
             };
             if (menu_profile == .files) {
                 switch (ch) {

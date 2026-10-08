@@ -123,6 +123,8 @@ const MenuItemRec = struct {
     sub: u8 = 0,
     label: [shared.menus.label_bytes]u8 = @splat(0),
     label_len: u8 = 0,
+    shortcut: [shared.menus.shortcut_bytes]u8 = @splat(0),
+    shortcut_len: u8 = 0,
 };
 const Surface = struct {
     used: bool = false,
@@ -1558,9 +1560,13 @@ fn serveSurfaces(chan_h: u64) noreturn {
                     item.* = .{ .used = true, .menu = m.menu, .key = m.key, .sub = m.sub };
                     @memcpy(item.label[0..n], part[0..n]);
                     item.label_len = @intCast(n);
-                } else if (item.used and item.label_len == half) {
+                } else if (m.part == 1 and item.used and item.label_len == half) {
                     @memcpy(item.label[half .. half + n], part[0..n]);
                     item.label_len = @intCast(half + n);
+                } else if (m.part == shared.menus.part_shortcut and item.used) {
+                    const sn = @min(part.len, shared.menus.shortcut_bytes);
+                    @memcpy(item.shortcut[0..sn], part[0..sn]);
+                    item.shortcut_len = @intCast(sn);
                 }
                 if (menu_app == m.surface) menu_token += 1;
                 _ = usys.replyTypedTo(shared.GpuResp, chan_h, .ok, 0, token);
@@ -1582,7 +1588,8 @@ fn serveSurfaces(chan_h: u64) noreturn {
                     const half = shared.menus.label_bytes / 2;
                     const lo = if (m.part == 0) 0 else half;
                     const hi = @min(@as(usize, item.label_len), lo + half);
-                    const words = shared.strToWords(if (item.used and hi > lo) item.label[lo..hi] else "");
+                    const text: []const u8 = if (!item.used) "" else if (m.part == shared.menus.part_shortcut) item.shortcut[0..item.shortcut_len] else if (hi > lo) item.label[lo..hi] else "";
+                    const words = shared.strToWords(text);
                     const meta = shared.menus.packItemMeta(.{ .surface = @intFromBool(item.used), .index = m.index, .part = m.part, .menu = item.menu, .key = item.key, .sub = item.sub });
                     _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .menu_item = .{ .meta = meta, .a = words[0], .b = words[1] } }, 0, token);
                     continue;

@@ -4594,6 +4594,23 @@ are text the bar shows; an app's chords are its own to handle), menus
 nested deeper than one level, and items that change while a window is
 open (the schema is the spec's; a dynamic item is a window's view).
 
+**Shortcut hints, and the light theme validated (2026-10-08).** A custom
+menu item may say `shortcut: "Cmd S"`: the hint travels as a third part
+of the item (16 bytes, `part_shortcut`) and the bar shows it at the
+row's right like the catalog's. It is more than text when it names a
+chord the registry already produces (`shared.menus.shortcutKey`: Cmd S,
+Shift Cmd S, Cmd O, Cmd N, Cmd F): the window fires the item when that
+key byte arrives, so the hint is the truth. Chords a text field owns
+(Cmd C/V/X/Z/A) are never claimed. Settings' "Apply changes" says Cmd S
+and the guishellro drill presses it. The drills' system config locked
+the theme, so the light theme had never been driven; the lock moved to
+`colors` (the lock itself is what the config demonstrates, Settings
+shows any locked axis as "(managed)" and disabled through one
+`locked` helper), and the guishellro appearance pass is four passes
+now — high contrast, back, light theme, back — probing the bar, the
+dock and the ground for the palette's values each time. The light
+theme's first full screenshot needed no fix.
+
 ### GUIs in mshl
 
 The console arc gave the substrate — surfaces, a compositor, keyboard
