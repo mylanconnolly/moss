@@ -281,6 +281,38 @@ var scrolls: [16]ScrollState = @splat(.{});
 var scroll_owner: usize = 0;
 var reveal_focus = true;
 var layout_overflow = false;
+/// Counts renders: a widget's runtime state (an edit buffer, a list's
+/// scroll, a breadcrumb's selection) remembers the render it was last
+/// painted in, which is its *lifetime* — present in the latest render, or
+/// absent and evictable when its table is full. Identity is the id.
+var render_serial: u32 = 0;
+/// A limit was hit: name it (which table, which id) at the point, rather
+/// than failing the window with a message that could mean six things.
+fn limitHit(what: []const u8, id: []const u8) void {
+    layout_overflow = true;
+    warn(what, id);
+}
+/// The same line for a limit the window survives (a shared slot, a tab
+/// strip that cannot be clicked): named, not fatal.
+fn warn(what: []const u8, id: []const u8) void {
+    var lb: [128]u8 = undefined;
+    _ = usys.log(log_h, std.fmt.bufPrint(&lb, "gui: limit: {s} ({s})", .{ what, id }) catch "gui: limit");
+}
+/// The entry to evict when a keyed table is full: one absent from the
+/// latest render, the longest absent first; null when every entry is in
+/// the view right now (then nothing can give way).
+fn evictable(comptime T: type, entries: []T) ?*T {
+    var pick: ?*T = null;
+    for (entries) |*e| {
+        if (e.last_seen >= render_serial) continue;
+        if (pick == null or e.last_seen < pick.?.last_seen) pick = e;
+    }
+    return pick;
+}
+fn logEvict(what: []const u8, old: []const u8, new: []const u8) void {
+    var lb: [128]u8 = undefined;
+    _ = usys.log(log_h, std.fmt.bufPrint(&lb, "gui: {s} {s} evicted for {s}", .{ what, old, new }) catch "gui: evicted");
+}
 var scroll_dirty = false;
 fn containsScroll(node: Value, id: []const u8) bool {
     if (node != .record) return false;
@@ -295,7 +327,7 @@ fn containsScroll(node: Value, id: []const u8) bool {
 fn scrollFor(id: []const u8) usize {
     for (scrolls[1..], 1..) |st, i| if (st.used and std.mem.eql(u8, st.id[0..st.len], id)) {
         if (st.seen) {
-            layout_overflow = true;
+            limitHit("duplicate scroll id", id);
             return 0;
         }
         return i;
@@ -305,12 +337,12 @@ fn scrollFor(id: []const u8) usize {
         @memcpy(st.id[0..st.len], id[0..st.len]);
         return i;
     };
-    layout_overflow = true;
+    limitHit("scroll viewports", id);
     return 0;
 }
 fn recordFocus(f: Focus) void {
     if (nfoc == focusables.len) {
-        layout_overflow = true;
+        limitHit("focusable widgets", f.id);
         return;
     }
     focusables[nfoc] = f;
@@ -410,9 +442,10 @@ fn paintViewport(node: Value, x: usize, y: usize, width: usize, height: usize, o
 // field's edit buffer), so the mshl app stays declarative: it emits the
 // rows, we remember where the user is in them. `key` resets scroll and
 // selection when the list's content changes (a new directory, say).
-const max_lists = 4;
+const max_lists = 8;
 const ListState = struct {
     used: bool = false,
+    last_seen: u32 = 0,
     id: [32]u8 = undefined,
     id_len: usize = 0,
     key: [48]u8 = undefined,
@@ -442,14 +475,24 @@ fn listFor(id: []const u8, key: []const u8) *ListState {
     }
     if (slot == null) {
         for (&list_states) |*l| if (!l.used) {
-            l.* = .{ .used = true };
-            l.id_len = @min(id.len, l.id.len);
-            @memcpy(l.id[0..l.id_len], id[0..l.id_len]);
             slot = l;
             break;
         };
+        // Full: a list that left the view gives its slot up; one still in
+        // the view cannot, and the newcomer shares the first slot (said so).
+        if (slot == null) if (evictable(ListState, &list_states)) |e| {
+            logEvict("list", e.id[0..e.id_len], id);
+            slot = e;
+        } else {
+            warn("lists; the newcomer shares the first slot", id);
+            slot = &list_states[0];
+        };
+        slot.?.* = .{ .used = true };
+        slot.?.id_len = @min(id.len, slot.?.id.len);
+        @memcpy(slot.?.id[0..slot.?.id_len], id[0..slot.?.id_len]);
     }
-    const l = slot orelse &list_states[0];
+    const l = slot.?;
+    l.last_seen = render_serial;
     if (!std.mem.eql(u8, l.key[0..l.key_len], key)) {
         l.key_len = @min(key.len, l.key.len);
         @memcpy(l.key[0..l.key_len], key[0..l.key_len]);
@@ -475,9 +518,10 @@ fn hitWidget(n: usize, x: usize, y: usize) ?usize {
 // the view's `value` when the field first appears. The app's `update`
 // sees the committed text only when a button fires (in the event's
 // `fields`), so it stays a pure function of coarse events, not keystrokes.
-const max_fields = 8;
+const max_fields = 16;
 const FieldBuf = struct {
     used: bool = false,
+    last_seen: u32 = 0,
     id: [32]u8 = undefined,
     id_len: usize = 0,
     edit: ui.text.Editor = .{},
@@ -493,18 +537,32 @@ fn resetFields() void {
 /// The edit buffer for a field id, created (seeded from `seed`) on first sight.
 fn fieldFor(id: []const u8, seed: []const u8) *FieldBuf {
     for (&field_bufs) |*f| {
-        if (f.used and std.mem.eql(u8, f.id[0..f.id_len], id)) return f;
-    }
-    for (&field_bufs) |*f| {
-        if (!f.used) {
-            f.used = true;
-            f.id_len = @min(id.len, f.id.len);
-            @memcpy(f.id[0..f.id_len], id[0..f.id_len]);
-            f.edit.seed(seed);
+        if (f.used and std.mem.eql(u8, f.id[0..f.id_len], id)) {
+            f.last_seen = render_serial;
             return f;
         }
     }
-    return &field_bufs[0]; // more than max_fields: reuse the first slot
+    var slot: ?*FieldBuf = null;
+    for (&field_bufs) |*f| if (!f.used) {
+        slot = f;
+        break;
+    };
+    // Full: a field that left the view gives its buffer up (its text was
+    // ephemeral — the committed value is the app's); one still in the
+    // view cannot, and the newcomer shares the first slot (said so).
+    if (slot == null) if (evictable(FieldBuf, &field_bufs)) |e| {
+        logEvict("field", e.id[0..e.id_len], id);
+        slot = e;
+    } else {
+        warn("fields; the newcomer shares the first slot", id);
+        return &field_bufs[0];
+    };
+    const f = slot.?;
+    f.* = .{ .used = true, .last_seen = render_serial };
+    f.id_len = @min(id.len, f.id.len);
+    @memcpy(f.id[0..f.id_len], id[0..f.id_len]);
+    f.edit.seed(seed);
+    return f;
 }
 
 var field_drag: ?usize = null;
@@ -566,6 +624,7 @@ var sel_focus: usize = 0;
 /// window is a titlebar over a content area laid out by `drawNode`
 /// (columns stack, rows flow), everything coloured from `pal`.
 fn renderTree(tree: Value, title: []const u8, focus: usize) usize {
+    render_serial +%= 1;
     file_crumb = null;
     clipReset();
     fillAll(pal.bg);
@@ -1006,7 +1065,7 @@ const MshlTree = struct {
     pub fn viewportPaint(_: *MshlTree, n: Node, child: Node, x: usize, y: usize, w: usize, h: usize) Size {
         const id = strField(n.record, "id");
         if (id.len == 0 or id.len > 64) {
-            layout_overflow = true;
+            limitHit("scroll id length", id);
             return .{};
         }
         const owner = scrollFor(id);
@@ -1111,6 +1170,8 @@ fn layoutTabs(rec: mshl.Record, x: usize, y: usize, avail_w: usize, paint: bool)
     if (ntabhit < max_tab_strips) {
         tab_hits[ntabhit] = hit;
         ntabhit += 1;
+    } else {
+        warn("tab strips; this one cannot be clicked", id);
     }
     if (nfoc < focusables.len) recordFocus(.{ .id = id, .is_field = false, .bx = x, .by = y, .bw = avail_w, .bh = h });
     return .{ .w = avail_w, .h = h };
@@ -1284,6 +1345,7 @@ pub fn drawIconLabel(rec: mshl.Record, field: []const u8, x: usize, y: usize, w:
 }
 
 const Crumb = struct {
+    last_seen: u32 = 0,
     id: [64]u8 = undefined,
     id_len: usize = 0,
     path: [256]u8 = undefined,
@@ -1335,12 +1397,17 @@ fn crumbFor(id: []const u8, path: []const u8) ?*Crumb {
                 c.path_len = path.len;
                 c.selected = 0;
             }
+            c.last_seen = render_serial;
             return c;
         }
         if (c.id_len == 0 and empty == null) empty = c;
     }
+    if (empty == null) if (evictable(Crumb, &crumbs)) |e| {
+        logEvict("breadcrumbs", e.id[0..e.id_len], id);
+        empty = e;
+    };
     const c = empty orelse return null;
-    c.* = .{};
+    c.* = .{ .last_seen = render_serial };
     @memcpy(c.id[0..id.len], id);
     c.id_len = id.len;
     @memcpy(c.path[0..path.len], path);
@@ -1358,7 +1425,7 @@ fn layoutBreadcrumb(rec: mshl.Record, x: usize, y: usize, width: usize, paint: b
     const h = lineOf(R_UI) + 16;
     const state = if (paint) crumbFor(strField(rec, "id"), path) else null;
     if (paint and state == null) {
-        layout_overflow = true;
+        limitHit("breadcrumbs", strField(rec, "id"));
         return .{};
     }
     if (state) |c| {
@@ -2456,7 +2523,7 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
             }
             reveal_focus = false;
         }
-        if (layout_overflow) return it.fail("gui: too many widgets or invalid scroll id", .{});
+        if (layout_overflow) return it.fail("gui: a widget limit was hit; the log names it", .{});
         if (nfocus > 0 and focus >= nfocus) {
             focus = nfocus - 1;
             nfocus = renderTree(tree, title, focus);

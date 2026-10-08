@@ -4482,6 +4482,35 @@ and restored after. *Lesson:* a list that is reordered after it is
 built must be painted as if it were already in its final order — or
 every comparison made during the build is against the wrong index.
 
+**One button painter, and widget lifetime by render (2026-10-08).** Two
+drifts from the review list. The runtime's `drawButton` had painted
+beside the toolkit's `paint.button` since the split — hover, press, the
+danger variant and the soft top highlight lived only in guicmds — so
+`ButtonStyle` grew `hovered`, `pressed`, `danger` and `pill`, with pixel
+tests (hover lifts the fill, a press sinks it only while the pointer is
+over it, danger carries its own ink, a pill has no outline), and
+`drawButton` became a binding. The dock's launchers are the same painter
+in its pill style, so the dock wears whatever theme the windows do.
+
+The per-widget runtime state — edit buffers, list scroll and selection,
+breadcrumb selection — is keyed by id in fixed tables (16 fields, 8
+lists, 16 breadcrumb trails). Those tables used to fill silently: a
+ninth field shared the first slot with whatever was there, and nothing
+said so. Now every entry remembers the render it was last painted in
+(`render_serial`), which is its lifetime: present in the latest render,
+or absent and *evictable* when its table is full. A newcomer takes a
+free slot, else the longest-absent entry (logged: `gui: field X evicted
+for Y`), and only when every entry is in the view right now does it
+fall back to sharing the first slot — logged by name. Nothing is
+reclaimed while there is room, so a field hidden behind another tab
+keeps its half-typed text as before. Every other limit the runtime has
+— the focus list, the scroll viewports, a duplicate scroll id, the tab
+strips — logs `gui: limit: <what> (<id>)` at the point it is hit; the
+window's failure message now says to read that line instead of naming
+six possibilities. *Lesson (the third time this repo has paid for it):*
+a fixed table that falls back silently is a bug waiting for the view
+that grows; name the fallback where it happens.
+
 ### GUIs in mshl
 
 The console arc gave the substrate — surfaces, a compositor, keyboard
