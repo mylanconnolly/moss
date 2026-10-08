@@ -4611,6 +4611,19 @@ now — high contrast, back, light theme, back — probing the bar, the
 dock and the ground for the palette's values each time. The light
 theme's first full screenshot needed no fix.
 
+**List rows and breadcrumbs, the last painters out of the runtime
+(2026-10-08).** `paint.listHeader` (titles, the sorted one marked, the
+rule), `paint.listRow` (the selection band, a leading icon, text cells
+left or right-aligned, a sparkline cell as bars), `paint.listScrollbar`
+and `paint.breadcrumbs` with `crumbPlace`/`breadcrumbHit` (one flow the
+painter, the hit test and the geometry log share) are the toolkit's,
+pixel-tested, as functions of columns, cells and labels. The runtime
+keeps what only it has: the list's scroll and selection state, the clip
+to the viewport, the hit boxes, and the extraction of cells from the
+script's rows (a sparkline's samples are copied out of the mshl list
+into a stack buffer, 120 at most). With this, nothing a `gui` window
+paints is painted in guicmds any more except the meter and the chart.
+
 ### GUIs in mshl
 
 The console arc gave the substrate — surfaces, a compositor, keyboard

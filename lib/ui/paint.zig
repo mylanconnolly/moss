@@ -15,6 +15,7 @@ const Palette = @import("palette.zig").Palette;
 const icons = @import("icons.zig");
 const text = @import("text.zig");
 const tabs = @import("tabs.zig");
+const flow = @import("flow.zig");
 
 pub const Brush = struct {
     canvas: *const Canvas,
@@ -265,6 +266,172 @@ pub fn menuItem(b: Brush, r: Rect, label: []const u8, shortcut: []const u8, styl
     if (style.submenu) {
         if (caret + 24 < r.w) b.icon(.forward, caret, r.x + r.w - 12 - caret, r.y + (r.h -| caret) / 2, ink);
     } else if (sw > 0 and sw + 24 < r.w) b.face.draw(b.canvas, r.x + r.w - 12 - sw, ty, .ui, shortcut, ink, bg);
+}
+
+// ------------------------------------------------------------ list rows
+
+pub const list_row_vpad: usize = 6; // vertical padding within a list row
+pub const list_cell_pad: usize = 10; // left inset of the first cell
+pub fn listRowHeight(b: Brush) usize {
+    return b.line() + 2 * list_row_vpad;
+}
+/// A column: its title, its weight (a width in pixels, or a share of the
+/// row when the list fits its columns), and whether its cells sit at the
+/// right (numbers).
+pub const Column = struct { title: []const u8 = "", weight: usize = 80, right: bool = false };
+/// A cell: text, or a sparkline of permille samples (newest last).
+pub const Cell = union(enum) { text: []const u8, samples: []const u16 };
+/// Each column's pixel width: its weight as pixels, or — `fit` — a share
+/// of `tracks_w` by weight (drift-free, like a row's flex tracks).
+pub fn columnWidths(cols: []const Column, fit: bool, tracks_w: usize, out: []usize) void {
+    var total: usize = 0;
+    for (cols) |c| total += @max(c.weight, 1);
+    var before: usize = 0;
+    for (cols, 0..) |c, i| {
+        const weight = @max(c.weight, 1);
+        if (i < out.len) out[i] = if (fit) flow.trackWidth(tracks_w, total, before, weight) else weight;
+        before += weight;
+    }
+}
+/// The column titles, muted, the sorted one in full ink with a small
+/// mark after it, over a rule. `r` is the header band across the list's
+/// inner width; `widths` from `columnWidths`.
+pub fn listHeader(b: Brush, r: Rect, cols: []const Column, widths: []const usize, sort: ?usize, ground: u32) void {
+    const p = b.pal;
+    var hx = r.x + list_cell_pad;
+    for (cols, 0..) |c, i| {
+        const cw = widths[i];
+        const sorted = sort == i;
+        const mark_w: usize = if (sorted) 12 else 0;
+        const offset = if (c.right) (cw -| 8) -| (b.width(c.title) + mark_w) else 0;
+        b.face.drawTrunc(b.canvas, hx + offset, r.y + list_row_vpad, .ui, c.title, cw -| (8 + mark_w), if (sorted) p.text else p.text_muted, ground);
+        if (sorted) {
+            // A small triangle after the title.
+            const tx = hx + offset + @min(b.width(c.title), cw -| (8 + mark_w)) + 5;
+            const ty = r.y + list_row_vpad + b.line() / 2 - 1;
+            b.canvas.fillRect(tx, ty, 7, 1, p.text);
+            b.canvas.fillRect(tx + 1, ty + 1, 5, 1, p.text);
+            b.canvas.fillRect(tx + 2, ty + 2, 3, 1, p.text);
+            b.canvas.fillRect(tx + 3, ty + 3, 1, 1, p.text);
+        }
+        hx += cw;
+    }
+    b.canvas.fillRect(r.x, r.y + r.h -| p.border_w, r.w, p.border_w, p.border);
+}
+pub const ListRowStyle = struct {
+    selected: bool = false,
+    /// The list has the focus: a selected row takes the primary band;
+    /// unfocused, the raised surface.
+    focused: bool = false,
+    icon: ?icons.Icon = null,
+    ground: u32,
+};
+/// One row: the selection band, a leading icon, then the cells in their
+/// columns (the first inset by the icon; `right` cells right-aligned;
+/// a sparkline cell as bars on the row's ground). With no columns the
+/// first cell spans the row.
+pub fn listRow(b: Brush, r: Rect, cols: []const Column, widths: []const usize, cells: []const Cell, style: ListRowStyle) void {
+    const p = b.pal;
+    const bg = if (style.selected) (if (style.focused) p.primary else p.surface_hi) else style.ground;
+    if (style.selected) b.canvas.fillRect(r.x, r.y, r.w, r.h, bg);
+    const ink = if (style.selected and style.focused) p.primary_ink else p.text;
+    const icon_size = b.icon_px;
+    const icon_pad: usize = if (style.icon != null) icon_size + 8 else 0;
+    if (style.icon) |ic| b.icon(ic, icon_size, r.x + list_cell_pad, r.y + (r.h -| icon_size) / 2, if (style.selected and style.focused) p.primary_ink else p.primary);
+    const ty = r.y + list_row_vpad;
+    if (cols.len == 0) {
+        const first = if (cells.len > 0 and cells[0] == .text) cells[0].text else "";
+        b.face.drawTrunc(b.canvas, r.x + list_cell_pad + icon_pad, ty, .ui, first, r.w -| (2 * list_cell_pad + icon_pad), ink, bg);
+        return;
+    }
+    var cx = r.x + list_cell_pad;
+    for (cols, 0..) |c, ci| {
+        const cw = widths[ci];
+        const cell: Cell = if (ci < cells.len) cells[ci] else .{ .text = "" };
+        switch (cell) {
+            .samples => |samples| {
+                // One bar per sample, newest at the right, on the row's ground.
+                const n = samples.len;
+                const sw = cw -| 12;
+                const sh = b.line() -| 2;
+                if (n > 0 and sw >= 8) {
+                    const bw = @max(sw / @max(n, 30), 1);
+                    for (samples, 0..) |v, si| {
+                        const bar = @max(sh * v / 1000, if (v > 0) @as(usize, 1) else 0);
+                        if (bar == 0) continue;
+                        const bx = cx + 4 + sw -| (n - si) * bw;
+                        b.canvas.fillRect(bx, ty + 1 + sh - bar, bw, bar, if (v > 800) p.danger else if (style.selected and style.focused) p.primary_ink else p.primary);
+                    }
+                }
+            },
+            .text => |label| {
+                const inset = if (ci == 0) icon_pad else 0;
+                const offset = if (c.right) (cw -| 8) -| b.width(label) else inset;
+                b.face.drawTrunc(b.canvas, cx + offset, ty, .ui, label, cw -| (8 + offset), if (ci > 0 and !style.selected) p.text_muted else ink, bg);
+            },
+        }
+        cx += cw;
+    }
+}
+/// A vertical scrollbar: a track and a thumb proportional to the visible
+/// share, at `first` of `total` rows.
+pub fn listScrollbar(b: Brush, r: Rect, visible: usize, total: usize, first: usize, ground: u32) void {
+    const p = b.pal;
+    b.canvas.fillRect(r.x, r.y, r.w, r.h, palette.shade(ground, 5, 4));
+    if (total == 0) return;
+    const thumb_h = @max(r.h * visible / total, 16);
+    const span = r.h -| thumb_h;
+    const max_first = total -| visible;
+    const thumb_y = r.y + (if (max_first > 0) span * first / max_first else 0);
+    b.canvas.fillRect(r.x + 1, thumb_y, r.w -| 2, thumb_h, p.text_muted);
+}
+
+// ---------------------------------------------------------- breadcrumbs
+
+pub fn crumbHeight(b: Brush) usize {
+    return b.line() + 16;
+}
+pub fn crumbWidth(b: Brush, label: []const u8, last: bool, width: usize) usize {
+    return @min(width, b.width(label) + 20 + (if (last) @as(usize, 0) else 24));
+}
+/// Where each crumb sits in a strip of `width`: the same greedy flow the
+/// painter and the hit test share.
+pub fn crumbPlace(b: Brush, width: usize, labels: []const []const u8, index: usize) geometry.Placement {
+    var line = flow.Flow{ .width = width, .gap = 4 };
+    var place: geometry.Placement = .{ .x = 0, .y = 0, .w = 0 };
+    for (labels, 0..) |label, i| {
+        place = line.put(.{ .w = crumbWidth(b, label, i + 1 == labels.len, width), .h = crumbHeight(b) });
+        if (i == index) return place;
+    }
+    return place;
+}
+/// The trail: each ancestor as a link in the focus colour with a "›"
+/// after it, the last (the current place) in plain ink; the focused
+/// ancestor on a raised panel with the focus ring. Returns the strip's
+/// size (crumbs wrap when the strip is narrow).
+pub fn breadcrumbs(b: Brush, r: Rect, labels: []const []const u8, focused: ?usize, ground: u32) geometry.Size {
+    const p = b.pal;
+    const h = crumbHeight(b);
+    var line = flow.Flow{ .width = r.w, .gap = 4 };
+    for (labels, 0..) |label, i| {
+        const last = i + 1 == labels.len;
+        const place = line.put(.{ .w = crumbWidth(b, label, last, r.w), .h = h });
+        const label_w = place.w -| (if (last) @as(usize, 0) else 24);
+        if (focused == i and !last) b.canvas.panel(r.x + place.x, r.y + place.y, label_w, h, 4, p.surface_hi, p.focus, p.focus_w);
+        b.face.drawTrunc(b.canvas, r.x + place.x + 10, r.y + place.y + 8, .ui, label, label_w -| 20, if (last) p.text else p.focus, ground);
+        if (!last and place.w >= 24) b.face.draw(b.canvas, r.x + place.x + place.w - 19, r.y + place.y + 8, .ui, "›", p.text_muted, ground);
+    }
+    return line.size();
+}
+/// The ancestor under (x, y), strip-local, or null (the last crumb is
+/// the current place, not a link).
+pub fn breadcrumbHit(b: Brush, width: usize, labels: []const []const u8, x: usize, y: usize) ?usize {
+    for (labels, 0..) |_, i| {
+        if (i + 1 == labels.len) break;
+        const place = crumbPlace(b, width, labels, i);
+        if (x >= place.x and x < place.x + (place.w -| 24) and y >= place.y and y < place.y + crumbHeight(b)) return i;
+    }
+    return null;
 }
 
 // ------------------------------------------------------------ tab strip
@@ -631,4 +798,69 @@ test "a menu row lifts its selection on the primary band, mutes a disabled one, 
     menuSeparator(b, sep);
     try std.testing.expectEqual(p.border, bench.canvas.at(100, 30 + sep.h / 2));
     try std.testing.expectEqual(@as(u32, 0x010101), bench.canvas.at(2, 30 + sep.h / 2));
+}
+
+test "a list header marks the sorted column and rules below; a row bands its selection and right-aligns" {
+    var bench: Bench = .{};
+    const b = bench.brush();
+    const p = b.pal;
+    const cols = [_]Column{ .{ .title = "Name", .weight = 100 }, .{ .title = "Size", .weight = 80, .right = true } };
+    var widths: [2]usize = undefined;
+    columnWidths(&cols, false, 0, &widths);
+    try std.testing.expectEqual([2]usize{ 100, 80 }, widths);
+    columnWidths(&cols, true, 180, &widths);
+    try std.testing.expectEqual(@as(usize, 180), widths[0] + widths[1]);
+    const hr: Rect = .{ .x = 0, .y = 0, .w = 200, .h = listRowHeight(b) };
+    listHeader(b, hr, &cols, &widths, 1, 0x010101);
+    try std.testing.expectEqual(p.border, bench.canvas.at(100, hr.h - 1)); // the rule
+    try std.testing.expect(countColor(&bench.canvas, .{ .x = 0, .y = 0, .w = 100, .h = hr.h }, p.text_muted) > 0); // Name, unsorted
+    try std.testing.expect(countColor(&bench.canvas, .{ .x = 100, .y = 0, .w = 100, .h = hr.h }, p.text) > 0); // Size, sorted (+ its mark)
+    bench.canvas.fillAll(0x010101);
+    const rr: Rect = .{ .x = 0, .y = 0, .w = 200, .h = listRowHeight(b) };
+    const cells = [_]Cell{ .{ .text = "notes" }, .{ .text = "12" } };
+    listRow(b, rr, &cols, &widths, &cells, .{ .selected = true, .focused = true, .ground = 0x010101 });
+    try std.testing.expectEqual(p.primary, bench.canvas.at(5, 2)); // the band
+    try std.testing.expect(countColor(&bench.canvas, rr, p.primary_ink) > 0);
+    // Right-aligned: the size's ink ends near the right edge of its column.
+    try std.testing.expect(countColor(&bench.canvas, .{ .x = 100 + 50, .y = 0, .w = 30, .h = rr.h }, p.primary_ink) > 0);
+    try std.testing.expectEqual(@as(usize, 0), countColor(&bench.canvas, .{ .x = 100 + 8, .y = 0, .w = 20, .h = rr.h }, p.primary_ink));
+    // Unselected: text ink on the ground, second column muted.
+    bench.canvas.fillAll(0x010101);
+    listRow(b, rr, &cols, &widths, &cells, .{ .ground = 0x010101 });
+    try std.testing.expect(countColor(&bench.canvas, .{ .x = 0, .y = 0, .w = 100, .h = rr.h }, p.text) > 0);
+    try std.testing.expect(countColor(&bench.canvas, .{ .x = 100, .y = 0, .w = 100, .h = rr.h }, p.text_muted) > 0);
+    // A sparkline cell draws bars in the primary colour, high ones in danger.
+    bench.canvas.fillAll(0x010101);
+    const samples = [_]u16{ 100, 500, 900 };
+    const spark = [_]Cell{ .{ .text = "cpu" }, .{ .samples = &samples } };
+    listRow(b, rr, &cols, &widths, &spark, .{ .ground = 0x010101 });
+    try std.testing.expect(countColor(&bench.canvas, .{ .x = 100, .y = 0, .w = 100, .h = rr.h }, p.primary) > 0);
+    try std.testing.expect(countColor(&bench.canvas, .{ .x = 100, .y = 0, .w = 100, .h = rr.h }, p.danger) > 0);
+    // The scrollbar's thumb is proportional and at the top for `first` 0.
+    bench.canvas.fillAll(0x010101);
+    listScrollbar(b, .{ .x = 190, .y = 0, .w = 8, .h = 60 }, 10, 40, 0, 0x010101);
+    try std.testing.expectEqual(p.text_muted, bench.canvas.at(194, 2));
+    try std.testing.expect(bench.canvas.at(194, 50) != p.text_muted);
+}
+
+test "breadcrumbs flow, link every ancestor, ring the focused one, and hit-test the same places" {
+    var bench: Bench = .{};
+    const b = bench.brush();
+    const p = b.pal;
+    const labels = [_][]const u8{ "Home", "docs", "notes" };
+    // The fixed face is 8 px a glyph, so three crumbs need ~220 px: a
+    // 300 px strip (wider than the canvas; drawing clips) keeps one line.
+    const size = breadcrumbs(b, .{ .x = 0, .y = 0, .w = 300, .h = 60 }, &labels, 0, 0x010101);
+    try std.testing.expectEqual(crumbHeight(b), size.h); // one line
+    const all: Rect = .{ .x = 0, .y = 0, .w = 200, .h = 60 };
+    try std.testing.expect(countColor(&bench.canvas, all, p.focus) > 0); // links + the ring
+    const first = crumbPlace(b, 300, &labels, 0);
+    try std.testing.expectEqual(p.focus, bench.canvas.at(first.x + first.w / 2, 0)); // the ring's top edge
+    try std.testing.expectEqual(@as(?usize, 0), breadcrumbHit(b, 300, &labels, first.x + 4, 4));
+    const second = crumbPlace(b, 300, &labels, 1);
+    try std.testing.expectEqual(@as(?usize, 1), breadcrumbHit(b, 300, &labels, second.x + 4, 4));
+    const last = crumbPlace(b, 300, &labels, 2);
+    try std.testing.expectEqual(@as(?usize, null), breadcrumbHit(b, 300, &labels, last.x + 4, 4)); // not a link
+    // Too narrow for one line: the strip wraps.
+    try std.testing.expect(breadcrumbs(b, .{ .x = 0, .y = 0, .w = 70, .h = 60 }, &labels, null, 0x010101).h > crumbHeight(b));
 }

@@ -1524,15 +1524,19 @@ fn crumbFor(id: []const u8, path: []const u8) ?*Crumb {
     c.path_len = path.len;
     return c;
 }
-fn crumbWidth(part: ui.breadcrumbs.Part, last: bool, width: usize) usize {
-    return @min(width, strW(R_UI, part.label) + 20 + (if (last) @as(usize, 0) else 24));
+/// The trail's labels for the toolkit's breadcrumb painter: each ancestor
+/// of the path, the view's root first.
+fn crumbLabels(model: ui.breadcrumbs.Model, root: []const u8, out: *[max_crumb_parts][]const u8) []const []const u8 {
+    const n = @min(model.count, max_crumb_parts);
+    for (0..n) |i| out[i] = model.at(i, root).?.label;
+    return out[0..n];
 }
+const max_crumb_parts = 32;
 fn layoutBreadcrumb(rec: mshl.Record, x: usize, y: usize, width: usize, paint: bool) Size {
     if (width == 0) return .{};
     const path = strField(rec, "path");
     const model = ui.breadcrumbs.Model.init(path) orelse return layoutLabel(rec, x, y, width, paint);
     const root = strField(rec, "root");
-    const h = lineOf(R_UI) + 16;
     const state = if (paint) crumbFor(strField(rec, "id"), path) else null;
     if (paint and state == null) {
         limitHit("breadcrumbs", strField(rec, "id"));
@@ -1545,38 +1549,29 @@ fn layoutBreadcrumb(rec: mshl.Record, x: usize, y: usize, width: usize, paint: b
         c.selected = @min(c.selected, model.count -| 2);
         if (files_bindings.location.is(strField(rec, "id"))) file_crumb = c;
     }
-    var flow: ui.flow.Flow = .{ .width = width, .gap = 4 };
-    for (0..model.count) |i| {
-        const part = model.at(i, root).?;
-        const last = i + 1 == model.count;
-        const place = flow.put(.{ .w = crumbWidth(part, last, width), .h = h });
-        if (paint) {
-            const c = state.?;
-            const focused = wf.win_focused and nfoc == sel_focus and c.selected == i and !last;
-            const label_w = place.w -| (if (last) @as(usize, 0) else 24);
-            if (focused) panel(x + place.x, y + place.y, label_w, h, 4, pal.surface_hi, pal.focus, pal.focus_w);
-            drawStrTrunc(x + place.x + 10, y + place.y + 8, R_UI, part.label, label_w -| 20, if (last) pal.text else pal.focus, pal.bg);
-            if (!last and place.w >= 24) drawStr(x + place.x + place.w - 19, y + place.y + 8, R_UI, "›", pal.text_muted, pal.bg);
-        }
+    var buf: [max_crumb_parts][]const u8 = undefined;
+    const labels = crumbLabels(model, root, &buf);
+    const b = wf.brush();
+    // Measure by placing the last crumb (the painter and the hit test use
+    // the same flow); paint through the toolkit when asked.
+    const last = ui.paint.crumbPlace(b, width, labels, labels.len -| 1);
+    const h = last.y + ui.paint.crumbHeight(b);
+    if (paint) {
+        const c = state.?;
+        const focused = wf.win_focused and nfoc == sel_focus;
+        _ = ui.paint.breadcrumbs(b, .{ .x = x, .y = y, .w = width, .h = h }, labels, if (focused) c.selected else null, content_bg);
+        if (model.count > 1) recordFocus(.{ .id = strField(rec, "id"), .is_field = false, .crumb = state, .bx = x, .by = y, .bw = width, .bh = h });
     }
-    const size = flow.size();
-    if (paint and model.count > 1) recordFocus(.{ .id = strField(rec, "id"), .is_field = false, .crumb = state, .bx = x, .by = y, .bw = width, .bh = size.h });
-    return .{ .w = width, .h = size.h };
+    return .{ .w = width, .h = h };
 }
 fn crumbHit(f: Focus, x: usize, y: usize) ?usize {
     const c = f.crumb orelse return null;
     const model = c.model();
     const yy = @as(isize, @intCast(y)) - f.sy;
     if (x < f.bx or yy < 0) return null;
-    const xx = x - f.bx;
-    var flow: ui.flow.Flow = .{ .width = f.bw, .gap = 4 };
-    const h = lineOf(R_UI) + 16;
-    for (0..model.count) |i| {
-        const last = i + 1 == model.count;
-        const place = flow.put(.{ .w = crumbWidth(model.at(i, c.root).?, last, f.bw), .h = h });
-        if (!last and xx >= place.x and xx < place.x + (place.w -| 24) and yy >= place.y and yy < place.y + h) return i;
-    }
-    return null;
+    var buf: [max_crumb_parts][]const u8 = undefined;
+    const labels = crumbLabels(model, c.root, &buf);
+    return ui.paint.breadcrumbHit(wf.brush(), f.bw, labels, x - f.bx, @intCast(yy));
 }
 
 fn drawButton(rec: mshl.Record, x: usize, y: usize, avail_w: usize) Size {
@@ -1706,8 +1701,8 @@ const max_list_cols = 8;
 var list_hits: [max_lists]ListHit = undefined;
 var nlisthit: usize = 0;
 
-const list_row_vpad = 6; // vertical padding within a list row
-const list_cell_pad = 10; // left inset of the first cell
+const list_row_vpad = ui.paint.list_row_vpad; // vertical padding within a list row
+const list_cell_pad = ui.paint.list_cell_pad; // left inset of the first cell
 
 // A list's `rows` come as either a plain list of `{id, cells}` records or —
 // when built with `map`, which tableizes uniform records — a table with
@@ -1773,57 +1768,39 @@ fn drawList(rec: mshl.Record, x: usize, y: usize, avail_w: usize, avail_h: usize
     const key = strField(rec, "key");
     const rowsv: Value = rec.get("rows") orelse Value.nothing;
     const nrows = rowsLen(rowsv);
-    const cols: []const Value = if (rec.get("cols")) |cv| (if (cv == .list) cv.list else &.{}) else &.{};
+    const colsv: []const Value = if (rec.get("cols")) |cv| (if (cv == .list) cv.list else &.{}) else &.{};
     const w = avail_w;
-    const line = lineOf(R_UI);
-    const row_h = line + 2 * list_row_vpad;
-    const header_h: usize = if (cols.len > 0) line + 2 * list_row_vpad else 0;
+    const b = wf.brush();
+    const row_h = ui.paint.listRowHeight(b);
+    const header_h: usize = if (colsv.len > 0) row_h else 0;
     const box_h = listBoxHeight(rec, avail_h);
 
     const focused = wf.win_focused and nfoc == sel_focus;
     const active = if (rec.get("active")) |v| v.asBool() else true;
     const fit = if (rec.get("fit")) |v| v.asBool() else false;
-    var total_weight: usize = 0;
-    for (cols) |cv| if (cv == .record) {
-        total_weight += @intCast(std.math.clamp(intField(cv.record, "w", 80), 1, 4096));
-    };
+    // The columns as the toolkit sees them: title, weight, alignment —
+    // and their pixel widths, which the header click needs as edges.
+    var cols: [max_list_cols]ui.paint.Column = undefined;
+    var ncols: usize = 0;
+    for (colsv) |cv| {
+        if (cv != .record or ncols == max_list_cols) continue;
+        cols[ncols] = .{ .title = strField(cv.record, "title"), .weight = @intCast(std.math.clamp(intField(cv.record, "w", 80), 1, 4096)), .right = if (cv.record.get("right")) |v| v.asBool() else false };
+        ncols += 1;
+    }
+    var widths: [max_list_cols]usize = undefined;
     const tracks_w = w -| (2 * list_cell_pad + 8);
+    ui.paint.columnWidths(cols[0..ncols], fit, tracks_w, widths[0..ncols]);
     panel(x, y, w, box_h, r_field, pal.field_bg, if (focused) pal.focus else pal.border, if (focused) pal.focus_w else pal.border_w);
 
-    // Header: muted column titles + a rule beneath them. A `sort` field
-    // names the column the rows are ordered by; its title gets a mark.
     var col_edge: [max_list_cols]usize = @splat(0);
-    var ncols: usize = 0;
-    if (cols.len > 0) {
+    if (ncols > 0) {
         const sort_col: ?usize = if (rec.get("sort")) |sv| (if (sv == .int and sv.int >= 0) @intCast(sv.int) else null) else null;
+        ui.paint.listHeader(b, .{ .x = x + pal.border_w, .y = y, .w = w -| (2 * pal.border_w), .h = header_h + pal.border_w }, cols[0..ncols], widths[0..ncols], sort_col, pal.field_bg);
         var hx = x + list_cell_pad;
-        var before: usize = 0;
-        for (cols, 0..) |cv, ci| {
-            if (cv != .record) continue;
-            const weight: usize = @intCast(std.math.clamp(intField(cv.record, "w", 80), 1, 4096));
-            const cw = if (fit) ui.flow.trackWidth(tracks_w, total_weight, before, weight) else weight;
-            before += weight;
-            const text = strField(cv.record, "title");
-            const sorted = sort_col == ci;
-            const mark_w: usize = if (sorted) 12 else 0; // a small triangle after the title
-            const right = if (cv.record.get("right")) |v| v.asBool() else false;
-            const offset = if (right) (cw -| 8) -| (strW(R_UI, text) + mark_w) else 0;
-            drawStrTrunc(hx + offset, y + list_row_vpad, R_UI, text, cw -| (8 + mark_w), if (sorted) pal.text else pal.text_muted, pal.field_bg);
-            if (sorted) {
-                const tx = hx + offset + @min(strW(R_UI, text), cw -| (8 + mark_w)) + 5;
-                const ty = y + list_row_vpad + line / 2 - 1;
-                fillRect(tx, ty, 7, 1, pal.text);
-                fillRect(tx + 1, ty + 1, 5, 1, pal.text);
-                fillRect(tx + 2, ty + 2, 3, 1, pal.text);
-                fillRect(tx + 3, ty + 3, 1, 1, pal.text);
-            }
-            hx += cw;
-            if (ncols < max_list_cols) {
-                col_edge[ncols] = hx;
-                ncols += 1;
-            }
+        for (0..ncols) |ci| {
+            hx += widths[ci];
+            col_edge[ci] = hx;
         }
-        fillRect(x + pal.border_w, y + header_h, w -| (2 * pal.border_w), pal.border_w, pal.border);
     }
 
     const rows_top = y + header_h;
@@ -1882,58 +1859,22 @@ fn drawList(rec: mshl.Record, x: usize, y: usize, avail_w: usize, avail_h: usize
     var ry = rows_top;
     while (i < nrows and i < st.scroll + vis) : (i += 1) {
         const selected = active and i == st.sel;
-        const cell_bg = if (selected) (if (focused) pal.primary else pal.surface_hi) else pal.field_bg;
-        if (selected) fillRect(x + pal.border_w, ry, rows_w, row_h, cell_bg);
-        const ink = if (selected and focused) pal.primary_ink else pal.text;
         const iconv = rowField(rowsv, i, "icon");
-        const icon = if (iconv == .str) iconv.str else "";
-        const icon_size = wf.iconSize();
-        const known_icon = ui.icons.parse(icon) != null;
-        const icon_pad: usize = if (known_icon) icon_size + 8 else 0;
-        if (known_icon) {
-            const color = if (selected and focused) pal.primary_ink else pal.primary;
-            wf.drawIcon(x + list_cell_pad, ry + (row_h -| icon_size) / 2, icon_size, icon, color);
-        }
-        const ty = ry + list_row_vpad;
+        const icon = if (iconv == .str) ui.icons.parse(iconv.str) else null;
+        // The row's cells as the toolkit sees them: text, or a sparkline's
+        // permille samples copied out of the script's list.
         const cellsv = rowField(rowsv, i, "cells");
-        if (cols.len > 0) {
-            var cx = x + list_cell_pad;
-            var before: usize = 0;
-            for (cols, 0..) |cv, ci| {
-                if (cv != .record) continue;
-                const weight: usize = @intCast(std.math.clamp(intField(cv.record, "w", 80), 1, 4096));
-                const cw = if (fit) ui.flow.trackWidth(tracks_w, total_weight, before, weight) else weight;
-                before += weight;
-                // A cell that is a list of numbers (permille) is a sparkline:
-                // one bar per sample, newest at the right, on the row's ground.
-                if (cellsv == .list and ci < cellsv.list.len and cellsv.list[ci] == .list) {
-                    const samples = cellsv.list[ci];
-                    const n = sampleCount(samples);
-                    const sw = cw -| 12;
-                    const sh = line -| 2;
-                    if (n > 0 and sw >= 8) {
-                        const bw = @max(sw / @max(n, 30), 1);
-                        for (0..n) |si| {
-                            const v = sampleAt(samples, si);
-                            const bar = @max(sh * v / 1000, if (v > 0) @as(usize, 1) else 0);
-                            if (bar == 0) continue;
-                            const bx = cx + 4 + sw -| (n - si) * bw;
-                            fillRect(bx, ty + 1 + sh - bar, bw, bar, if (v > 800) pal.danger else if (selected and focused) pal.primary_ink else pal.primary);
-                        }
-                    }
-                    cx += cw;
-                    continue;
-                }
-                const text = cellAt(cellsv, ci);
-                const inset = if (ci == 0) icon_pad else 0;
-                const right = if (cv.record.get("right")) |v| v.asBool() else false;
-                const offset = if (right) (cw -| 8) -| strW(R_UI, text) else inset;
-                drawStrTrunc(cx + offset, ty, R_UI, text, cw -| (8 + offset), if (ci > 0 and !selected) pal.text_muted else ink, cell_bg);
-                cx += cw;
-            }
-        } else {
-            drawStrTrunc(x + list_cell_pad + icon_pad, ty, R_UI, cellAt(cellsv, 0), rows_w -| (2 * list_cell_pad + icon_pad), ink, cell_bg);
+        var cells: [max_list_cols]ui.paint.Cell = undefined;
+        var samples: [max_list_cols][max_samples]u16 = undefined;
+        const ncells = if (ncols == 0) 1 else ncols;
+        for (0..ncells) |ci| {
+            if (cellsv == .list and ci < cellsv.list.len and cellsv.list[ci] == .list) {
+                const n = @min(sampleCount(cellsv.list[ci]), max_samples);
+                for (0..n) |si| samples[ci][si] = @intCast(@min(sampleAt(cellsv.list[ci], si), 1000));
+                cells[ci] = .{ .samples = samples[ci][0..n] };
+            } else cells[ci] = .{ .text = cellAt(cellsv, ci) };
         }
+        ui.paint.listRow(wf.brush(), .{ .x = x + pal.border_w, .y = ry, .w = rows_w, .h = row_h }, cols[0..ncols], widths[0..ncols], cells[0..ncells], .{ .selected = selected, .focused = focused, .icon = icon, .ground = pal.field_bg });
         ry += row_h;
     }
     wf.clip_x0 = sx0;
@@ -1942,16 +1883,7 @@ fn drawList(rec: mshl.Record, x: usize, y: usize, avail_w: usize, avail_h: usize
     wf.clip_y1 = sy1;
 
     // Scrollbar: a track and a proportional thumb on the right edge.
-    if (has_sb) {
-        const track_x = x + w - sb_w - pal.border_w;
-        const track_top = rows_top;
-        const track_h = inner_h;
-        fillRect(track_x, track_top, sb_w, track_h, shade(pal.field_bg, 5, 4));
-        const thumb_h = @max(track_h * vis / nrows, 16);
-        const span = track_h -| thumb_h;
-        const thumb_y = track_top + (if (max_scroll > 0) span * st.scroll / max_scroll else 0);
-        fillRect(track_x + 1, thumb_y, sb_w -| 2, thumb_h, pal.text_muted);
-    }
+    if (has_sb) ui.paint.listScrollbar(wf.brush(), .{ .x = x + w - sb_w - pal.border_w, .y = rows_top, .w = sb_w, .h = inner_h }, vis, nrows, st.scroll, pal.field_bg);
 
     if (nlisthit < list_hits.len) {
         const sb_x = if (has_sb) x + w - sb_w / 2 - pal.border_w else 0;
@@ -1963,6 +1895,8 @@ fn drawList(rec: mshl.Record, x: usize, y: usize, avail_w: usize, avail_h: usize
     }
     return .{ .w = w, .h = box_h };
 }
+/// Samples a sparkline cell keeps (the newest; the History column keeps 60).
+const max_samples = 120;
 
 /// Find the `rows` value (a list or a tableized list) of the `list` widget
 /// with this id anywhere in the tree (searching children and split panes) —
@@ -2646,12 +2580,14 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
         if (!announced or action_len > 0) {
             for (focusables[0..nfocus]) |f| if (f.crumb) |c| {
                 const model = c.model();
-                var flow: ui.flow.Flow = .{ .width = f.bw, .gap = 4 };
-                for (0..model.count) |index| {
-                    const last = index + 1 == model.count;
-                    const place = flow.put(.{ .w = crumbWidth(model.at(index, c.root).?, last, f.bw), .h = lineOf(R_UI) + 16 });
+                var buf: [max_crumb_parts][]const u8 = undefined;
+                const labels = crumbLabels(model, c.root, &buf);
+                const crumb_h = ui.paint.crumbHeight(wf.brush());
+                for (0..labels.len) |index| {
+                    const last = index + 1 == labels.len;
+                    const place = ui.paint.crumbPlace(wf.brush(), f.bw, labels, index);
                     if (last) continue;
-                    const sy = f.sy + @as(isize, @intCast(place.y + (lineOf(R_UI) + 16) / 2));
+                    const sy = f.sy + @as(isize, @intCast(place.y + crumb_h / 2));
                     if (sy < f.cy0 or sy >= f.cy1) continue;
                     var line: [128]u8 = undefined;
                     _ = usys.log(log_h, std.fmt.bufPrint(&line, "gui: breadcrumb {s} index={d} at {d},{d}", .{ f.id, index, wf.win_x + f.bx + place.x + (place.w -| 24) / 2, wf.win_y + @as(usize, @intCast(sy)) }) catch continue);

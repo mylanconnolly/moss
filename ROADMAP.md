@@ -2756,9 +2756,10 @@ supervises), and memory history per unit beside the CPU one.
   a component gallery, captured GUI pointer gestures, and Settings adoption. Keep GUI definitions in mshl and
   rendering/interaction in the toolkit; no new ambient authority or local-only
   protocol. See DESIGN's shared GUI layout section.
-- Next: what the 2026-10-08 passes left: list rows and breadcrumbs as
-  toolkit painters (the light theme is validated end to end and custom
-  items carry shortcut hints since the same day). Vertical
+- Next: general, not from the 2026-10-08 passes (those landed in
+  full, list rows and breadcrumbs included; the meter and the chart are
+  the two leaves still painted in the runtime): widget identity across
+  remote views, and whatever the next application asks for. Vertical
   viewports, focus reveal, wrapped labels, weighted rows, and stable
   focus IDs landed on 2026-09-12; menus beyond the built-in profiles
   and widget identity/lifetime landed on 2026-10-08; grid
@@ -2771,8 +2772,8 @@ supervises), and memory history per unit beside the CPU one.
   resident loop and open window, high-contrast and light-theme passes
   over the whole desktop in the guishellro drill (DESIGN, "The visual
   system carried to the edges", "Shortcut hints, and the light theme
-  validated"). Still the runtime's own painters: list rows and
-  breadcrumbs.
+  validated", "List rows and breadcrumbs, the last painters out of the
+  runtime").
 
 **GUI resource capacity**
 
