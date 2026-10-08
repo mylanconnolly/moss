@@ -4,12 +4,28 @@
 # keyboard (Tab moves between the buttons, Enter fires the focused one),
 # and threads the returned state forward. No loop, no drawing here.
 let final = (gui {
-    init:  { count: 0, done: false, name: "", other: "", secret_len: 0 }
+    init:  { count: 0, done: false, name: "", other: "", secret_len: 0, dark: false, notify: false, agree: false, asking: false, wiped: false }
     title: "Moss · Components"
     view: (fn [state] {
         {
           kind: "column"
           gap:  20
+          dialog: (match $state.asking {
+              true => {
+                id:     "confirm"
+                title:  "Delete everything?"
+                cancel: "keep"
+                gap:    16
+                children: [
+                  { kind: "label", wrap: true, text: "The notes, the names and the count go. Escape keeps them; so does the first button." }
+                  { kind: "row", gap: 12, align: "end", children: [
+                      { kind: "button", id: "keep", label: "Keep" }
+                      { kind: "button", id: "wipe", label: "Delete", variant: "danger" }
+                    ] }
+                ]
+              }
+              _ => nothing
+            })
           children: [
             { kind: "label", role: "title", text: "A place for everything" }
             { kind: "label", muted: true, text: "The shared building blocks of a Moss window." }
@@ -52,15 +68,37 @@ let final = (gui {
                 ]
               }
             }
+            {
+              kind: "section"
+              children: [
+                { kind: "label", text: "Switches, in a grid" }
+                { kind: "grid", cols: 2, gap: 12, children: [
+                    { kind: "toggle", id: "dark", label: "Dark appearance", on: $state.dark }
+                    { kind: "toggle", id: "notify", label: "Notifications", on: $state.notify }
+                    { kind: "checkbox", id: "agree", label: "I have read the notes", on: $state.agree }
+                    { kind: "toggle", id: "managed", label: "Managed by policy", on: true, disabled: true }
+                  ] }
+                { kind: "row", children: [
+                    { kind: "label", muted: true, flex: 1, text: "Space or Enter flips the focused one. A destructive action asks first:" }
+                    { kind: "button", id: "ask", icon: "x", label: "Delete all…", variant: "danger" }
+                  ] }
+              ]
+            }
           ]
         }
       })
     update: (fn [state, ev] {
         match $ev.id {
-          "inc" => { { count: ($state.count + 1), done: $state.done, name: $state.name, other: $state.other, secret_len: $state.secret_len } }
-          "quit" => { { count: $state.count, done: true, name: $ev.fields.name, other: $ev.fields.other, secret_len: (len $ev.fields.password) } }
+          "inc" => ($state | merge { count: ($state.count + 1) })
+          "quit" => ($state | merge { done: true, name: $ev.fields.name, other: $ev.fields.other, secret_len: (len $ev.fields.password) })
+          "dark" => ($state | merge { dark: (not $state.dark) })
+          "notify" => ($state | merge { notify: (not $state.notify) })
+          "agree" => ($state | merge { agree: (not $state.agree) })
+          "ask" => ($state | merge { asking: true })
+          "keep" => ($state | merge { asking: false })
+          "wipe" => ($state | merge { asking: false, wiped: true })
           _ => $state
         }
       })
   })
-"gui: done count=" + (str $final.count) + " name=" + $final.name + " other=" + $final.other + " secret_len=" + (str $final.secret_len)
+"gui: done count=" + (str $final.count) + " name=" + $final.name + " other=" + $final.other + " secret_len=" + (str $final.secret_len) + " dark=" + (str $final.dark) + " notify=" + (str $final.notify) + " agree=" + (str $final.agree) + " wiped=" + (str $final.wiped)

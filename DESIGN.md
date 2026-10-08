@@ -4427,6 +4427,61 @@ when the dock polled a just-exited top bar. Supervision subsequently skipped
 that essential unit and never shut down the session. Listing now reports a
 local liveness value without consuming the supervisor's death transition.
 
+**Switches, grids and sheets (2026-10-08).** Three things every
+settings page and every confirm step had been faking with buttons and
+rows. A `{ kind: "toggle" | "checkbox", id, label, on, disabled }` is a
+switch (a pill with a knob) or a box with a mark whose state the *app*
+owns: a click, Enter or Space fires `{ id }` and `update` flips `on` in
+its state — the runtime keeps no toggle state at all, so the view is the
+whole truth of the control and the same tree renders on a remote viewer.
+The painter is the toolkit's (`ui.paint.toggle`, pixel-tested like the
+button): on is the primary fill with the knob or mark in the primary
+ink, off the raised surface with the knob in the text colour, so the
+state is read from the fill *and* the knob's side, never from colour
+alone; focus thickens the outline, hover lifts the fill, disabled mutes
+everything. A toggle is as tall as a button so the two share a line.
+Settings' "Theme: dark" / "Contrast: normal" / "Colors: default" buttons
+became "Light theme", "High contrast" and "Colourblind-safe colours"
+switches (the managed theme a disabled one), with the ids they had.
+
+`{ kind: "grid", cols: 3 | [1, 2], gap, children }` is the engine's
+fourth container: fixed column tracks — equal, or weighted like a row's
+flex — filled left to right then down, each row as tall as its tallest
+cell measured at its track's width; `align: "top"` on the grid keeps a
+row's cells on one top edge. A child narrower than its track sits at
+the start unless it says `align: "center"` or `"end"` — and that same
+key moves a narrow child inside a row's flex track or a column's width,
+so a dialog's buttons sit at the right and a form's Apply under its
+fields without a spacer widget. Host tests fix the arithmetic (tracks,
+weights, alignment, measure = paint).
+
+A dialog is data in the view, like everything else: `view` returns its
+root with `dialog: { id, title, cancel, w, children… }` and the runtime
+paints a modal sheet — a scrim (`Canvas.dim`, a blend over the content
+area) and a raised panel with the window's outline, centred, the title
+in the title role, any node inside — over the body. While it is up only
+the dialog's widgets can take focus or a click (the body's are dropped
+from the focus list for the render), Escape fires `cancel` if the dialog
+names one, the wheel does nothing to the body, and the app closes it by
+leaving it out of the next view. Opening moves the focus to the dialog's
+first control and remembers the widget that had it; closing hands it
+back, so Enter on "Delete all…", Escape, Enter again, Tab, Enter is the
+whole confirm round trip from one button. The gallery (`gui`) grew a
+switches-in-a-grid section and a destructive action that asks first;
+its drill flips the three switches with Space and Enter, cancels the
+sheet with Escape, reopens and confirms it, and the final state line
+carries all of it.
+
+*Found by the first screenshot:* the sheet rendered, the drill passed,
+and the focused Keep button wore no ring. The dialog's widgets are
+recorded *after* the body's and then moved to the front of the focus
+list, so while they painted their index was the body's count plus
+theirs, and `nfoc == sel_focus` never matched. The focus, hover and
+press indices are shifted by the body's count for the dialog's paint
+and restored after. *Lesson:* a list that is reordered after it is
+built must be painted as if it were already in its final order — or
+every comparison made during the build is against the wrong index.
+
 ### GUIs in mshl
 
 The console arc gave the substrate — surfaces, a compositor, keyboard

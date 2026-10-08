@@ -2809,19 +2809,40 @@ fn guiDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     sleepMs(150);
     if (!q.chord("meta_l", "a") or !q.chord("meta_l", "v")) return false;
     sleepMs(150);
-
-    for (0..2) |_| {
-        if (!q.chord("shift", "tab")) return false;
+    // The switches: Tab past the password to "dark" and flip it with
+    // Space, "notify" with Enter, the "agree" checkbox with Space; the
+    // disabled "managed" switch is never reached. Then the dialog: Enter on
+    // "Delete all…" opens it with the focus on Keep; Escape fires Keep and
+    // closes it, handing the focus back to the button; Enter reopens it,
+    // Tab reaches Delete, Enter confirms. The focus returns to the button
+    // again, so two Tabs reach "quit" by wrapping through "inc".
+    for ([_][]const u8{ "tab", "tab", "spc", "tab", "ret", "tab", "spc", "tab", "ret", "esc", "ret" }) |k| {
+        if (!q.sendKey(k)) return false;
+        sleepMs(200);
+    }
+    _ = q.screendump(check_dir ++ "/gui-dialog.ppm");
+    for ([_][]const u8{ "tab", "ret" }) |k| {
+        if (!q.sendKey(k)) return false;
+        sleepMs(200);
+    }
+    _ = q.screendump(check_dir ++ "/gui-switches.ppm");
+    for ([_][]const u8{ "tab", "tab", "ret" }) |k| {
+        if (!q.sendKey(k)) return false;
         sleepMs(150);
     }
-    if (!q.sendKey("ret")) return false;
     var m: u64 = 0;
     while (true) {
         sleepMs(poll_ms);
         m += 1;
         polls.* += 1;
         const content = readLog(log_path);
-        if (std.mem.indexOf(u8, content, "gui: done count=1 name=Mossx other=Mossx secret_len=7") != null) break;
+        if (std.mem.indexOf(u8, content, "gui: done count=1 name=Mossx other=Mossx secret_len=7 dark=true notify=true agree=true wiped=true") != null) {
+            if (std.mem.count(u8, content, "gui: dialog confirm open") != 2 or std.mem.count(u8, content, "gui: dialog closed") != 2) {
+                reportFailure(spec.name, "the dialog did not open and close twice (Escape, then Delete)", log_path);
+                return false;
+            }
+            break;
+        }
         if (std.mem.indexOf(u8, content, "KERNEL PANIC") != null or m * poll_ms / 1000 > spec.timeout_s) {
             reportFailure(spec.name, "the gui app never updated its state and closed", log_path);
             return false;

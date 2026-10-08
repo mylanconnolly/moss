@@ -172,6 +172,14 @@ pub const Canvas = struct {
         self.px[i] = out;
     }
 
+    /// Dim a rectangle: blend `word` over every pixel by `cov` (0..255) —
+    /// the scrim under a modal sheet, so the content behind it reads as
+    /// behind. Clipped and translated like every other primitive.
+    pub fn dim(self: *const Canvas, x: usize, y: usize, w: usize, h: usize, word: u32, cov: u32) void {
+        if (cov == 0) return;
+        for (y..y + h) |yy| for (x..x + w) |xx| self.blend(xx, yy, word, cov);
+    }
+
     /// Test helper: the pixel at screen (x, y).
     pub fn at(self: *const Canvas, x: usize, y: usize) u32 {
         return self.px[y * self.w + x];
@@ -242,4 +250,18 @@ test "panel insets its fill by the border width" {
     try std.testing.expectEqual(@as(u32, 0xff0000), c.at(1, 10));
     try std.testing.expectEqual(@as(u32, 0x00ff00), c.at(2, 10));
     try std.testing.expectEqual(@as(u32, 0xff0000), c.at(29, 10));
+}
+
+test "dim blends a scrim over a rectangle and leaves the rest alone" {
+    var buf: [16 * 4]u32 = @splat(0xffffff);
+    const c = Canvas.init(&buf, 16, 4);
+    c.dim(2, 1, 4, 2, 0x000000, 128);
+    try std.testing.expectEqual(@as(u32, 0xffffff), c.at(1, 1));
+    try std.testing.expectEqual(@as(u32, 0xffffff), c.at(2, 0));
+    const mid = c.at(3, 2);
+    try std.testing.expect(mid != 0xffffff and mid != 0);
+    try std.testing.expectEqual(mid, c.at(5, 1));
+    try std.testing.expectEqual(@as(u32, 0xffffff), c.at(6, 1));
+    c.dim(0, 0, 16, 4, 0x000000, 0); // a zero coverage is a no-op
+    try std.testing.expectEqual(mid, c.at(3, 2));
 }

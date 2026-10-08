@@ -258,7 +258,7 @@ var content_h: usize = 0;
 // A focusable widget: its id, whether it is a text field (which eats
 // typing) or a button (which fires on Enter), and its clickable box on
 // the surface (so a pointer press can hit-test which widget it landed on).
-const Focus = struct { crumb: ?*Crumb = null, sy: isize = 0, cy0: usize = 0, cy1: usize = 0, cx0: usize = 0, cx1: usize = 0, owner: usize = 0, id: []const u8, is_field: bool, submit: []const u8 = "", is_list: bool = false, is_page: bool = false, is_button: bool = false, page_slot: usize = 0, bx: usize = 0, by: usize = 0, bw: usize = 0, bh: usize = 0 };
+const Focus = struct { crumb: ?*Crumb = null, sy: isize = 0, cy0: usize = 0, cy1: usize = 0, cx0: usize = 0, cx1: usize = 0, owner: usize = 0, id: []const u8, is_field: bool, submit: []const u8 = "", is_list: bool = false, is_page: bool = false, is_button: bool = false, is_toggle: bool = false, page_slot: usize = 0, bx: usize = 0, by: usize = 0, bw: usize = 0, bh: usize = 0 };
 var focusables: [64]Focus = undefined;
 
 // Every window has an implicit viewport; explicit `scroll` nodes can nest.
@@ -287,7 +287,7 @@ fn containsScroll(node: Value, id: []const u8) bool {
     const rec = node.record;
     if (std.mem.eql(u8, strField(rec, "kind"), "scroll") and std.mem.eql(u8, strField(rec, "id"), id)) return true;
     for (nodeChildren(rec)) |child| if (containsScroll(child, id)) return true;
-    for ([_][]const u8{ "child", "left", "right" }) |key| {
+    for ([_][]const u8{ "child", "left", "right", "dialog" }) |key| {
         if (rec.get(key)) |child| if (containsScroll(child, id)) return true;
     }
     return false;
@@ -596,7 +596,87 @@ fn renderTree(tree: Value, title: []const u8, focus: usize) usize {
     scroll_owner = 0;
     layout_overflow = false;
     _ = paintViewport(body, pad, top + pad, wf.win_w -| (2 * pad), wf.win_h -| (top + 2 * pad), 0);
+    paintDialog(tree, top);
     return nfoc;
+}
+
+/// `view` may return its root with `dialog: { id, title, cancel, w,
+/// children… }`: a modal sheet over the content. The sheet is any node
+/// (a column of a message and buttons, usually) under a title, centred on
+/// a scrim that dims the body; while it is up only its widgets can take
+/// focus or a click, Escape fires `cancel` (an event id) if it names one,
+/// and the body keeps its scroll and its fields. The runtime holds no
+/// dialog state: the app opens one by putting it in the view and closes
+/// it by leaving it out, as with every other widget.
+var dialog_cancel: [64]u8 = undefined;
+var dialog_cancel_len: usize = 0;
+var dialog_shown: bool = false;
+fn paintDialog(tree: Value, top: usize) void {
+    dialog_cancel_len = 0;
+    const d = if (tree == .record) tree.record.get("dialog") orelse Value.nothing else Value.nothing;
+    if (d != .record) {
+        if (dialog_shown and !wf.measuring) _ = usys.log(log_h, "gui: dialog closed");
+        dialog_shown = false;
+        return;
+    }
+    const rec = d.record;
+    const cancel = strField(rec, "cancel");
+    dialog_cancel_len = @min(cancel.len, dialog_cancel.len);
+    @memcpy(dialog_cancel[0..dialog_cancel_len], cancel[0..dialog_cancel_len]);
+    const body_focus = nfoc;
+    const inset = ui.paint.sheet_inset;
+    const area_h = wf.win_h -| top;
+    const w = @min(@as(usize, @intCast(std.math.clamp(intField(rec, "w", 420), 160, 4096))), wf.win_w -| 2 * pad);
+    const inner = w -| 2 * inset;
+    const title = strField(rec, "title");
+    const title_h = if (title.len > 0) lineOf(R_TITLE) + ui.space.medium else 0;
+    const want = title_h + layoutNode(d, 0, 0, inner, 0, false).h + 2 * inset;
+    const h = @min(want, area_h -| 2 * pad);
+    const sx = (wf.win_w -| w) / 2;
+    const sy = top + (area_h -| h) / 2;
+    const b = wf.brush();
+    ui.paint.scrim(b, .{ .x = 0, .y = top, .w = wf.win_w, .h = area_h });
+    ui.paint.sheet(b, .{ .x = sx, .y = sy, .w = w, .h = h });
+    const saved_bg = content_bg;
+    content_bg = pal.surface;
+    defer content_bg = saved_bg;
+    // The dialog's widgets are recorded after the body's and moved to the
+    // front below, so the focus, hover and press indices (which name the
+    // front list) are shifted while they paint, or none would ever match.
+    const saved_sel = sel_focus;
+    const saved_hover = hovered;
+    const saved_press = pressed;
+    sel_focus += body_focus;
+    if (hovered) |hi| hovered = hi + body_focus;
+    if (pressed) |pi| pressed = pi + body_focus;
+    defer {
+        sel_focus = saved_sel;
+        hovered = saved_hover;
+        pressed = saved_press;
+    }
+    if (title.len > 0) drawStrTrunc(sx + inset, sy + inset, R_TITLE, title, inner, pal.title, content_bg);
+    // The sheet clips its content, so a dialog taller than the window
+    // still ends inside its outline.
+    const old = [4]usize{ wf.clip_x0, wf.clip_y0, wf.clip_x1, wf.clip_y1 };
+    wf.clip_x0 = @max(old[0], sx);
+    wf.clip_y0 = @max(old[1], sy);
+    wf.clip_x1 = @min(old[2], sx + w);
+    wf.clip_y1 = @min(old[3], sy + h);
+    _ = drawNode(d, sx + inset, sy + inset + title_h, inner, 0);
+    wf.clip_x0 = old[0];
+    wf.clip_y0 = old[1];
+    wf.clip_x1 = old[2];
+    wf.clip_y1 = old[3];
+    // Modal: the body's widgets are not there to Tab to or click while
+    // the sheet is up — only the dialog's own, moved to the front.
+    const n = nfoc - body_focus;
+    std.mem.copyForwards(Focus, focusables[0..n], focusables[body_focus..nfoc]);
+    nfoc = n;
+    if (!dialog_shown and !wf.measuring) {
+        var lb: [96]u8 = undefined;
+        _ = usys.log(log_h, std.fmt.bufPrint(&lb, "gui: dialog {s} open", .{strField(rec, "id")}) catch "gui: dialog open");
+    }
+    dialog_shown = !wf.measuring;
 }
 
 var reap_tree: Value = .nothing;
@@ -608,7 +688,7 @@ fn containsPage(node: Value, id: []const u8) bool {
     const rec = node.record;
     if (std.mem.eql(u8, strField(rec, "kind"), "page") and std.mem.eql(u8, strField(rec, "id"), id)) return true;
     for (nodeChildren(rec)) |child| if (containsPage(child, id)) return true;
-    for ([_][]const u8{ "child", "left", "right" }) |key| {
+    for ([_][]const u8{ "child", "left", "right", "dialog" }) |key| {
         if (rec.get(key)) |child| if (containsPage(child, id)) return true;
     }
     return false;
@@ -840,9 +920,10 @@ const MshlTree = struct {
         if (std.mem.eql(u8, k, "scroll")) return .scroll;
         if (std.mem.eql(u8, k, "row")) return .row;
         if (std.mem.eql(u8, k, "section")) return .section;
+        if (std.mem.eql(u8, k, "grid")) return .grid;
         if (std.mem.eql(u8, k, "column") or nodeChildren(rec).len != 0) return .column;
         if (std.mem.eql(u8, k, "split")) return .split;
-        return .leaf; // icon, breadcrumbs, label, button, field, list — or unknown (empty)
+        return .leaf; // icon, breadcrumbs, label, button, toggle, field, list — or unknown (empty)
     }
     pub fn children(_: *MshlTree, n: Node) []const Node {
         return nodeChildren(n.record);
@@ -866,6 +947,37 @@ const MshlTree = struct {
             .int => |i| @intCast(std.math.clamp(i, 0, 64)),
             else => 0,
         };
+    }
+    /// `align: "center" | "end"` on a child: where it sits when narrower
+    /// than its track (a row's flex track, a column's width, a grid cell).
+    pub fn alignOf(_: *MshlTree, n: Node) ui.layout.Align {
+        if (n != .record) return .start;
+        const a = strField(n.record, "align");
+        if (std.mem.eql(u8, a, "center")) return .center;
+        if (std.mem.eql(u8, a, "end")) return .end;
+        return .start;
+    }
+    /// `{ kind: "grid", cols: 3 }` (equal tracks) or `cols: [1, 2]`
+    /// (weights, like a row's flex): the column tracks a grid fills.
+    pub fn gridTracks(_: *MshlTree, n: Node, buf: *[ui.layout.max_tracks]usize) []const usize {
+        const v = n.record.get("cols") orelse return buf[0..0];
+        switch (v) {
+            .int => |count| {
+                const c: usize = @intCast(std.math.clamp(count, 1, @as(i64, ui.layout.max_tracks)));
+                @memset(buf[0..c], 1);
+                return buf[0..c];
+            },
+            .list => |items| {
+                var c: usize = 0;
+                for (items) |item| {
+                    if (c == buf.len) break;
+                    buf[c] = if (item == .int) @intCast(std.math.clamp(item.int, 0, 64)) else 0;
+                    c += 1;
+                }
+                return buf[0..c];
+            },
+            else => return buf[0..0],
+        }
     }
     pub fn scrollHeight(_: *MshlTree, n: Node) usize {
         return @intCast(std.math.clamp(intField(n.record, "h", 240), 40, 4096));
@@ -944,6 +1056,7 @@ fn leafLayout(rec: mshl.Record, x: usize, y: usize, avail_w: usize, avail_h: usi
         if (paint) return drawButton(rec, x, y, avail_w);
         return .{ .w = @min(avail_w, iconLabelWidth(rec, "label") + 2 * bpx), .h = @max(lineOf(R_UI), wf.iconSize()) + 2 * bpy };
     }
+    if (std.mem.eql(u8, kind, "toggle") or std.mem.eql(u8, kind, "checkbox")) return layoutToggle(rec, x, y, avail_w, paint);
     if (std.mem.eql(u8, kind, "field")) {
         if (paint) return drawField(rec, x, y, avail_w);
         return .{ .w = avail_w, .h = lineOf(R_UI) + 2 * fpy + (if (strField(rec, "label").len > 0) lineOf(R_UI) + 6 else @as(usize, 0)) };
@@ -1326,6 +1439,32 @@ fn drawButton(rec: mshl.Record, x: usize, y: usize, avail_w: usize) Size {
         recordFocus(.{ .id = strField(rec, "id"), .is_field = false, .is_button = true, .bx = x, .by = y, .bw = w, .bh = h });
     }
     return .{ .w = w, .h = h };
+}
+
+/// `{ kind: "toggle" | "checkbox", id, label, on, disabled }`: a switch
+/// (or a box) whose state the app owns — a click, Enter or Space fires
+/// `{ id }` and the app flips `on` in its state. The runtime keeps no
+/// toggle state, so the view is the whole truth of the control, and the
+/// same tree renders on a remote viewer unchanged.
+fn layoutToggle(rec: mshl.Record, x: usize, y: usize, avail_w: usize, paint: bool) Size {
+    const check = std.mem.eql(u8, strField(rec, "kind"), "checkbox");
+    const label = strField(rec, "label");
+    const size = ui.paint.toggleSize(wf.brush(), label, check);
+    const w = @min(avail_w, size.w);
+    if (!paint) return .{ .w = w, .h = size.h };
+    const disabled = if (rec.get("disabled")) |v| v.asBool() else false;
+    const is_on = if (rec.get("on")) |v| v.asBool() else false;
+    const focused = !disabled and wf.win_focused and nfoc == sel_focus;
+    ui.paint.toggle(wf.brush(), .{ .x = x, .y = y, .w = w, .h = size.h }, label, .{
+        .on = is_on,
+        .focused = focused,
+        .hovered = !disabled and hovered == nfoc,
+        .disabled = disabled,
+        .check = check,
+        .ground = content_bg,
+    });
+    if (!disabled) recordFocus(.{ .id = strField(rec, "id"), .is_field = false, .is_toggle = true, .bx = x, .by = y, .bw = w, .bh = size.h });
+    return .{ .w = w, .h = size.h };
 }
 
 /// A text field: a muted label over an inset value box (a darker fill with
@@ -2271,6 +2410,10 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
     // drag that evaluated nothing (peak 2x of the tree in a 512 KiB pool,
     // on every pointer move). Only turns that ran script code pay it.
     var evaluated = true;
+    // Where the focus was when a dialog opened, to hand it back on close.
+    var dialog_was = false;
+    var dialog_return: [64]u8 = undefined;
+    var dialog_return_len: usize = 0;
     while (true) {
         if (evaluated) {
             // Snapshot live state before discarding callback scratch allocations.
@@ -2279,6 +2422,24 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
             evaluated = false;
         }
         var nfocus = renderTree(tree, title, focus);
+        // A dialog opening takes the focus to its first control and
+        // remembers where it was; closing hands it back to that widget.
+        if (dialog_shown and !dialog_was) {
+            dialog_return_len = focus_len;
+            @memcpy(dialog_return[0..focus_len], focus_id[0..focus_len]);
+            focus = 0;
+            focus_len = 0;
+            nfocus = renderTree(tree, title, focus);
+        } else if (!dialog_shown and dialog_was) {
+            focus_len = dialog_return_len;
+            @memcpy(focus_id[0..focus_len], dialog_return[0..focus_len]);
+            focus = 0;
+            nfocus = renderTree(tree, title, focus);
+        } else if (focus >= nfocus) {
+            focus = 0; // the focused widget left the view
+            nfocus = renderTree(tree, title, focus);
+        }
+        dialog_was = dialog_shown;
         // With a page alive the loop ticks fast: its commits are blitted
         // and its events delivered from the tick.
         wf.tick_ms = if (guipage.live()) (if (app_tick_ms == 0) page_tick_ms else @min(app_tick_ms, page_tick_ms)) else app_tick_ms;
@@ -2465,6 +2626,7 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
             // as before the frame was split out.
             if (ev.kind == 1) {
                 const wheel = shared.ptrWheel(ev.btn);
+                if (wheel != 0 and dialog_shown) continue :input; // the body is behind a sheet
                 if (wheel != 0) {
                     if (hitWidget(nfocus, ev.x, ev.y)) |wi| if (focusables[wi].is_page) {
                         guipage.scroll(pageOf(focusables[wi]), -@as(i64, wheel) * 3 * @as(i64, @intCast(lineOf(R_UI))));
@@ -2673,6 +2835,10 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
                     else => {},
                 }
             }
+            if (ch == 27 and dialog_cancel_len > 0) {
+                fired = dialog_cancel[0..dialog_cancel_len]; // Escape: the dialog's way out
+                break :input;
+            }
             const cur: ?Focus = if (nfocus > 0) focusables[focus] else null;
             if (cur) |f| if (f.crumb) |c| {
                 const model = c.model();
@@ -2777,6 +2943,13 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
                         }
                         break :input;
                     }
+                },
+                ' ' => {
+                    // Space flips a toggle or presses a button, as a hand expects.
+                    if (cur) |c| if (c.is_toggle or c.is_button) {
+                        fired = c.id;
+                        break :input;
+                    };
                 },
                 key_up, key_down => {
                     // Move a focused list's selection; a preview follows it

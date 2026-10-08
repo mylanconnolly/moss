@@ -18,6 +18,8 @@
 //!   fn flex(t: *Tree, n: Node) usize;         // row track weight, 0 = natural width
 //!   fn alignTop(t: *Tree, n: Node) bool;      // a row's children sit on its top edge, not centred
 //!   fn grow(t: *Tree, n: Node) usize;         // a column child's share of spare height, 0 = natural
+//!   fn alignOf(t: *Tree, n: Node) Align;      // where a child narrower than its track sits
+//!   fn gridTracks(t: *Tree, n: Node, buf: *[max_tracks]usize) []const usize; // a grid's column weights
 //!   fn scrollHeight(t: *Tree, n: Node) usize; // a scroll viewport's height
 //!   fn scrollChild(t: *Tree, n: Node) ?Node;
 //!   fn splitLeft(t: *Tree, n: Node) ?Node;    fn splitRight(t: *Tree, n: Node) ?Node;
@@ -26,6 +28,14 @@
 //!   fn leafPaint(t: *Tree, n: Node, x: usize, y: usize, avail_w: usize, avail_h: usize) Size;
 //!   fn childPaint(t: *Tree, n: Node, x: usize, y: usize, avail_w: usize, avail_h: usize) Size;
 //!       // paint a child: clip to its allocation, then call Engine.paint
+//!
+//! A grid places its children into fixed column tracks (equal, or
+//! weighted like a row's flex tracks), left to right then down, every
+//! row as tall as its tallest cell; a child narrower than its track sits
+//! at the track's start unless it asks for the centre or the end — and
+//! the same `alignOf` moves a narrow child inside a row's flex track or
+//! a column's width, so a dialog's buttons can sit centred or a form's
+//! Apply at the right without a spacer widget.
 //!
 //! Heights flow down as an *offer*: `avail_h` is the height a node may
 //! take, 0 meaning "your natural height". A column keeps its fixed
@@ -44,7 +54,11 @@ const Size = geometry.Size;
 const space = geometry.space;
 const flow = @import("flow.zig");
 
-pub const Kind = enum { none, row, column, section, scroll, split, leaf };
+pub const Kind = enum { none, row, column, section, scroll, split, grid, leaf };
+/// Where a child narrower than its track sits within it.
+pub const Align = enum { start, center, end };
+/// A grid has at most this many column tracks.
+pub const max_tracks: usize = 12;
 
 /// A section's inner inset (clamped to half the width).
 pub const section_inset: usize = space.large;
@@ -97,7 +111,8 @@ pub fn Engine(comptime Tree: type) type {
                     const weight = t.flex(child);
                     const width = if (weight == 0) layout(t, child, 0, 0, avail_w, avail_h, false).w else flow.trackWidth(avail_w - fixed, total, before, weight);
                     const size = layout(t, child, 0, 0, width, avail_h, false);
-                    if (do_paint) _ = t.childPaint(child, xx, if (top) y else y + (height - size.h) / 2, width, avail_h);
+                    const dx = shift(t.alignOf(child), width, size.w);
+                    if (do_paint) _ = t.childPaint(child, xx + dx, if (top) y else y + (height - size.h) / 2, width - dx, avail_h);
                     xx += width + g;
                     before += weight;
                 }
@@ -150,7 +165,11 @@ pub fn Engine(comptime Tree: type) type {
                     if (i > 0) yy += g;
                     const weight = t.grow(child);
                     const share = if (weight == 0) 0 else flow.trackWidth(spare, grow_total, before, weight);
-                    yy += t.childPaint(child, x + inset, yy, width, share).h;
+                    const dx = switch (t.alignOf(child)) {
+                        .start => 0,
+                        else => |a| shift(a, width, layout(t, child, 0, 0, width, share, false).w),
+                    };
+                    yy += t.childPaint(child, x + inset + dx, yy, width - dx, share).h;
                     before += weight;
                 }
             }
@@ -178,6 +197,70 @@ pub fn Engine(comptime Tree: type) type {
             return .{ .w = avail_w, .h = h };
         }
 
+        /// The x offset that aligns a child of width `w` in a track of
+        /// width `track` (never negative: an overfull child stays put).
+        fn shift(a: Align, track: usize, w: usize) usize {
+            return switch (a) {
+                .start => 0,
+                .center => (track -| w) / 2,
+                .end => track -| w,
+            };
+        }
+
+        /// Column tracks of fixed count, filled left to right then down.
+        /// Each row is as tall as its tallest cell measured at its track's
+        /// width (natural height: a grid is for controls and labels, not
+        /// for the tables that grow); cells centre vertically on the row
+        /// unless the grid is top-aligned, and sit in their track as
+        /// `alignOf` says. Weights of zero (or none) mean equal tracks.
+        fn grid(t: *Tree, n: Node, x: usize, y: usize, avail_w: usize, do_paint: bool) Size {
+            const children = t.children(n);
+            const g = t.gap(n);
+            const top = t.alignTop(n);
+            var buf: [max_tracks]usize = undefined;
+            const given = t.gridTracks(n, &buf);
+            var weights: [max_tracks]usize = @splat(1);
+            const ncols = @max(1, @min(given.len, max_tracks));
+            var total: usize = 0;
+            for (given[0..@min(given.len, max_tracks)], 0..) |w, i| {
+                weights[i] = w;
+                total += w;
+            }
+            if (total == 0) {
+                weights = @splat(1);
+                total = ncols;
+            }
+            const inner = avail_w -| g * (ncols - 1);
+            var height: usize = 0;
+            var i: usize = 0;
+            while (i < children.len) : (i += ncols) {
+                const row_n = @min(ncols, children.len - i);
+                if (i > 0) height += g;
+                var row_h: usize = 0;
+                var before: usize = 0;
+                for (0..row_n) |c| {
+                    const tw = flow.trackWidth(inner, total, before, weights[c]);
+                    row_h = @max(row_h, layout(t, children[i + c], 0, 0, tw, 0, false).h);
+                    before += weights[c];
+                }
+                if (do_paint) {
+                    before = 0;
+                    var xx = x;
+                    for (0..row_n) |c| {
+                        const tw = flow.trackWidth(inner, total, before, weights[c]);
+                        const child = children[i + c];
+                        const sz = layout(t, child, 0, 0, tw, 0, false);
+                        const dx = shift(t.alignOf(child), tw, sz.w);
+                        _ = t.childPaint(child, xx + dx, if (top) y + height else y + height + (row_h - sz.h) / 2, tw - dx, 0);
+                        xx += tw + g;
+                        before += weights[c];
+                    }
+                }
+                height += row_h;
+            }
+            return .{ .w = avail_w, .h = height };
+        }
+
         fn layout(t: *Tree, n: Node, x: usize, y: usize, avail_w: usize, avail_h: usize, do_paint: bool) Size {
             return switch (t.kind(n)) {
                 .none => .{},
@@ -191,6 +274,7 @@ pub fn Engine(comptime Tree: type) type {
                     break :blk t.viewportPaint(n, child, x, y, avail_w, h);
                 },
                 .split => split(t, n, x, y, avail_w, avail_h, do_paint),
+                .grid => grid(t, n, x, y, avail_w, do_paint),
                 .leaf => if (do_paint) t.leafPaint(n, x, y, avail_w, avail_h) else t.leafMeasure(n, avail_w, avail_h),
             };
         }
@@ -207,6 +291,8 @@ const TestNode = struct {
     flex: usize = 0,
     top: bool = false,
     grow: usize = 0,
+    @"align": Align = .start,
+    tracks: []const usize = &.{},
     children: []const *const TestNode = &.{},
     scroll_h: usize = 0,
     left: ?*const TestNode = null,
@@ -234,6 +320,14 @@ const TestTree = struct {
     }
     fn grow(_: *TestTree, n: Node) usize {
         return n.grow;
+    }
+    fn alignOf(_: *TestTree, n: Node) Align {
+        return n.@"align";
+    }
+    fn gridTracks(_: *TestTree, n: Node, buf: *[max_tracks]usize) []const usize {
+        const count = @min(n.tracks.len, max_tracks);
+        @memcpy(buf[0..count], n.tracks[0..count]);
+        return buf[0..count];
     }
     fn gap(_: *TestTree, n: Node) usize {
         return n.gap;
@@ -399,4 +493,75 @@ test "a column offers its spare height to the children that grow" {
     try std.testing.expectEqual(@as(usize, 40 + 230 + 10), t.paints[2].y);
     // An offer smaller than the natural height changes nothing.
     try std.testing.expectEqual(@as(usize, 120), TestTree.Eng.measure(&t, &col, 200, 100).h);
+}
+
+test "a grid fills equal tracks left to right then down, each row as tall as its tallest cell" {
+    const a = TestNode{ .w = 30, .h = 20 };
+    const b = TestNode{ .w = 30, .h = 40 };
+    const grid = TestNode{ .kind = .grid, .gap = 10, .tracks = &.{ 0, 0, 0 }, .children = &.{ &a, &b, &a, &a, &b } };
+    var t = TestTree{};
+    // Two rows: 40 (b's) + gap + 40 (b's).
+    try std.testing.expectEqual(Size{ .w = 320, .h = 90 }, E.measure(&t, &grid, 320, 0));
+    try std.testing.expectEqual(Size{ .w = 320, .h = 90 }, E.paint(&t, &grid, 0, 0, 320, 0));
+    try std.testing.expectEqual(@as(usize, 5), t.n);
+    try std.testing.expectEqual(@as(usize, 0), t.paints[0].x);
+    try std.testing.expectEqual(@as(usize, 100), t.paints[0].w); // (320 - 2 gaps) / 3
+    try std.testing.expectEqual(@as(usize, 110), t.paints[1].x);
+    try std.testing.expectEqual(@as(usize, 220), t.paints[2].x);
+    try std.testing.expectEqual(@as(usize, 10), t.paints[0].y); // a centred on the 40-tall row
+    try std.testing.expectEqual(@as(usize, 0), t.paints[1].y);
+    try std.testing.expectEqual(@as(usize, 50), t.paints[4].y); // row 2 starts at 40 + gap
+    try std.testing.expectEqual(@as(usize, 110), t.paints[4].x); // second track
+}
+
+test "a grid's weighted tracks share the width like a row's flex, and cells align in them" {
+    const wide = TestNode{ .w = 500, .h = 10 };
+    const narrow_c = TestNode{ .w = 20, .h = 10, .@"align" = .center };
+    const narrow_e = TestNode{ .w = 20, .h = 10, .@"align" = .end };
+    const grid = TestNode{ .kind = .grid, .tracks = &.{ 1, 3 }, .children = &.{ &narrow_c, &wide, &narrow_e, &wide } };
+    var t = TestTree{};
+    _ = E.paint(&t, &grid, 0, 0, 400, 0);
+    try std.testing.expectEqual(@as(usize, 100), t.paints[1].x); // the 1:3 split
+    try std.testing.expectEqual(@as(usize, 300), t.paints[1].w);
+    try std.testing.expectEqual(@as(usize, 40), t.paints[0].x); // (100 - 20) / 2
+    try std.testing.expectEqual(@as(usize, 60), t.paints[0].w); // the room left after the shift
+    try std.testing.expectEqual(@as(usize, 80), t.paints[2].x); // 100 - 20
+    // No tracks given: one column.
+    const one = TestNode{ .kind = .grid, .children = &.{ &wide, &wide } };
+    try std.testing.expectEqual(Size{ .w = 400, .h = 20 }, E.measure(&t, &one, 400, 0));
+}
+
+test "alignment moves a narrow child inside a row's flex track and a column's width" {
+    const btn = TestNode{ .w = 40, .h = 10, .@"align" = .end };
+    const fill = TestNode{ .w = 10, .h = 10, .flex = 1, .@"align" = .center };
+    const label = TestNode{ .w = 50, .h = 10 };
+    const r = TestNode{ .kind = .row, .children = &.{ &label, &fill } };
+    var t = TestTree{};
+    _ = E.paint(&t, &r, 0, 0, 200, 0);
+    try std.testing.expectEqual(@as(usize, 50 + (150 - 10) / 2), t.paints[1].x); // centred in its 150 track
+    const col = TestNode{ .kind = .column, .children = &.{ &label, &btn } };
+    var t2 = TestTree{};
+    _ = E.paint(&t2, &col, 0, 0, 200, 0);
+    try std.testing.expectEqual(@as(usize, 0), t2.paints[0].x);
+    try std.testing.expectEqual(@as(usize, 160), t2.paints[1].x); // 200 - 40
+    try std.testing.expectEqual(@as(usize, 40), t2.paints[1].w);
+    // An overfull child stays at the start rather than underflowing.
+    const huge = TestNode{ .w = 900, .h = 10, .@"align" = .end };
+    const col2 = TestNode{ .kind = .column, .children = &.{&huge} };
+    var t3 = TestTree{};
+    _ = E.paint(&t3, &col2, 0, 0, 200, 0);
+    try std.testing.expectEqual(@as(usize, 0), t3.paints[0].x);
+}
+
+test "measure and paint agree on a grid inside a column" {
+    const a = TestNode{ .w = 80, .h = 20 };
+    const b = TestNode{ .w = 80, .h = 32, .@"align" = .center };
+    const grid = TestNode{ .kind = .grid, .gap = 8, .tracks = &.{ 2, 1 }, .children = &.{ &a, &b, &a } };
+    const outer = TestNode{ .kind = .column, .gap = 6, .children = &.{ &a, &grid, &a } };
+    var t = TestTree{};
+    for ([_]usize{ 50, 120, 300, 1000 }) |w| {
+        const m = E.measure(&t, &outer, w, 0);
+        const p = E.paint(&t, &outer, 7, 9, w, 0);
+        try std.testing.expectEqual(m, p);
+    }
 }

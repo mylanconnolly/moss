@@ -53,13 +53,10 @@ def personal-page [state] {
               { kind: "button", id: "smaller", label: "Smaller" }
               { kind: "button", id: "larger", label: "Larger" }
             ] }
-          { kind: "row", children: [
-              (match (theme-locked) {
-                  true => { kind: "label", wrap: true, muted: true, text: ("Theme: " + $state.theme + " (managed)") }
-                  _ => { kind: "button", id: "theme", label: ("Theme: " + $state.theme) }
-                })
-              { kind: "button", id: "contrast", label: ("Contrast: " + $state.contrast) }
-              { kind: "button", id: "colors", label: ("Colors: " + $state.colors) }
+          { kind: "column", gap: 8, children: [
+              { kind: "toggle", id: "theme", label: (match (theme-locked) { true => "Light theme (managed)"; _ => "Light theme" }), on: ($state.theme == "light"), disabled: (theme-locked) }
+              { kind: "toggle", id: "contrast", label: "High contrast", on: ($state.contrast == "high") }
+              { kind: "toggle", id: "colors", label: "Colourblind-safe colours", on: ($state.colors == "cb-safe") }
             ] }
           { kind: "row", children: [
               { kind: "button", id: "myloc", label: ("Language: " + $state.myloc) }

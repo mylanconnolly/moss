@@ -63,7 +63,9 @@ checks it, runs a line of msh on it, and stops it.
 
 `zig build run-gui -Dgui-profile=gui` opens the component gallery. It uses
 shared sections, wrapping rows, buttons (including an inert disabled state),
-and scrollable text fields. Settings uses the same components and theme palette.
+scrollable text fields, switches and a checkbox laid out in a grid, and a
+destructive action that confirms in a modal sheet (Escape cancels). Settings
+uses the same components and theme palette.
 
 Text fields support these editing gestures:
 

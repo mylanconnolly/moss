@@ -96,6 +96,112 @@ pub fn field(b: Brush, r: Rect, ed: *text.Editor, focused: bool) void {
     if (focused) b.canvas.fillRect(x + b.width(shown[ed.first..ed.cursor]), y, 2, b.line(), p.focus);
 }
 
+// --------------------------------------------------------------- toggle
+
+pub const ToggleStyle = struct {
+    on: bool,
+    focused: bool = false,
+    hovered: bool = false,
+    disabled: bool = false,
+    /// A checkbox (a square with a mark) rather than a switch (a pill
+    /// with a knob). Same model, same events; the box reads as "one of a
+    /// set of options", the switch as "a setting that takes effect".
+    check: bool = false,
+    /// The ground the label is drawn over (a section's surface, say).
+    ground: u32,
+};
+
+/// The control's own box, before its label: a switch is a pill two text
+/// heights wide, a checkbox a square — both one UI line tall, so a row
+/// of them aligns with text.
+pub fn toggleControl(b: Brush, check: bool) geometry.Size {
+    const k = b.line();
+    return if (check) .{ .w = k, .h = k } else .{ .w = k * 2 - k / 4, .h = k };
+}
+
+/// A toggle's footprint: the control, a gap, the label; as tall as a
+/// button so it sits on the same line as one.
+pub fn toggleSize(b: Brush, label: []const u8, check: bool) geometry.Size {
+    const c = toggleControl(b, check);
+    return .{ .w = c.w + (if (label.len > 0) 8 + b.width(label) else 0), .h = controlHeight(b) };
+}
+
+fn checkMark(c: *const Canvas, x: usize, y: usize, size: usize, ink: u32) void {
+    // Two strokes: a short one down to the low point, a long one up to
+    // the top right. Stamped as discs so the joint is round at any size.
+    const t = @max(1, size / 8);
+    const x0 = x + size * 25 / 100;
+    const y0 = y + size * 52 / 100;
+    const x1 = x + size * 42 / 100;
+    const y1 = y + size * 70 / 100;
+    const x2 = x + size * 76 / 100;
+    const y2 = y + size * 30 / 100;
+    stroke(c, x0, y0, x1, y1, t, ink);
+    stroke(c, x1, y1, x2, y2, t, ink);
+}
+fn stroke(c: *const Canvas, x0: usize, y0: usize, x1: usize, y1: usize, t: usize, ink: u32) void {
+    const dx: isize = @as(isize, @intCast(x1)) - @as(isize, @intCast(x0));
+    const dy: isize = @as(isize, @intCast(y1)) - @as(isize, @intCast(y0));
+    const steps: usize = @intCast(@max(@abs(dx), @abs(dy)));
+    var i: usize = 0;
+    while (i <= steps) : (i += 1) {
+        const px: isize = @as(isize, @intCast(x0)) + if (steps == 0) 0 else @divTrunc(dx * @as(isize, @intCast(i)), @as(isize, @intCast(steps)));
+        const py: isize = @as(isize, @intCast(y0)) + if (steps == 0) 0 else @divTrunc(dy * @as(isize, @intCast(i)), @as(isize, @intCast(steps)));
+        c.fillDot(@intCast(@max(0, px)), @intCast(@max(0, py)), t, ink);
+    }
+}
+
+/// A switch or a checkbox with its label. On: the primary fill, the knob
+/// (or the mark) in the primary ink; off: the raised surface with the knob
+/// in the text colour — so the state is read from the knob's side and the
+/// fill, never from colour alone. Focus thickens the outline in the focus
+/// colour, hover lifts the fill, disabled mutes everything.
+pub fn toggle(b: Brush, r: Rect, label: []const u8, style: ToggleStyle) void {
+    const p = b.pal;
+    const c = toggleControl(b, style.check);
+    const cx = r.x;
+    const cy = r.y + (r.h -| c.h) / 2;
+    const ring = if (style.focused) p.focus else p.border;
+    const ring_w = if (style.focused) p.focus_w else p.border_w;
+    var fill = if (style.disabled) p.surface else if (style.on) p.primary else p.surface_hi;
+    if (style.hovered and !style.disabled) fill = palette.shade(fill, 9, 8);
+    const mark_ink = if (style.disabled) p.text_muted else if (style.on) p.primary_ink else p.text;
+    if (style.check) {
+        b.canvas.panel(cx, cy, c.w, c.h, @max(2, control.radius - 2), fill, ring, ring_w);
+        if (style.on) checkMark(b.canvas, cx, cy, c.w, mark_ink);
+    } else {
+        b.canvas.panel(cx, cy, c.w, c.h, c.h / 2, fill, ring, ring_w);
+        const pad = ring_w + 2;
+        const d = c.h -| 2 * pad; // the knob's diameter
+        const kr = d / 2;
+        const kx = if (style.on) cx + c.w -| (pad + kr + 1) else cx + pad + kr;
+        if (kr > 0) b.canvas.fillDot(kx, cy + c.h / 2, kr, mark_ink);
+    }
+    if (label.len > 0) {
+        const ink = if (style.disabled) p.text_muted else p.text;
+        b.face.drawTrunc(b.canvas, r.x + c.w + 8, r.y + (r.h -| b.line()) / 2, .ui, label, r.w -| (c.w + 8), ink, style.ground);
+    }
+}
+
+// ---------------------------------------------------------------- sheet
+
+/// A modal sheet's corner radius and the inset of its content.
+pub const sheet_radius: usize = 10;
+pub const sheet_inset: usize = geometry.space.inset;
+/// How much the scrim darkens what is behind a sheet (0..255).
+pub const scrim_cov: u32 = 96;
+
+/// The scrim over a window's content and the sheet that floats on it: a
+/// raised surface with the window's outline, so a dialog reads as a
+/// panel of the same window rather than a second one.
+pub fn scrim(b: Brush, r: Rect) void {
+    b.canvas.dim(r.x, r.y, r.w, r.h, 0x000000, scrim_cov);
+}
+pub fn sheet(b: Brush, r: Rect) void {
+    const p = b.pal;
+    b.canvas.panel(r.x, r.y, r.w, r.h, sheet_radius, p.surface, p.window_border, @max(1, p.border_w));
+}
+
 // ------------------------------------------------------------ tab strip
 
 pub const TabItem = struct { label: []const u8, dirty: bool = false, closable: bool = true };
@@ -337,4 +443,60 @@ test "the tab strip lifts and underlines the selected tab and hits its close tar
     }
     try std.testing.expect(close_found);
     try std.testing.expectEqual(tabs.Hit.none, tabStripHit(b, r, &items, state, 0, 40)); // outside
+}
+
+test "a toggle reads its state from the fill and the knob's side, and a checkbox from its mark" {
+    var bench: Bench = .{};
+    const b = bench.brush();
+    const p = b.pal;
+    const r: Rect = .{ .x = 10, .y = 10, .w = 150, .h = controlHeight(b) };
+    const c = toggleControl(b, false);
+    try std.testing.expect(c.w > c.h and c.h == b.line());
+    const sz = toggleSize(b, "Dark", false);
+    try std.testing.expect(sz.w > c.w and sz.h == r.h);
+    // Off: no primary anywhere, the knob (text ink) sits in the left half.
+    toggle(b, r, "Dark", .{ .on = false, .ground = 0x010101 });
+    const box: Rect = .{ .x = r.x, .y = r.y + (r.h - c.h) / 2, .w = c.w, .h = c.h };
+    try std.testing.expectEqual(@as(usize, 0), countColor(&bench.canvas, box, p.primary));
+    const left: Rect = .{ .x = box.x, .y = box.y, .w = box.w / 2, .h = box.h };
+    const right: Rect = .{ .x = box.x + box.w / 2, .y = box.y, .w = box.w / 2, .h = box.h };
+    try std.testing.expect(countColor(&bench.canvas, left, p.text) > countColor(&bench.canvas, right, p.text));
+    try std.testing.expect(countColor(&bench.canvas, .{ .x = box.x + box.w + 8, .y = r.y, .w = 60, .h = r.h }, p.text) > 0); // the label
+    // On: the primary fill, the knob (primary ink) in the right half.
+    bench.canvas.fillAll(0x010101);
+    toggle(b, r, "Dark", .{ .on = true, .ground = 0x010101 });
+    try std.testing.expect(countColor(&bench.canvas, box, p.primary) > 0);
+    try std.testing.expect(countColor(&bench.canvas, right, p.primary_ink) > countColor(&bench.canvas, left, p.primary_ink));
+    // Focus: the outline is the focus colour at the control's top edge.
+    bench.canvas.fillAll(0x010101);
+    toggle(b, r, "Dark", .{ .on = true, .focused = true, .ground = 0x010101 });
+    try std.testing.expectEqual(p.focus, bench.canvas.at(box.x + box.w / 2, box.y));
+    // Disabled: muted ink only, no primary.
+    bench.canvas.fillAll(0x010101);
+    toggle(b, r, "Dark", .{ .on = true, .disabled = true, .ground = 0x010101 });
+    try std.testing.expectEqual(@as(usize, 0), countColor(&bench.canvas, r, p.primary));
+    try std.testing.expect(countColor(&bench.canvas, r, p.text_muted) > 0);
+    // A checkbox is square; checked, it carries a mark in the primary ink.
+    const cb = toggleControl(b, true);
+    try std.testing.expectEqual(cb.w, cb.h);
+    bench.canvas.fillAll(0x010101);
+    toggle(b, r, "", .{ .on = false, .check = true, .ground = 0x010101 });
+    const cbox: Rect = .{ .x = r.x, .y = r.y + (r.h - cb.h) / 2, .w = cb.w, .h = cb.h };
+    try std.testing.expectEqual(@as(usize, 0), countColor(&bench.canvas, cbox, p.primary_ink));
+    toggle(b, r, "", .{ .on = true, .check = true, .ground = 0x010101 });
+    try std.testing.expect(countColor(&bench.canvas, cbox, p.primary_ink) > 0);
+    try std.testing.expect(countColor(&bench.canvas, cbox, p.primary) > 0);
+}
+
+test "a sheet floats on a scrim that dims what is behind it" {
+    var bench: Bench = .{};
+    const b = bench.brush();
+    bench.canvas.fillAll(0xffffff);
+    scrim(b, .{ .x = 0, .y = 0, .w = 200, .h = 60 });
+    const dimmed = bench.canvas.at(5, 5);
+    try std.testing.expect(dimmed != 0xffffff and dimmed != 0);
+    sheet(b, .{ .x = 40, .y = 10, .w = 120, .h = 40 });
+    try std.testing.expectEqual(b.pal.surface, bench.canvas.at(100, 30));
+    try std.testing.expectEqual(b.pal.window_border, bench.canvas.at(100, 10));
+    try std.testing.expectEqual(dimmed, bench.canvas.at(5, 5)); // the scrim outside the sheet stays
 }

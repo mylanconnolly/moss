@@ -2753,10 +2753,16 @@ supervises), and memory history per unit beside the CPU one.
   a component gallery, captured GUI pointer gestures, and Settings adoption. Keep GUI definitions in mshl and
   rendering/interaction in the toolkit; no new ambient authority or local-only
   protocol. See DESIGN's shared GUI layout section.
-- Next: general grid tracks and alignment, menus/toggles/dialogs, and broader
-  widget identity/lifetime handling. Vertical viewports, focus reveal, wrapped
-  labels, weighted rows, and stable focus IDs landed on 2026-09-12. Carry the visual system
-  through Files, login, terminal, dock, and top bar; validate all themes/scales.
+- Next: menus beyond the built-in profiles, and broader widget
+  identity/lifetime handling. Vertical viewports, focus reveal, wrapped
+  labels, weighted rows, and stable focus IDs landed on 2026-09-12; grid
+  tracks with per-child alignment, switches and checkboxes, and modal
+  dialogs as data in the view landed on 2026-10-08 (DESIGN, "Switches,
+  grids and sheets"). Carry the visual system through Files, login,
+  terminal, dock, and top bar; validate all themes/scales. Still the
+  runtime's own: `drawButton` paints beside the toolkit's `paint.button`
+  (hover, press and the danger variant are not in the toolkit's style
+  yet), list rows and breadcrumbs.
 
 **GUI resource capacity**
 
@@ -2768,12 +2774,26 @@ supervises), and memory history per unit beside the CPU one.
 
 **GUI editing residuals**
 
-- Double-click word selection, Unicode word/grapheme navigation, and IME/non-US
-  layouts. Session clipboard shortcuts and undo/redo landed on 2026-09-12.
-  The first editing pass provides a caret, keyboard
-  and in-window drag selection, local kill/yank, and stable Tab ownership.
+- Unicode word/grapheme navigation (the editor's word class is ASCII
+  letters, digits and underscore; a multi-byte character is one step but
+  one class) and IME/non-US layouts. Session clipboard shortcuts and
+  undo/redo landed on 2026-09-12; multi-click selection (word, line, all)
+  on 2026-09-24. The first editing pass provides a caret, keyboard and
+  in-window drag selection, local kill/yank, and stable Tab ownership.
 
 ### Landed (the story, with the bugs each piece found)
+
+- ✅ **Switches, grids and sheets (2026-10-08).** The GUI foundations
+  resumed after the browser arc: `toggle` and `checkbox` widgets whose
+  state the app owns (click, Enter or Space fires the id), painted by the
+  toolkit and pixel-tested; a `grid` container with equal or weighted
+  column tracks and `align: "center" | "end"` on any child of a grid, a
+  row's flex track or a column; and dialogs as data — `dialog: {…}` on
+  the view's root paints a modal sheet on a scrim, confines focus and
+  clicks to it, fires `cancel` on Escape and hands the focus back on
+  close. Settings' three appearance buttons became switches; the gallery
+  and its drill cover the rest. Bug found by the screenshot: the dialog's
+  widgets were painted under the body's indices and never showed focus.
 
 - **Global menu bar and Moss mark (2026-09-12).** Focused applications now
   publish shared File/Edit/Go/Window profiles with enabled commands; Editor,
