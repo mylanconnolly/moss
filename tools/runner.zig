@@ -2243,12 +2243,11 @@ fn parsePopup(content: []const u8) ?[4]u32 {
     // "X,Y ih=H n=N"
     const comma = std.mem.indexOfScalar(u8, rest, ',') orelse return null;
     const sp = std.mem.indexOfScalar(u8, rest, ' ') orelse return null;
-    const ih_at = std.mem.indexOf(u8, rest, "ih=") orelse return null;
-    const n_at = std.mem.indexOf(u8, rest, "n=") orelse return null;
     const x = std.fmt.parseInt(u32, rest[0..comma], 10) catch return null;
     const y = std.fmt.parseInt(u32, rest[comma + 1 .. sp], 10) catch return null;
-    const ih = std.fmt.parseInt(u32, rest[ih_at + 3 .. n_at - 1], 10) catch return null;
-    const n = std.fmt.parseInt(u32, rest[n_at + 2 ..], 10) catch return null;
+    // Digits only: the line carries more fields after these (`level=`).
+    const ih = parseAfter(rest, "ih=") orelse return null;
+    const n = parseAfter(rest, " n=") orelse return null;
     return .{ x, y, ih, n };
 }
 
@@ -2274,6 +2273,19 @@ fn topbarDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     if (!try waitLogN(log_path, "topbar: popup at", popups + 2, "Control-F2 did not reopen the system menu", spec, polls)) return false;
     sleepMs(300);
     _ = q.screendump(check_dir ++ "/menu-system-keyboard.ppm");
+    // A menu longer than the room scrolls: Right moves to "Many" (41 rows),
+    // End selects the last row and the popup scrolls to show it, Enter
+    // selects it; the bar logs the selection.
+    if (!q.sendKey("right")) return false;
+    if (!try waitLogN(log_path, "topbar: popup at", popups + 3, "Right did not open the next menu", spec, polls)) return false;
+    if (!q.sendKey("end")) return false;
+    if (!try waitLogN(log_path, "topbar: scrolled first=", 1, "End did not scroll the long menu", spec, polls)) return false;
+    sleepMs(200);
+    _ = q.screendump(check_dir ++ "/menu-scrolled.ppm");
+    if (!q.sendKey("ret")) return false;
+    if (!try waitLogN(log_path, "topbar: selected many Item 40", 1, "the scrolled selection did not fire", spec, polls)) return false;
+    if (!q.chord("ctrl", "f2")) return false;
+    if (!try waitLogN(log_path, "topbar: popup at", popups + 4, "Control-F2 did not reopen the system menu after the long menu", spec, polls)) return false;
     const item = popupItem(readLog(log_path), "Log Out") orelse {
         reportFailure(spec.name, "could not find the Log Out item", log_path);
         return false;
@@ -3749,6 +3761,27 @@ fn guishellroDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
                 return sfail(spec, log_path, "chrome did not follow the contrast change");
             }
         }
+    }
+    // Settings' own menus in the bar: open "Settings", open its nested
+    // "Appearance", pick "High contrast" — the compositor routes the
+    // application key and the runtime fires the switch's id. Escape then
+    // leaves things as they were (the switch flipped but not applied).
+    {
+        const menu = topbarMenu(readLog(log_path), "Settings") orelse return sfail(spec, log_path, "the bar did not show Settings' own menu");
+        const popups = countOccurrences(readLog(log_path), "topbar: popup at");
+        if (!clickScanout(&q, menu[0], menu[1])) return sfail(spec, log_path, "open the Settings menu");
+        if (!try waitLogN(log_path, "topbar: popup at", popups + 1, "the Settings menu did not open", spec, polls)) return false;
+        const appearance = popupItem(readLog(log_path), "Appearance") orelse return sfail(spec, log_path, "find the Appearance row");
+        if (!clickScanout(&q, appearance[0], appearance[1])) return sfail(spec, log_path, "open the Appearance submenu");
+        if (!try waitLogN(log_path, "topbar: popup at", popups + 2, "the Appearance submenu did not open", spec, polls)) return false;
+        sleepMs(200);
+        _ = q.screendump(check_dir ++ "/settings-submenu.ppm");
+        const row = popupItem(readLog(log_path), "High contrast") orelse return sfail(spec, log_path, "find the High contrast row");
+        const fired_before = countOccurrences(readLog(log_path), "gui: menu item contrast");
+        if (!clickScanout(&q, row[0], row[1])) return sfail(spec, log_path, "pick High contrast");
+        if (!try waitLogN(log_path, "gui: menu item contrast", fired_before + 1, "the submenu item did not reach Settings", spec, polls)) return false;
+        if (!try waitLogN(log_path, "accepted=true", 1, "the compositor refused the application key", spec, polls)) return false;
+        sleepMs(200);
     }
     // A non-administrator's Activity: the session init refuses the unit's
     // introspect grant, and the System tab says so instead of listing the
@@ -6192,6 +6225,17 @@ fn popupItem(content: []const u8, label: []const u8) ?[2]u32 {
         rest = rest[at + line_end ..];
     }
     return null;
+}
+
+/// A bar menu title's centre from the last "topbar: menu <id> cx=X cy=Y".
+fn topbarMenu(content: []const u8, id: []const u8) ?[2]u32 {
+    var kb: [48]u8 = undefined;
+    const key = std.fmt.bufPrint(&kb, "topbar: menu {s} cx=", .{id}) catch return null;
+    const at = std.mem.lastIndexOf(u8, content, key) orelse return null;
+    const line = content[at..];
+    const cx = parseAfter(line, "cx=") orelse return null;
+    const cy = parseAfter(line, "cy=") orelse return null;
+    return .{ cx, cy };
 }
 
 /// The monitor's identity as the compositor logged it at boot

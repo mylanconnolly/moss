@@ -1,11 +1,52 @@
 //! Fixed, allocation-free application menu vocabulary. Clients opt into a
 //! profile and disable unavailable actions; the compositor validates every
 //! invocation against this same catalog before routing it to the owner.
+//!
+//! The `custom` profile is an application's own menus: up to `max_menus`
+//! titled menus (a nested one is a slot another item points at with
+//! `sub`) of up to `max_app_items` items, each item an *application key*
+//! (`appItemKey(i)`) the compositor routes like any catalog key — so the
+//! validation is the same (a key the app did not publish, or disabled in
+//! its mask, is refused) while the labels are the app's. Titles and
+//! labels travel to the compositor packed in message words (16 bytes a
+//! title, 32 a label in two parts) and the bar reads them back; the
+//! Window menu of the generic catalog is appended after them.
 const std = @import("std");
 const k = @import("keyboard.zig");
-pub const Profile = enum(u64) { generic, editor, terminal, files, picker };
+pub const Profile = enum(u64) { generic, editor, terminal, files, picker, custom };
 pub fn profileFromInt(value: u64) ?Profile {
-    return if (value <= @intFromEnum(Profile.picker)) @enumFromInt(value) else null;
+    return if (value <= @intFromEnum(Profile.custom)) @enumFromInt(value) else null;
+}
+/// The application keys: `max_app_items` codes above the registry's own.
+pub const app_item_base: u8 = 180;
+pub const max_app_items: usize = 32;
+pub const max_menus: usize = 8;
+pub const title_bytes: usize = 16;
+pub const label_bytes: usize = 32;
+pub fn appItemKey(index: usize) u8 {
+    return app_item_base + @as(u8, @intCast(index));
+}
+pub fn appItemIndex(key: u8) ?usize {
+    return if (key >= app_item_base and key < app_item_base + max_app_items) key - app_item_base else null;
+}
+/// What `set_menu_item` and `menu_item` carry beside the label words:
+/// the surface (or, in a reply, nothing), the item's index, which half of
+/// the label the words hold, the menu slot it sits in, its key (0 for a
+/// separator or a submenu header) and the slot it opens (`sub`, 1-based,
+/// 0 for none).
+pub const ItemMeta = struct { surface: u32 = 0, index: u8, part: u1 = 0, menu: u8, key: u8, sub: u8 };
+pub fn packItemMeta(m: ItemMeta) u64 {
+    return @as(u64, m.surface) | (@as(u64, m.index) << 32) | (@as(u64, m.part) << 40) | (@as(u64, m.menu & 0xf) << 41) | (@as(u64, m.key) << 48) | (@as(u64, m.sub) << 56);
+}
+pub fn unpackItemMeta(w: u64) ItemMeta {
+    return .{ .surface = @truncate(w), .index = @truncate(w >> 32), .part = @truncate(w >> 40), .menu = @truncate((w >> 41) & 0xf), .key = @truncate(w >> 48), .sub = @truncate(w >> 56) };
+}
+/// `set_menu_title` / `menu_slot`: the surface (or token) and the slot.
+pub fn packSlot(surface_or_token: u64, slot: u8) u64 {
+    return (surface_or_token & 0xffff_ffff_ffff) | (@as(u64, slot) << 56);
+}
+pub fn unpackSlot(w: u64) struct { id: u64, slot: u8 } {
+    return .{ .id = w & 0xffff_ffff_ffff, .slot = @truncate(w >> 56) };
 }
 // The menu-only actions, under the names the menus use; the codes are
 // the keyboard registry's so they cannot collide with a chord.
@@ -61,7 +102,7 @@ const files = [_]Menu{ .{ .title = "File", .items = &files_file }, .{ .title = "
 const picker = [_]Menu{.{ .title = "File", .items = &.{.{ .label = "Cancel", .shortcut = "Esc", .key = k.close_window }} }};
 pub fn catalog(profile: Profile) []const Menu {
     return switch (profile) {
-        .generic => &generic,
+        .generic, .custom => &generic, // an app's own menus, then Window
         .editor => &editor,
         .terminal => &terminal,
         .files => &files,
@@ -72,13 +113,22 @@ pub fn catalog(profile: Profile) []const Menu {
 /// mask and the compositor's check are both built from this table, so the
 /// order only has to agree within one build — but append rather than
 /// reorder, so a mask logged by one binary reads the same in the next.
-const actions = [_]u8{
+const catalog_actions = [_]u8{
     k.select_all,  k.copy,         k.cut,           k.paste,            k.undo,
     k.redo,        k.new_document, k.open_document, k.save_document,    k.save_as,
     k.find,        k.close_window, k.minimize,      k.enclosing_folder, k.refresh,
     k.home_folder, k.next_tab,     k.previous_tab,  k.close_all,        k.readonly_view,
     k.leave_view,
 };
+/// The catalog's keys, then the application keys, in bit order.
+const actions = catalog_actions ++ blk: {
+    var app: [max_app_items]u8 = undefined;
+    for (0..max_app_items) |i| app[i] = appItemKey(i);
+    break :blk app;
+};
+comptime {
+    std.debug.assert(actions.len <= 64);
+}
 /// Stable action bits, independent of menu placement or duplicated Close;
 /// zero for a key no menu carries.
 pub fn bit(key: u8) u64 {
@@ -89,6 +139,9 @@ pub fn offered(profile: Profile) u64 {
     var mask: u64 = 0;
     for (catalog(profile)) |menu| for (menu.items) |item| {
         mask |= bit(item.key);
+    };
+    if (profile == .custom) for (0..max_app_items) |i| {
+        mask |= bit(appItemKey(i));
     };
     return mask;
 }
@@ -111,10 +164,11 @@ test "catalog actions have distinct bits and invalid profiles are rejected" {
         try std.testing.expectEqual(@as(u64, 0), seen & b);
         seen |= b;
     }
-    // Every table entry is a catalog key somewhere, and every catalog key
-    // is in the table: no dead bits, no unrouteable item.
+    // Every table entry is a catalog key somewhere (the application keys
+    // are the custom profile's), and every catalog key is in the table:
+    // no dead bits, no unrouteable item.
     for (actions) |a| {
-        var carried = false;
+        var carried = appItemIndex(a) != null;
         for (std.enums.values(Profile)) |profile| {
             for (catalog(profile)) |menu| for (menu.items) |item| {
                 if (item.key == a) carried = true;
@@ -137,4 +191,23 @@ test "catalog actions have distinct bits and invalid profiles are rejected" {
         }
     }
     try std.testing.expect(profileFromInt(100) == null);
+}
+test "the custom profile offers its application keys and the Window menu, by the app's mask" {
+    try std.testing.expect(allows(.custom, ~@as(u64, 0), appItemKey(0)));
+    try std.testing.expect(allows(.custom, ~@as(u64, 0), appItemKey(max_app_items - 1)));
+    try std.testing.expect(allows(.custom, ~@as(u64, 0), k.close_window));
+    try std.testing.expect(!allows(.custom, ~@as(u64, 0), k.save_document));
+    try std.testing.expect(!allows(.custom, ~bit(appItemKey(3)), appItemKey(3))); // disabled by the app
+    try std.testing.expect(!allows(.editor, ~@as(u64, 0), appItemKey(0))); // no other profile routes them
+    try std.testing.expect(appItemIndex(app_item_base + max_app_items) == null);
+    try std.testing.expect(appItemIndex(k.leave_view) == null);
+    try std.testing.expect(profileFromInt(@intFromEnum(Profile.custom)) == .custom);
+}
+test "item and slot metadata survive packing" {
+    const m: ItemMeta = .{ .surface = 7, .index = 31, .part = 1, .menu = 5, .key = appItemKey(9), .sub = 3 };
+    const back = unpackItemMeta(packItemMeta(m));
+    try std.testing.expectEqual(m, back);
+    const sl = unpackSlot(packSlot(0x1234_5678_9abc, 7));
+    try std.testing.expectEqual(@as(u64, 0x1234_5678_9abc), sl.id);
+    try std.testing.expectEqual(@as(u8, 7), sl.slot);
 }

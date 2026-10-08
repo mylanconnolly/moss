@@ -228,9 +228,12 @@ fabric spawns, not as the user — so per-user identity on the fabric is
 open; remote files in Nodes (Files' Network sidebar has them);
 starting more than one guest (the second NIC is the one guest's).
 
-**Menu extensions.** The global bar uses typed built-in profiles today. Add
-client-defined menu schemas, nested submenus, and scrollable overflow when
-applications need menus beyond those profiles.
+**Menu extensions.** ✅ Landed 2026-10-08 (DESIGN, "Menus beyond the
+profiles"): an application's own menus as the `custom` profile over
+application keys the compositor still validates, nested one level,
+popups that scroll past the room. Left for a later pass: shortcut
+hints on custom items, deeper nesting, items that change while a
+window is open.
 
 **Network settings (2026-09-17, in progress).** A Network tab in
 Settings — every NIC, DHCP or static addresses, gateway, resolvers —
@@ -2753,9 +2756,12 @@ supervises), and memory history per unit beside the CPU one.
   a component gallery, captured GUI pointer gestures, and Settings adoption. Keep GUI definitions in mshl and
   rendering/interaction in the toolkit; no new ambient authority or local-only
   protocol. See DESIGN's shared GUI layout section.
-- Next: menus beyond the built-in profiles, and broader widget
-  identity/lifetime handling. Vertical viewports, focus reveal, wrapped
-  labels, weighted rows, and stable focus IDs landed on 2026-09-12; grid
+- Next: what the 2026-10-08 passes left (above and under "Menu
+  extensions"): the light theme end to end, list rows and breadcrumbs
+  as toolkit painters, shortcut hints on custom menu items. Vertical
+  viewports, focus reveal, wrapped labels, weighted rows, and stable
+  focus IDs landed on 2026-09-12; menus beyond the built-in profiles
+  and widget identity/lifetime landed on 2026-10-08; grid
   tracks with per-child alignment, switches and checkboxes, and modal
   dialogs as data in the view landed on 2026-10-08 (DESIGN, "Switches,
   grids and sheets"); the same day, one button painter (the dock's
@@ -2787,6 +2793,23 @@ supervises), and memory history per unit beside the CPU one.
   in-window drag selection, local kill/yank, and stable Tab ownership.
 
 ### Landed (the story, with the bugs each piece found)
+
+- ✅ **The GUI foundations list, worked through (2026-10-08).** Four
+  commits after the switches/grids/sheets one: one button painter (the
+  dock's pills included); widget identity and lifetime by render with
+  every table limit named in the log; the visual system carried to the
+  edges (popup rows as toolkit painters, the compositor's ground a
+  palette token the bar declares, live palette refresh on the
+  appearance tick in every resident loop and open window, a
+  high-contrast pass over the whole desktop in a drill); and menus
+  beyond the built-in profiles (the `custom` profile over application
+  keys, labels published to and read back from the compositor, one
+  level of submenus, scrolling popups). Bugs found on the way, all in
+  drills or chrome: two stale waits in the guishell drill (an earlier
+  step's log line satisfying a later wait), a surface id reused by a
+  reopened window skipping its menu publish, a never-focused submenu
+  being told "not focused" and taken for a click elsewhere, and pills
+  vanishing at high contrast.
 
 - ✅ **Switches, grids and sheets (2026-10-08).** The GUI foundations
   resumed after the browser arc: `toggle` and `checkbox` widgets whose

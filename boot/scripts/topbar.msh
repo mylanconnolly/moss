@@ -28,6 +28,7 @@ let final = (gui {
         {
           left: [
             { kind: "menu", id: "system", title: "Moss", icon: "moss", icon_only: true, items: ["About This System", "Settings…", "Log Out"] }
+            { kind: "menu", id: "many", title: "Many", items: ((range 1 41) | map { "Item " + (str $it) }) }
             { kind: "label", muted: true, text: $state.note }
           ]
           right: [

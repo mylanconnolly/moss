@@ -115,6 +115,15 @@ var fb_chunk_pages: [n_chunks]u64 = @splat(0);
 var fb_chunk_start: [n_chunks]u64 = @splat(0); // linear byte offset of each chunk
 
 const max_surfaces = 16;
+/// One published custom menu item (see shared/menus.zig).
+const MenuItemRec = struct {
+    used: bool = false,
+    menu: u8 = 0,
+    key: u8 = 0,
+    sub: u8 = 0,
+    label: [shared.menus.label_bytes]u8 = @splat(0),
+    label_len: u8 = 0,
+};
 const Surface = struct {
     used: bool = false,
     shm: u64 = 0,
@@ -140,6 +149,12 @@ const Surface = struct {
     menu_profile: shared.menus.Profile = .generic,
     menu_enabled: u64 = 0,
     menu_key: u8 = 0,
+    /// The custom profile's schema: slot titles and items, as the owner
+    /// published them (shared/menus.zig). Cleared when the owner publishes
+    /// a catalog profile instead.
+    menu_titles: [shared.menus.max_menus][shared.menus.title_bytes]u8 = @splat(@splat(0)),
+    menu_title_len: [shared.menus.max_menus]u8 = @splat(0),
+    menu_items: [shared.menus.max_app_items]MenuItemRec = @splat(.{}),
     incarnation: u64 = 0,
     // What we last told this surface's owner about its focus. Defaults true
     // to match a client's assumption that a fresh window is focused: a
@@ -1506,7 +1521,73 @@ fn serveSurfaces(chan_h: u64) noreturn {
                     sf.?.menu_enabled = mask;
                     if (menu_app == q.surface) menu_token += 1;
                 }
+                if (profile.? != .custom) {
+                    sf.?.menu_title_len = @splat(0);
+                    sf.?.menu_items = @splat(.{});
+                }
                 _ = usys.replyTypedTo(shared.GpuResp, chan_h, .ok, 0, token);
+            },
+            .set_menu_title => |q| {
+                const sl = shared.menus.unpackSlot(q.meta);
+                const sf = findSurface(sl.id);
+                if (sf == null or sf.?.owner != badge or sl.slot >= shared.menus.max_menus) {
+                    _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 22 } }, 0, token);
+                    continue;
+                }
+                var tbuf: [24]u8 = undefined;
+                const t = shared.wordsToStr(&tbuf, .{ q.a, q.b, 0 });
+                const n = @min(t.len, shared.menus.title_bytes);
+                @memcpy(sf.?.menu_titles[sl.slot][0..n], t[0..n]);
+                sf.?.menu_title_len[sl.slot] = @intCast(n);
+                if (menu_app == sl.id) menu_token += 1;
+                _ = usys.replyTypedTo(shared.GpuResp, chan_h, .ok, 0, token);
+            },
+            .set_menu_item => |q| {
+                const m = shared.menus.unpackItemMeta(q.meta);
+                const sf = findSurface(m.surface);
+                if (sf == null or sf.?.owner != badge or m.index >= shared.menus.max_app_items or m.menu >= shared.menus.max_menus or m.sub > shared.menus.max_menus) {
+                    _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 22 } }, 0, token);
+                    continue;
+                }
+                const item = &sf.?.menu_items[m.index];
+                var lbuf: [24]u8 = undefined;
+                const part = shared.wordsToStr(&lbuf, .{ q.a, q.b, 0 });
+                const half = shared.menus.label_bytes / 2;
+                const n = @min(part.len, half);
+                if (m.part == 0) {
+                    item.* = .{ .used = true, .menu = m.menu, .key = m.key, .sub = m.sub };
+                    @memcpy(item.label[0..n], part[0..n]);
+                    item.label_len = @intCast(n);
+                } else if (item.used and item.label_len == half) {
+                    @memcpy(item.label[half .. half + n], part[0..n]);
+                    item.label_len = @intCast(half + n);
+                }
+                if (menu_app == m.surface) menu_token += 1;
+                _ = usys.replyTypedTo(shared.GpuResp, chan_h, .ok, 0, token);
+            },
+            .menu_slot => |q| {
+                const sl = shared.menus.unpackSlot(q.meta);
+                if (menuTarget(sl.id)) |sf| if (sl.slot < shared.menus.max_menus) {
+                    const words = shared.strToWords(sf.menu_titles[sl.slot][0..sf.menu_title_len[sl.slot]]);
+                    _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .menu_title = .{ .a = words[0], .b = words[1] } }, 0, token);
+                    continue;
+                };
+                _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 22 } }, 0, token);
+            },
+            .menu_item => |q| {
+                const m = shared.menus.unpackItemMeta(q.meta);
+                const target: u64 = q.meta & 0xffff_ffff; // the token travels in the surface field
+                if (menuTarget(target)) |sf| if (m.index < shared.menus.max_app_items) {
+                    const item = sf.menu_items[m.index];
+                    const half = shared.menus.label_bytes / 2;
+                    const lo = if (m.part == 0) 0 else half;
+                    const hi = @min(@as(usize, item.label_len), lo + half);
+                    const words = shared.strToWords(if (item.used and hi > lo) item.label[lo..hi] else "");
+                    const meta = shared.menus.packItemMeta(.{ .surface = @intFromBool(item.used), .index = m.index, .part = m.part, .menu = item.menu, .key = item.key, .sub = item.sub });
+                    _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .menu_item = .{ .meta = meta, .a = words[0], .b = words[1] } }, 0, token);
+                    continue;
+                };
+                _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 22 } }, 0, token);
             },
             .set_strut => |q| {
                 const sf = findSurface(q.surface);

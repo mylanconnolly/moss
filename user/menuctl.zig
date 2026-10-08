@@ -50,6 +50,48 @@ pub fn menuTitle(token: u64) [16]u8 {
     return result;
 }
 
+/// A custom menu's slot title (NUL-padded; empty for an unused slot).
+pub fn menuSlot(token: u64, slot: u8) [shared.menus.title_bytes]u8 {
+    var result: [shared.menus.title_bytes]u8 = @splat(0);
+    const rep = call(wf.chan, .{ .menu_slot = .{ .meta = shared.menus.packSlot(token, slot) } }) orelse return result;
+    switch (rep) {
+        .menu_title => |t| {
+            var buf: [24]u8 = undefined;
+            const title = shared.wordsToStr(&buf, .{ t.a, t.b, 0 });
+            const n = @min(title.len, result.len);
+            @memcpy(result[0..n], title[0..n]);
+        },
+        else => {},
+    }
+    return result;
+}
+pub const CustomItem = struct { used: bool = false, menu: u8 = 0, key: u8 = 0, sub: u8 = 0, label: [shared.menus.label_bytes]u8 = @splat(0), len: u8 = 0 };
+/// A custom menu's item by index, its label read in two parts.
+pub fn menuItem(token: u64, index: u8) CustomItem {
+    var item: CustomItem = .{};
+    for ([_]u1{ 0, 1 }) |part| {
+        const rep = call(wf.chan, .{ .menu_item = .{ .meta = shared.menus.packItemMeta(.{ .surface = @intCast(token & 0xffff_ffff), .index = index, .part = part, .menu = 0, .key = 0, .sub = 0 }) } }) orelse return item;
+        switch (rep) {
+            .menu_item => |it| {
+                const meta = shared.menus.unpackItemMeta(it.meta);
+                if (meta.surface == 0) return item; // unused
+                item.used = true;
+                item.menu = meta.menu;
+                item.key = meta.key;
+                item.sub = meta.sub;
+                var buf: [24]u8 = undefined;
+                const text = shared.wordsToStr(&buf, .{ it.a, it.b, 0 });
+                const n = @min(text.len, item.label.len - item.len);
+                @memcpy(item.label[item.len .. item.len + n], text[0..n]);
+                item.len += @intCast(n);
+                if (text.len < shared.menus.label_bytes / 2) return item; // no second part
+            },
+            else => return item,
+        }
+    }
+    return item;
+}
+
 /// Invoke a menu item on the application the token names. The
 /// compositor validates the key against the profile and mask it holds.
 pub fn invokeMenu(control: u64, token: u64, key: u8) bool {

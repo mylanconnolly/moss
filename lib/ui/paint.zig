@@ -229,7 +229,12 @@ pub fn sheet(b: Brush, r: Rect) void {
 
 // ------------------------------------------------------------ menu rows
 
-pub const MenuItemStyle = struct { selected: bool = false, enabled: bool = true };
+pub const MenuItemStyle = struct {
+    selected: bool = false,
+    enabled: bool = true,
+    /// The row opens a nested menu: a caret at the right says so.
+    submenu: bool = false,
+};
 /// A menu row's height: a text line with the item padding; a separator
 /// is a third of a line.
 pub fn menuRowHeight(b: Brush) usize {
@@ -253,10 +258,13 @@ pub fn menuItem(b: Brush, r: Rect, label: []const u8, shortcut: []const u8, styl
     const ink = if (!style.enabled) p.text_muted else if (selected) p.primary_ink else p.text;
     if (selected) b.canvas.fillRoundRect(r.x + 4, r.y, r.w -| 8, r.h, 4, bg);
     const ty = r.y + (r.h -| b.line()) / 2;
-    const sw = b.width(shortcut);
+    const caret = if (style.submenu) @max(8, b.line() * 3 / 5) else 0;
+    const sw = if (style.submenu) caret else b.width(shortcut);
     const gap: usize = if (sw > 0) 24 else 0;
     b.face.drawTrunc(b.canvas, r.x + 12, ty, .ui, label, r.w -| (24 + sw + gap), ink, bg);
-    if (sw > 0 and sw + 24 < r.w) b.face.draw(b.canvas, r.x + r.w - 12 - sw, ty, .ui, shortcut, ink, bg);
+    if (style.submenu) {
+        if (caret + 24 < r.w) b.icon(.forward, caret, r.x + r.w - 12 - caret, r.y + (r.h -| caret) / 2, ink);
+    } else if (sw > 0 and sw + 24 < r.w) b.face.draw(b.canvas, r.x + r.w - 12 - sw, ty, .ui, shortcut, ink, bg);
 }
 
 // ------------------------------------------------------------ tab strip
@@ -611,6 +619,14 @@ test "a menu row lifts its selection on the primary band, mutes a disabled one, 
     menuItem(b, r, "Save", "", .{ .selected = true, .enabled = false });
     try std.testing.expectEqual(@as(usize, 0), countColor(&bench.canvas, r, p.primary)); // no band for a disabled row
     try std.testing.expect(countColor(&bench.canvas, r, p.text_muted) > 0);
+    // A submenu row carries a caret at its right edge instead of a shortcut.
+    bench.canvas.fillAll(0x010101);
+    menuItem(b, r, "More", "", .{ .submenu = true });
+    var caret_ink: usize = 0; // the caret is anti-aliased, so count any ink at the right edge
+    for (0..r.h) |y| for (170..200) |x| {
+        if (bench.canvas.at(x, y) != 0x010101) caret_ink += 1;
+    };
+    try std.testing.expect(caret_ink > 0);
     const sep: Rect = .{ .x = 0, .y = 30, .w = 200, .h = menuSeparatorHeight(b) };
     menuSeparator(b, sep);
     try std.testing.expectEqual(p.border, bench.canvas.at(100, 30 + sep.h / 2));

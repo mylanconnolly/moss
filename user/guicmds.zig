@@ -753,6 +753,108 @@ fn containsPage(node: Value, id: []const u8) bool {
     return false;
 }
 
+/// An application's own menus: `gui { menus: { File: [ { text, id,
+/// disabled }, "-", { text, items: [ … ] } ], … } }` — each key a menu
+/// title (in record order), each entry an item that fires `{ id }` from
+/// the bar, a `"-"` rule, or a nested menu one level deep. The titles and
+/// labels are published to the compositor for the bar to read back; the
+/// keys are application keys (shared/menus.zig) the compositor routes
+/// like any catalog key, so the bar cannot invoke what the app did not
+/// publish or disabled. A record here replaces the `menus: "files"`
+/// profile string; the generic Window menu follows the app's own.
+const CustomItem = struct {
+    label: [shared.menus.label_bytes]u8 = @splat(0),
+    label_len: u8 = 0,
+    menu: u8 = 0,
+    key: u8 = 0,
+    sub: u8 = 0,
+    id: [32]u8 = @splat(0),
+    id_len: u8 = 0,
+};
+const CustomMenus = struct {
+    titles: [shared.menus.max_menus][shared.menus.title_bytes]u8 = @splat(@splat(0)),
+    title_len: [shared.menus.max_menus]u8 = @splat(0),
+    nslots: usize = 0,
+    items: [shared.menus.max_app_items]CustomItem = @splat(.{}),
+    nitems: usize = 0,
+    disabled: u64 = 0,
+};
+var custom_menus: CustomMenus = .{};
+fn customSlot(title: []const u8) ?u8 {
+    const c = &custom_menus;
+    if (c.nslots == shared.menus.max_menus) {
+        warn("custom menus (8); this one is dropped", title);
+        return null;
+    }
+    const n = @min(title.len, shared.menus.title_bytes);
+    @memcpy(c.titles[c.nslots][0..n], title[0..n]);
+    c.title_len[c.nslots] = @intCast(n);
+    c.nslots += 1;
+    return @intCast(c.nslots - 1);
+}
+fn customItem(slot: u8, label: []const u8, key: u8, sub: u8, id: []const u8) void {
+    const c = &custom_menus;
+    if (c.nitems == shared.menus.max_app_items) {
+        warn("custom menu items (32); this one is dropped", label);
+        return;
+    }
+    var item: CustomItem = .{ .menu = slot, .key = key, .sub = sub };
+    item.label_len = @intCast(@min(label.len, item.label.len));
+    @memcpy(item.label[0..item.label_len], label[0..item.label_len]);
+    item.id_len = @intCast(@min(id.len, item.id.len));
+    @memcpy(item.id[0..item.id_len], id[0..item.id_len]);
+    c.items[c.nitems] = item;
+    c.nitems += 1;
+}
+fn customItems(slot: u8, list: []const Value, depth: usize) void {
+    for (list) |entry| switch (entry) {
+        .str => |s| if (std.mem.eql(u8, s, "-")) customItem(slot, "", 0, 0, ""),
+        .record => |r| {
+            const text = strField(r, "text");
+            const nested = if (r.get("items")) |v| (if (v == .list) v.list else null) else null;
+            if (nested) |sub_list| {
+                if (depth > 0) {
+                    warn("custom menus nest one level; this submenu is dropped", text);
+                    continue;
+                }
+                const sub = customSlot(text) orelse continue;
+                customItem(slot, text, 0, sub + 1, "");
+                customItems(sub, sub_list, depth + 1);
+                continue;
+            }
+            // The item's key is its index in the table: the compositor
+            // routes it back as that application key.
+            const key = shared.menus.appItemKey(custom_menus.nitems);
+            if (custom_menus.nitems < shared.menus.max_app_items and (if (r.get("disabled")) |d| d.asBool() else false)) custom_menus.disabled |= shared.menus.bit(key);
+            customItem(slot, text, key, 0, strField(r, "id"));
+        },
+        else => {},
+    };
+}
+/// True when the spec declares its own menus (a record under `menus`).
+fn buildCustomMenus(spec: mshl.Record) bool {
+    custom_menus = .{};
+    const v = spec.get("menus") orelse return false;
+    if (v != .record) return false;
+    for (v.record.keys, v.record.vals) |title, items| {
+        if (items != .list) continue;
+        const slot = customSlot(title) orelse break;
+        customItems(slot, items.list, 0);
+    }
+    return custom_menus.nslots > 0;
+}
+fn publishCustomMenus() void {
+    const c = &custom_menus;
+    var titles: [shared.menus.max_menus][]const u8 = undefined;
+    for (0..c.nslots) |i| titles[i] = c.titles[i][0..c.title_len[i]];
+    var items: [shared.menus.max_app_items]wf.MenuItemSpec = undefined;
+    for (0..c.nitems) |i| items[i] = .{ .menu = c.items[i].menu, .key = c.items[i].key, .sub = c.items[i].sub, .label = c.items[i].label[0..c.items[i].label_len] };
+    if (wf.publishMenu(titles[0..c.nslots], items[0..c.nitems])) {
+        var lb: [80]u8 = undefined;
+        _ = usys.log(log_h, std.fmt.bufPrint(&lb, "gui: menus published slots={d} items={d}", .{ c.nslots, c.nitems }) catch "gui: menus published");
+    }
+}
+
 /// The interpreter of the running `gui`, for staging the page image.
 var page_it: ?*mshl.Interp = null;
 
@@ -2435,7 +2537,7 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
     // Name the surface so the dock can restore this window by its title
     // after the amber traffic-light minimizes it.
     if (title.len > 0) wf.setSurfaceTitle(title);
-    const menu_profile: shared.menus.Profile = if (std.mem.eql(u8, strField(spec, "menus"), "files")) .files else .generic;
+    const menu_profile: shared.menus.Profile = if (buildCustomMenus(spec)) .custom else if (std.mem.eql(u8, strField(spec, "menus"), "files")) .files else .generic;
     loadBindings(spec);
 
     var focus: usize = 0;
@@ -2504,6 +2606,10 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
                 if (fb.home.len == 0) enabled &= ~shared.menus.bit(shared.menus.home);
                 const list = if (fb.open.len > 0) listStateById(fb.open.get()) else null;
                 if (list == null or list.?.nrows == 0) enabled &= ~shared.menus.bit(shared.keyboard.open_document);
+            }
+            if (menu_profile == .custom) {
+                publishCustomMenus();
+                enabled &= ~custom_menus.disabled;
             }
             wf.setMenuProfile(menu_profile, enabled);
         }
@@ -2855,6 +2961,16 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
                 _ = usys.log(log_h, "gui: minimized");
                 break :input;
             }
+            // An application key from the bar: the custom menu item it names
+            // fires its event id, like a button press.
+            if (menu_profile == .custom) if (shared.menus.appItemIndex(ch)) |i| {
+                if (i < custom_menus.nitems and custom_menus.items[i].id_len > 0) {
+                    fired = custom_menus.items[i].id[0..custom_menus.items[i].id_len];
+                    var lb: [96]u8 = undefined;
+                    _ = usys.log(log_h, std.fmt.bufPrint(&lb, "gui: menu item {s}", .{fired.?}) catch "gui: menu item");
+                }
+                break :input;
+            };
             if (menu_profile == .files) {
                 switch (ch) {
                     shared.menus.up => {

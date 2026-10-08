@@ -1106,10 +1106,24 @@ pub const GpuReq = union(enum(u64)) {
     /// no surface covers the scanout (0x00RRGGBB), so the desktop follows
     /// the session's theme. The top bar declares it with its strut.
     set_ground: struct { word: u64 },
+    /// An application's own menus (the `custom` profile, shared/menus.zig):
+    /// the owner publishes each menu slot's title (`meta` = packSlot(surface,
+    /// slot), `a`/`b` 16 bytes; empty clears the slot) and each item
+    /// (`meta` = packItemMeta with the surface, `a`/`b` 16 bytes of the
+    /// label, part 0 or 1), then `set_menu` with the custom profile. The
+    /// bar reads them back by token: `menu_slot` -> `menu_title`,
+    /// `menu_item` (meta = packItemMeta with index + part) -> `menu_item`.
+    set_menu_title: struct { meta: u64, a: u64, b: u64 },
+    set_menu_item: struct { meta: u64, a: u64, b: u64 },
+    menu_slot: struct { meta: u64 },
+    menu_item: struct { meta: u64 },
 };
 pub const GpuResp = union(enum(u64)) {
     menu: struct { token: u64, profile: u64, enabled: u64 },
     menu_title: struct { a: u64, b: u64 },
+    /// A custom menu item: `meta` = packItemMeta (menu, key, sub; surface 0,
+    /// index as asked, part as asked), the label part in `a`/`b`.
+    menu_item: struct { meta: u64, a: u64, b: u64 },
     output: struct { wh: u64, preferred: u64, seconds: u64 },
     mode: struct { wh: u64 },
 

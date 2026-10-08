@@ -55,6 +55,19 @@ fn call(channel: u64, req: shared.GpuReq) shared.GpuResp {
 fn demand(ok: bool) void {
     if (!ok) usys.exit(191);
 }
+/// A second registered client channel (another badge), kept for the
+/// not-the-owner checks.
+var other_chan: u64 = 0;
+fn other_disp() u64 {
+    if (other_chan == 0) {
+        other_chan = switch (usys.callTypedCap(shared.GpuReq, shared.GpuResp, disp, .register, 0)) {
+            .ok => |rep| rep.cap,
+            .err => usys.exit(192),
+        };
+        demand(other_chan != 0);
+    }
+    return other_chan;
+}
 fn probeSurface() u64 {
     const reply = switch (usys.callTypedCap(shared.GpuReq, shared.GpuResp, disp, .{ .create_surface = .{ .xy = 0, .wh = shared.packPair(1, 1) } }, 0)) {
         .ok => |rep| rep,
@@ -100,6 +113,53 @@ fn menuProbe(control: u64, log_h: u64) void {
     demand(snapshot() == first); // titleless popup retains application identity
     demand(call(disp, .{ .menu_bar = .{ .surface = popup } }) == .gpu_err);
     demand(call(control, .{ .menu_bar = .{ .surface = popup } }) == .ok);
+    // A custom menu: the owner publishes a title and two items (one label
+    // in two parts), the bar reads them back by token, and the compositor
+    // routes only the keys the mask enables.
+    const custom = @intFromEnum(shared.menus.Profile.custom);
+    const title_words = shared.strToWords("Probe");
+    demand(call(other_disp(), .{ .set_menu_title = .{ .meta = shared.menus.packSlot(a, 0), .a = title_words[0], .b = title_words[1] } }) == .gpu_err); // not the owner
+    demand(call(disp, .{ .set_menu_title = .{ .meta = shared.menus.packSlot(a, 0), .a = title_words[0], .b = title_words[1] } }) == .ok);
+    demand(call(disp, .{ .set_menu_title = .{ .meta = shared.menus.packSlot(a, 9), .a = title_words[0], .b = title_words[1] } }) == .gpu_err); // no such slot
+    // A label longer than 16 bytes travels in two parts, split at 16.
+    const l0 = shared.strToWords("Increment count ");
+    const l1 = shared.strToWords("by one, now");
+    demand(call(disp, .{ .set_menu_item = .{ .meta = shared.menus.packItemMeta(.{ .surface = @intCast(a), .index = 0, .part = 0, .menu = 0, .key = shared.menus.appItemKey(0), .sub = 0 }), .a = l0[0], .b = l0[1] } }) == .ok);
+    demand(call(disp, .{ .set_menu_item = .{ .meta = shared.menus.packItemMeta(.{ .surface = @intCast(a), .index = 0, .part = 1, .menu = 0, .key = shared.menus.appItemKey(0), .sub = 0 }), .a = l1[0], .b = l1[1] } }) == .ok);
+    const l2 = shared.strToWords("Disabled");
+    demand(call(disp, .{ .set_menu_item = .{ .meta = shared.menus.packItemMeta(.{ .surface = @intCast(a), .index = 1, .part = 0, .menu = 0, .key = shared.menus.appItemKey(1), .sub = 0 }), .a = l2[0], .b = l2[1] } }) == .ok);
+    demand(call(disp, .{ .set_menu = .{ .surface = a, .profile = custom, .enabled = ~shared.menus.bit(shared.menus.appItemKey(1)) } }) == .ok);
+    const custom_token = snapshot();
+    demand(custom_token != 0);
+    switch (call(control, .{ .menu_slot = .{ .meta = shared.menus.packSlot(custom_token, 0) } })) {
+        .menu_title => |t| {
+            var tb: [24]u8 = undefined;
+            demand(std.mem.eql(u8, shared.wordsToStr(&tb, .{ t.a, t.b, 0 }), "Probe"));
+        },
+        else => usys.exit(194),
+    }
+    var label: [40]u8 = undefined;
+    var label_len: usize = 0;
+    for ([_]u1{ 0, 1 }) |part| switch (call(control, .{ .menu_item = .{ .meta = shared.menus.packItemMeta(.{ .surface = @intCast(custom_token), .index = 0, .part = part, .menu = 0, .key = 0, .sub = 0 }) } })) {
+        .menu_item => |it| {
+            const meta = shared.menus.unpackItemMeta(it.meta);
+            demand(meta.surface == 1 and meta.key == shared.menus.appItemKey(0) and meta.sub == 0);
+            var lb: [24]u8 = undefined;
+            const s = shared.wordsToStr(&lb, .{ it.a, it.b, 0 });
+            @memcpy(label[label_len .. label_len + s.len], s);
+            label_len += s.len;
+        },
+        else => usys.exit(195),
+    };
+    demand(std.mem.eql(u8, label[0..label_len], "Increment count by one, now"));
+    demand(call(control, .{ .menu_invoke = .{ .token = custom_token, .key = shared.menus.appItemKey(1) } }) == .gpu_err); // disabled in the mask
+    demand(call(control, .{ .menu_invoke = .{ .token = custom_token, .key = shared.keyboard.save_document } }) == .gpu_err); // not the custom profile's
+    // Back to a catalog profile: the schema is gone with it.
+    demand(call(disp, .{ .set_menu = .{ .surface = a, .profile = @intFromEnum(shared.menus.Profile.editor), .enabled = shared.menus.bit(close_key) } }) == .ok);
+    switch (call(control, .{ .menu_slot = .{ .meta = shared.menus.packSlot(snapshot(), 0) } })) {
+        .menu_title => |t| demand(t.a == 0 and t.b == 0),
+        else => usys.exit(196),
+    }
     // The ground is chrome authority too: a window cannot repaint the desktop.
     demand(call(disp, .{ .set_ground = .{ .word = 0x101010 } }) == .gpu_err);
     demand(call(control, .{ .set_ground = .{ .word = 0x1000000 } }) == .gpu_err); // not a colour

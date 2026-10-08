@@ -240,6 +240,17 @@ while $running {
     _ => "en-US"
   }
   let r = (gui {
+      menus: {
+        Settings: [
+          { text: "Apply changes", id: "apply" }
+          "-"
+          { text: "Appearance", items: [
+              { text: "High contrast", id: "contrast" }
+              { text: "Colourblind-safe colours", id: "colors" }
+            ] }
+          { text: "Nothing to undo", id: "undo", disabled: true }
+        ]
+      }
       init:  { tab: $starttab, scale: ($cfg | get "scale"), theme: ($cfg | get "theme"), contrast: ($cfg | get "contrast"), colors: ($cfg | get "colors"), myloc: $myloc, sysloc: $sysloc, admin: $admin, choice: "", sel: "", mode: "dhcp", addr: "", gw: "", dns: "", note: $note, action: "", done: false }
       title: "Settings"
       width: 640

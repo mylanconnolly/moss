@@ -745,6 +745,7 @@ pub fn commitSurface() bool {
 
 pub fn closeSurface() void {
     menu_surface = 0;
+    menu_items_surface = 0; // the next surface may reuse this id; publish again
     _ = usys.callTyped(shared.GpuReq, shared.GpuResp, chan, .{ .destroy_surface = .{ .surface = surf } }, 0);
     // Free the surface buffer's mapping and cap — a window that reopens (the
     // settings panel recurses on each apply, a resize destroys + recreates)
@@ -794,6 +795,33 @@ pub fn setMenuProfile(profile: shared.menus.Profile, enabled: u64) void {
         menu_profile = profile;
         menu_enabled = mask;
     }
+}
+/// An application's own menus (the `custom` profile): the slot titles and
+/// the items, published to the compositor for this surface once per
+/// surface (a re-created surface is published again), before
+/// `setMenuProfile(.custom, mask)`. Labels longer than 16 bytes go in two
+/// parts, titles are 16 bytes.
+pub const MenuItemSpec = struct { menu: u8, key: u8, sub: u8, label: []const u8 };
+var menu_items_surface: u64 = 0;
+pub fn publishMenu(titles: []const []const u8, items: []const MenuItemSpec) bool {
+    if (surf == 0 or menu_items_surface == surf) return false;
+    const half = shared.menus.label_bytes / 2;
+    for (titles, 0..) |t, slot| {
+        const w = shared.strToWords(t[0..@min(t.len, shared.menus.title_bytes)]);
+        _ = menuCall(chan, .{ .set_menu_title = .{ .meta = shared.menus.packSlot(surf, @intCast(slot)), .a = w[0], .b = w[1] } });
+    }
+    for (items, 0..) |item, i| {
+        const first = item.label[0..@min(item.label.len, half)];
+        const w0 = shared.strToWords(first);
+        _ = menuCall(chan, .{ .set_menu_item = .{ .meta = shared.menus.packItemMeta(.{ .surface = @intCast(surf), .index = @intCast(i), .part = 0, .menu = item.menu, .key = item.key, .sub = item.sub }), .a = w0[0], .b = w0[1] } });
+        if (item.label.len > half) {
+            const rest = item.label[half..@min(item.label.len, shared.menus.label_bytes)];
+            const w1 = shared.strToWords(rest);
+            _ = menuCall(chan, .{ .set_menu_item = .{ .meta = shared.menus.packItemMeta(.{ .surface = @intCast(surf), .index = @intCast(i), .part = 1, .menu = item.menu, .key = item.key, .sub = item.sub }), .a = w1[0], .b = w1[1] } });
+        }
+    }
+    menu_items_surface = surf;
+    return true;
 }
 /// Minimize (hide) or restore (show) this window's surface. The amber
 /// traffic-light hides it; the compositor drops focus to the window behind

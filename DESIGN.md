@@ -4540,6 +4540,60 @@ black at every theme — a terminal's own convention, as on every
 other desktop — while its window chrome follows the theme like any
 window's.
 
+**Menus beyond the profiles (2026-10-08).** The global bar showed the
+focused application's menus from a fixed catalog of typed profiles
+(editor, terminal, files, picker, generic), validated by the
+compositor: a client declares a profile and an enabled mask, the bar
+reads the snapshot and invokes an item by its key, the compositor
+routes the key to the owner only if the profile offers it and the mask
+enables it. An application's own menus keep that shape — the decision
+that the compositor validates every invocation stands — with one more
+profile, `custom`, whose items are *application keys*: 32 codes above
+the registry's own (`shared.menus.appItemKey(i)`, 180..211), in the
+same action table as the catalog's keys, so `allows` and the mask work
+unchanged. What the catalog cannot know, the labels, the app publishes
+to the compositor for its surface — `set_menu_title` (a slot, 16
+bytes) and `set_menu_item` (an index, its slot, key and the slot it
+opens, 32 bytes of label in two parts) — packed into the three payload
+words a message has, the way window titles always travelled; the bar
+reads them back by the snapshot's token (`menu_slot`, `menu_item`) and
+owns its copy, so a popup never borrows wire data. A catalog profile
+published afterwards clears the schema; the comp drill publishes a
+title and a two-part label, reads them back, and checks a disabled
+application key is refused and a catalog key is not the custom
+profile's.
+
+In mshl the spec says `menus: { File: [ { text, id, disabled }, "-",
+{ text, items: [ … ] } ] }` — each key a menu, each entry an item that
+fires `{ id }` from the bar like a button, a rule, or a nested menu
+one level deep (a header item pointing at another slot) — and the
+runtime assigns the keys by table index, publishes once per surface
+(a surface id can be reused by the next window of the same process:
+the frame forgets what it published when a surface closes, found when
+Settings reopened itself with empty menus), and maps a key back to
+the item's id. The generic Window menu follows the app's own. The bar
+grew the three things the ROADMAP asked for. Popups are two levels
+now — the dropdown and one submenu beside it, created *without
+activation* so the dropdown keeps the keyboard (a focused submenu was
+dismissing its parent: a popup losing focus is how a click elsewhere
+closes the menus, and a new surface is told "not focused" on creation
+unless it took the focus). Rows beyond the room scroll: the popup is
+sized to the room, `first` is the top row shown, arrow strips above
+and below say there is more, End/Home/arrows keep the selection in
+view, the wheel and the strips scroll a row. Right opens the selected
+row's submenu (else the next menu), Left closes it (else the previous
+menu), Escape closes the submenu first. The rows are the toolkit's
+(`paint.menuItem` with a caret for a submenu row). Settings declares
+its own menu with a nested Appearance submenu and a disabled item; the
+guishellro drill opens it, opens the submenu, picks High contrast and
+sees the runtime fire the switch's id and the compositor accept the
+key; the standalone bar's script carries a 40-row menu and its drill
+presses End (the popup scrolls, logged) and Enter on the last row.
+Out of scope, said so: shortcut hints for custom items (the catalog's
+are text the bar shows; an app's chords are its own to handle), menus
+nested deeper than one level, and items that change while a window is
+open (the schema is the spec's; a dynamic item is a window's view).
+
 ### GUIs in mshl
 
 The console arc gave the substrate — surfaces, a compositor, keyboard

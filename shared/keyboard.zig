@@ -54,6 +54,8 @@ pub const close_all = 171;
 pub const launcher = 172;
 pub const readonly_view = 176;
 pub const leave_view = 177;
+// 180..211 are the application keys of a custom menu (shared/menus.zig:
+// `app_item_base` + item index); no chord produces them either.
 /// Cmd-W closes the active document in tabbed apps, otherwise its window.
 pub const close_document = close_window;
 
