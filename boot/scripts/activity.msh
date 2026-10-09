@@ -44,7 +44,6 @@ def dsort-of [col] {
 def col-of [sort] {
   match $sort {
     "name" => 0
-    "id" => 1
     "state" => 1
     "cpu" => 2
     "mem" => 3

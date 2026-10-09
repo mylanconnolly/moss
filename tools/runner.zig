@@ -176,7 +176,9 @@ const check_dir = "zig-out/check";
 const gpu_device = "virtio-gpu-pci,disable-legacy=on,iommu_platform=on,xres=1280,yres=1024";
 /// The launcher lists every `app:` unit of the session template
 /// (boot/conf/sessiongui): five today. A new app changes this once.
-const launcher_ready_line = "launcher: ready count=9";
+/// The launcher's ready line, without its catalog size: adding an app is
+/// not a change to every drill that opens the launcher.
+const launcher_ready_line = "launcher: ready count=";
 
 // Host TCP ports. Drills run concurrently (`--jobs`, one worker thread
 // per QEMU), so every host port is per worker slot: slot 0 keeps the
@@ -1178,7 +1180,11 @@ fn waitListGeom(spec: Spec, log_path: []const u8, polls: *u64, id: []const u8) ?
     while (true) {
         const content = readLog(log_path);
         if (parseListGeom(content, id)) |g| return g;
-        if (std.mem.indexOf(u8, content, "KERNEL PANIC") != null or n * poll_ms / 1000 > spec.timeout_s) return null;
+        if (std.mem.indexOf(u8, content, "KERNEL PANIC") != null or n * poll_ms / 1000 > spec.timeout_s) {
+            var mb: [96]u8 = undefined;
+            reportFailure(spec.name, std.fmt.bufPrint(&mb, "the list {s} never logged its geometry", .{id}) catch "a list never logged its geometry", log_path);
+            return null;
+        }
         sleepMs(poll_ms);
         n += 1;
         polls.* += 1;
@@ -1612,10 +1618,6 @@ fn explorerDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     return true;
 }
 
-/// The Activity drill: the task manager lists the profile's units with
-/// win-alpha among them. Select win-alpha's row (the table logs its row
-/// order), press Force Quit, confirm, and watch init stop it and the
-/// table flip its row; then close Activity (Cmd-W) to end the boot.
 /// The Console drill: the log viewer comes up with the boot log, is
 /// filtered to one source (typed, then Filter), paused, a row selected,
 /// and closed with Cmd-W; the app's own notes carry each step.
@@ -1658,8 +1660,12 @@ fn consoleDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     return try waitLogN(log_path, "console: closed", 1, "Console did not close", spec, polls);
 }
 
+/// The Activity drill: the task manager lists the profile's units with
+/// win-alpha and win-beta among them. Quit win-alpha (its graceful close),
+/// Force Quit win-beta (confirmed), watch init stop each and the table
+/// flip its rows, open the System tab, maximize the window and see the
+/// table laid out again; then close Activity (Cmd-W) to end the boot.
 fn activityDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
-    if (!try waitLogN(log_path, "gui: ready", 1, "Activity never came up", spec, polls)) return false;
     if (!try waitLogN(log_path, "activity: row ", 1, "the table logged no rows", spec, polls)) return false;
     if (!try waitLogN(log_path, "activity: machine cores=", 1, "the machine panel never read sysinfo", spec, polls)) return false;
     const g = waitListGeom(spec, log_path, polls, "procs") orelse {
@@ -1726,8 +1732,9 @@ fn activityDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         reportFailure(spec.name, "could not find Activity's maximize dot", log_path);
         return false;
     };
+    const domain_lists = countOccurrences(readLog(log_path), "gui: list domains ");
     if (!clickScanout(&q, mx[0], mx[1])) return sfail(spec, log_path, "click maximize");
-    if (!try waitLogN(log_path, "gui: list domains ", 2, "the maximized table was not laid out again", spec, polls)) return false;
+    if (!try waitLogN(log_path, "gui: list domains ", domain_lists + 1, "the maximized table was not laid out again", spec, polls)) return false;
     sleepMs(400);
     _ = q.screendump(check_dir ++ "/activity-max.ppm");
     if (!q.chord("meta_l", "w")) return sfail(spec, log_path, "close Activity");
@@ -1816,22 +1823,13 @@ fn parseMovedTo(content: []const u8, title: []const u8) ?[2]u32 {
     var buf: [64]u8 = undefined;
     const key = std.fmt.bufPrint(&buf, "gui: {s} moved to ", .{title}) catch return null;
     const at = std.mem.lastIndexOf(u8, content, key) orelse return null;
-    var rest = content[at + key.len ..];
+    const rest = content[at + key.len ..];
     const comma = std.mem.indexOfScalar(u8, rest, ',') orelse return null;
-    const eol = std.mem.indexOfScalar(u8, rest, '\n') orelse rest.len;
-    if (comma >= eol) return null;
-    var ys = rest[comma + 1 .. eol];
-    if (ys.len > 0 and ys[ys.len - 1] == '\r') ys = ys[0 .. ys.len - 1];
     const x = std.fmt.parseInt(u32, rest[0..comma], 10) catch return null;
-    const y = std.fmt.parseInt(u32, ys, 10) catch return null;
+    const y = parseAfter(rest[comma..], ",") orelse return null;
     return .{ x, y };
 }
 
-/// The desktop-shell drill: two movable windows share one compositor. Raise
-/// window A by clicking its titlebar (it opened beneath B), drag it by the
-/// titlebar (the runtime asks the compositor to move its surface), then
-/// close both by their red traffic-light dots — proving move, raise, and
-/// close, the window-management foundation.
 /// Like parseDot, but the FIRST "gui: dots" line rather than the last —
 /// so a two-window drill can read each window's origin.
 fn parseDotFirst(content: []const u8, key: []const u8) ?[2]u32 {
@@ -2156,6 +2154,11 @@ fn gridFail(spec: Spec, log_path: []const u8) bool {
     return false;
 }
 
+/// The desktop-shell drill: two movable windows share one compositor.
+/// Raise window A by clicking its titlebar (it opened beneath B), drag it
+/// by the titlebar (the runtime asks the compositor to move its surface),
+/// snap it to the edges, then close both by their red traffic-light dots —
+/// move, raise, snap and close, the window-management foundation.
 fn desktopDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     // Both windows must be up (each logs "gui: ready").
     if (!try waitLogN(log_path, "gui: ready", 2, "the two windows never came up", spec, polls)) return false;
@@ -2192,7 +2195,7 @@ fn desktopDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         const Snap = struct { tx: u32, ty: u32, want: []const u8 };
         // Grab band: right of the three dots (x = close_x + 120), on the
         // titlebar row (close_y). Target: the named edge.
-        const g0 = parseMovedTo(readLog(log_path), "Alpha") orelse [2]u32{ 500, 450 };
+        const g0 = parseMovedTo(readLog(log_path), "Alpha") orelse return sfail(spec, log_path, "Alpha's position after the move was not logged");
         var grab_x: u32 = g0[0] + 150;
         var grab_y: u32 = g0[1] + 18;
         const steps = [_]Snap{
@@ -2216,7 +2219,7 @@ fn desktopDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         }
     }
     // Close Alpha by its (snapped) red dot — re-read from the last dots line.
-    const adot = parseDot(readLog(log_path), "close=") orelse [2]u32{ 142, 215 };
+    const adot = parseDot(readLog(log_path), "close=") orelse return sfail(spec, log_path, "Alpha's traffic lights were not logged");
     if (!clickScanout(&q, adot[0], adot[1])) {
         reportFailure(spec.name, "QMP could not click Alpha's close box", log_path);
         return false;
@@ -2307,16 +2310,14 @@ fn parseDockItem(content: []const u8, idx: usize) ?[2]u32 {
     const eol = std.mem.indexOfScalar(u8, rest, '\n') orelse rest.len;
     rest = rest[0..eol];
     if (rest.len > 0 and rest[rest.len - 1] == '\r') rest = rest[0 .. rest.len - 1];
-    // "X cy=Y"
+    // "X cy=Y …" — digits only, so the line may carry more after cy.
     const sp = std.mem.indexOfScalar(u8, rest, ' ') orelse return null;
-    const cy_at = std.mem.indexOf(u8, rest, "cy=") orelse return null;
     const cx = std.fmt.parseInt(u32, rest[0..sp], 10) catch return null;
-    const cy = std.fmt.parseInt(u32, rest[cy_at + 3 ..], 10) catch return null;
+    const cy = parseAfter(rest, "cy=") orelse return null;
     return .{ cx, cy };
 }
 
 /// The scanout centre of a traffic-light dot (`key` = "close=" / "min=" /
-/// "max=") from the most recent "gui: dots close=X,Y min=X,Y max=X,Y" line.
 /// The u32 value after `key` (e.g. "ox=") in the LAST "term: grid" line.
 fn parseGridField(content: []const u8, key: []const u8) ?u32 {
     const at = std.mem.lastIndexOf(u8, content, "term: grid ") orelse return null;
@@ -2340,6 +2341,8 @@ fn parseNumAfter(content: []const u8, prefix: []const u8) ?u64 {
     return std.fmt.parseInt(u64, rest[0..i], 10) catch null;
 }
 
+/// The scanout centre of a traffic-light dot (`key` = "close=" / "min=" /
+/// "max=") from the most recent "gui: dots close=X,Y min=X,Y max=X,Y" line.
 fn parseDot(content: []const u8, key: []const u8) ?[2]u32 {
     const at = std.mem.lastIndexOf(u8, content, "gui: dots ") orelse return null;
     const line = content[at..];
@@ -2961,6 +2964,9 @@ fn gtrustDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
             reportFailure(spec.name, "the login is not on the trusted path (no secure strip)", log_path);
             return false;
         }
+    } else {
+        reportFailure(spec.name, "the trusted-login screendump was not readable, so the secure strip was not checked", log_path);
+        return false;
     }
     // Sign in.
     if (!q.typeText("alice")) {
@@ -3058,14 +3064,7 @@ fn gsessionDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     return true;
 }
 
-/// The post-login GUI shell drill (`guishell`): the trusted login form
-/// again, but a successful sign-in opens a real session in the user's own
-/// domain that runs a *graphical* shell — a minimal desktop with a single
-/// "log out" button, rendered through the shared font service. We sign in
-/// as the real user, wait for the session's shell surface to render (a
-/// second "gui: ready"), press Enter to fire the focused logout button,
-/// and confirm the shell exited (`gui: shell exited`) — which unwinds the
-/// session and lets the greeter report who signed in.
+/// Non-overlapping occurrences of `needle` in `haystack`.
 fn countOccurrences(haystack: []const u8, needle: []const u8) usize {
     var n: usize = 0;
     var i: usize = 0;
@@ -3095,31 +3094,12 @@ fn waitLogN(log_path: []const u8, needle: []const u8, n_needed: usize, why: []co
 
 /// Parse `topbar: menu system cx=X cy=Y` — the system-menu title's hit-box
 /// centre, which the bar logs so a drill can click it at any font scale.
-fn parseTopbarMenu(content: []const u8) ?[2]u32 {
-    return parseNamedTopbarMenu(content, "system");
-}
-
-fn parseNamedTopbarMenu(content: []const u8, name: []const u8) ?[2]u32 {
-    var key_buf: [128]u8 = undefined;
-    const key = std.fmt.bufPrint(&key_buf, "topbar: menu {s} cx=", .{name}) catch return null;
-    const at = std.mem.lastIndexOf(u8, content, key) orelse return null;
-    var rest = content[at + key.len ..];
-    const eol = std.mem.indexOfScalar(u8, rest, '\n') orelse rest.len;
-    rest = rest[0..eol];
-    if (rest.len > 0 and rest[rest.len - 1] == '\r') rest = rest[0 .. rest.len - 1];
-    const sp = std.mem.indexOfScalar(u8, rest, ' ') orelse return null;
-    const cy_at = std.mem.indexOf(u8, rest, "cy=") orelse return null;
-    const cx = std.fmt.parseInt(u32, rest[0..sp], 10) catch return null;
-    const cy = std.fmt.parseInt(u32, rest[cy_at + 3 ..], 10) catch return null;
-    return .{ cx, cy };
-}
-
 /// Log out through the top bar's system menu: click "moss" (its logged
 /// hit-box), wait for the dropdown, click the last item ("Log Out"). The bar
 /// is the session's essential unit, so this ends the whole session.
 fn desktopLogout(spec: Spec, log_path: []const u8, polls: *u64, q: *Qmp) !bool {
     const popups = countOccurrences(readLog(log_path), "topbar: popup at");
-    const menu = parseTopbarMenu(readLog(log_path)) orelse {
+    const menu = topbarMenu(readLog(log_path), "system") orelse {
         reportFailure(spec.name, "could not find the top bar's system menu", log_path);
         return false;
     };
@@ -3168,7 +3148,7 @@ fn powerMenuDrive(spec: Spec, log_path: []const u8, polls: *u64, label: []const 
     if (!try waitLogN(log_path, "dock: ready", 1, "the desktop dock never came up", spec, polls)) return false;
     sleepMs(500);
     const popups = countOccurrences(readLog(log_path), "topbar: popup at");
-    const menu = parseTopbarMenu(readLog(log_path)) orelse return sfail(spec, log_path, "find the system menu");
+    const menu = topbarMenu(readLog(log_path), "system") orelse return sfail(spec, log_path, "find the system menu");
     if (!clickScanout(&q, menu[0], menu[1])) return sfail(spec, log_path, "click the system menu");
     if (!try waitLogN(log_path, "topbar: popup at", popups + 1, "the system menu did not open", spec, polls)) return false;
     sleepMs(300);
@@ -3194,6 +3174,7 @@ fn desktopSignIn(spec: Spec, log_path: []const u8, polls: *u64, q: *Qmp, user: [
     // The login greeter must not be dismissable: clicking its (disabled)
     // close dot must NOT close it, or there would be no way to get it back.
     sleepMs(300);
+    if (!try waitLogN(log_path, "gui: dots ", 1, "the greeter never logged its traffic lights", spec, polls)) return false;
     if (parseDot(readLog(log_path), "close=")) |dot| {
         _ = clickScanout(q, dot[0], dot[1]);
         sleepMs(400);
@@ -3304,15 +3285,17 @@ fn guishellDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         reportFailure(spec.name, "could not re-parse the demo window's minimize dot", log_path);
         return false;
     };
+    const mins2 = countOccurrences(readLog(log_path), "gui: minimized");
     if (!clickScanout(&q, dot2[0], dot2[1])) {
         reportFailure(spec.name, "QMP could not click the minimize dot again", log_path);
         return false;
     }
-    if (!try waitLogN(log_path, "gui: minimized", 2, "the amber dot did not minimize the window a second time", spec, polls)) return false;
+    if (!try waitLogN(log_path, "gui: minimized", mins2 + 1, "the amber dot did not minimize the window a second time", spec, polls)) return false;
     sleepMs(300);
+    const restores2 = countOccurrences(readLog(log_path), "gui: restored");
     if (!q.chord("alt", "tab")) return sfail(spec, log_path, "send Alt-Tab");
     if (!try waitLogN(log_path, "comp: switch restored", 1, "Alt-Tab did not restore the minimized window", spec, polls)) return false;
-    if (!try waitLogN(log_path, "gui: restored", 2, "the restored window did not repaint after Alt-Tab", spec, polls)) return false;
+    if (!try waitLogN(log_path, "gui: restored", restores2 + 1, "the restored window did not repaint after Alt-Tab", spec, polls)) return false;
     if (countOccurrences(readLog(log_path), "gui: ready") != 2) {
         reportFailure(spec.name, "Alt-Tab restore opened a new window instead", log_path);
         return false;
@@ -3419,12 +3402,13 @@ fn guishellDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         reportFailure(spec.name, "could not parse the dock's Files pill", log_path);
         return false;
     };
+    const readies = countOccurrences(readLog(log_path), "gui: ready");
     if (!clickScanout(&q, files[0], files[1])) {
         reportFailure(spec.name, "QMP could not click the Files pill", log_path);
         return false;
     }
     if (!try waitLogN(log_path, "dock: activate explorer", 1, "the Files pill did not reach the dock", spec, polls)) return false;
-    if (!try waitLogN(log_path, "gui: ready", 5, "the second app (Files) never opened alongside Settings", spec, polls)) return false;
+    if (!try waitLogN(log_path, "gui: ready", readies + 1, "the second app (Files) never opened alongside Settings", spec, polls)) return false;
     if (!try waitLogN(log_path, "dock: running explorer=true", 1, "Files launched but did not stay running beside Settings", spec, polls)) return false;
     sleepMs(500);
     _ = q.screendump(check_dir ++ "/files-after-terminal-exit.ppm");
@@ -3599,9 +3583,12 @@ fn guishellDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     const actives = countOccurrences(readLog(log_path), "topbar: active Settings");
     if (!q.chord("meta_l", "spc")) return false;
     if (!try waitLogN(log_path, launcher_ready_line, 5, "launcher did not open for the network step", spec, polls)) return false;
-    if (!q.typeText("settings") or !q.sendKey("ret")) return false;
+    if (!q.typeText("settings") or !q.sendKey("ret")) return sfail(spec, log_path, "launch Settings for the network step");
     if (!try waitLogN(log_path, "launcher: activate settings", activates + 1, "the launcher did not activate Settings", spec, polls)) return false;
     if (!try waitLogN(log_path, "topbar: active Settings", actives + 1, "Settings did not come to the front for the network step", spec, polls)) return false;
+    // The launcher brings the Settings window already open to the front —
+    // the same window, so no new tab line is logged: an absolute wait on
+    // the one it logged when it opened is the right one here.
     if (!try waitLogN(log_path, "gui: tab tabs 2 at", 1, "the Network tab was not logged", spec, polls)) return false;
     sleepMs(500);
     const net_tab = tabCenter(readLog(log_path), "tabs", 2) orelse return sfail(spec, log_path, "find the Network tab");
@@ -3613,7 +3600,12 @@ fn guishellDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     if (!try waitLogN(log_path, "gui: tab netmode 1 at", 1, "the mode switch never appeared", spec, polls)) return false;
     sleepMs(300);
     const static_tab = tabCenter(readLog(log_path), "netmode", 1) orelse return sfail(spec, log_path, "find the Static switch");
+    // Selecting the interface already showed Apply (and, when the interface
+    // is static already, its fields), so no new announce follows this click;
+    // what it does cause is the runtime's action line for the switch.
+    const mode_actions = countOccurrences(readLog(log_path), "gui: action netmode");
     if (!clickScanout(&q, static_tab[0], static_tab[1])) return sfail(spec, log_path, "switch to Static");
+    if (!try waitLogN(log_path, "gui: action netmode", mode_actions + 1, "the Static switch did not fire", spec, polls)) return false;
     if (!try waitLogN(log_path, "gui: widget netapply at", 1, "the Apply button never appeared", spec, polls)) return false;
     sleepMs(300);
     const apply_net = widgetCenter(readLog(log_path), "netapply") orelse return sfail(spec, log_path, "find Apply");
@@ -3788,9 +3780,10 @@ fn guishellroDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         _ = q.screendump(check_dir ++ "/settings-submenu.ppm");
         const row = popupItem(readLog(log_path), "High contrast") orelse return sfail(spec, log_path, "find the High contrast row");
         const fired_before = countOccurrences(readLog(log_path), "gui: menu item contrast");
+        const accepted_before = countOccurrences(readLog(log_path), "accepted=true");
         if (!clickScanout(&q, row[0], row[1])) return sfail(spec, log_path, "pick High contrast");
         if (!try waitLogN(log_path, "gui: menu item contrast", fired_before + 1, "the submenu item did not reach Settings", spec, polls)) return false;
-        if (!try waitLogN(log_path, "accepted=true", 1, "the compositor refused the application key", spec, polls)) return false;
+        if (!try waitLogN(log_path, "accepted=true", accepted_before + 1, "the compositor refused the application key", spec, polls)) return false;
         sleepMs(300);
         // The view carries the menus, so the item now reads with a mark;
         // and Text size nests a level deeper: Larger, then Smaller (two
@@ -3867,9 +3860,10 @@ fn guishellroDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     const settings_before = countOccurrences(readLog(log_path), "settings: network read-only");
     if (!q.chord("meta_l", "spc")) return sfail(spec, log_path, "open the launcher for Settings");
     if (!try waitLogN(log_path, launcher_ready_line, 3, "the launcher did not open for Settings", spec, polls)) return false;
+    const tabs_bob = countOccurrences(readLog(log_path), "gui: tab tabs 2 at");
     if (!q.typeText("settings") or !q.sendKey("ret")) return sfail(spec, log_path, "launch Settings");
     if (!try waitLogN(log_path, "settings: network read-only", settings_before + 1, "Settings did not reopen for bob", spec, polls)) return false;
-    if (!try waitLogN(log_path, "gui: tab tabs 2 at", 1, "the Network tab was not logged for bob", spec, polls)) return false;
+    if (!try waitLogN(log_path, "gui: tab tabs 2 at", tabs_bob + 1, "the Network tab was not logged for bob", spec, polls)) return false;
     sleepMs(400);
     const net_tab = tabCenter(readLog(log_path), "tabs", 2) orelse return sfail(spec, log_path, "find the Network tab");
     if (!clickScanout(&q, net_tab[0], net_tab[1])) return sfail(spec, log_path, "click the Network tab");
@@ -3917,7 +3911,7 @@ fn largetextDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     return desktopLogout(spec, log_path, polls, &q);
 }
 
-/// The login-with-console isolation drill (): login opens an
+/// The login-with-console isolation drill (`lconsole`): login opens an
 /// interactive msh on a graphical terminal. Wait for the shell to come
 /// up, run a command and exit it, and confirm the session was real. If
 /// the session ends BEFORE the shell comes up, that is the bug under
@@ -3983,9 +3977,11 @@ const ChooserFrame = struct {
     }
 };
 
+/// A step failed: `what` is the sentence the reader sees (a verb phrase
+/// for an action — "click the Settings pill" — or a statement for a
+/// condition), printed as it is.
 fn sfail(spec: Spec, log_path: []const u8, what: []const u8) bool {
-    std.debug.print("[FAIL] {s}: QMP could not {s}\n", .{ spec.name, what });
-    reportFailure(spec.name, "QMP input failed", log_path);
+    reportFailure(spec.name, what, log_path);
     return false;
 }
 
@@ -6133,12 +6129,12 @@ fn makeDisk(path: []const u8) !void {
 /// compositor-owned expiry with no input and a confirmed round trip.
 fn outputSettingsDrive(spec: Spec, log_path: []const u8, polls: *u64, q: *Qmp) !bool {
     // Keep an existing terminal alive while the output and desktop resize.
-    const terminal = parseDockItem(readLog(log_path), 3) orelse return false;
-    if (!clickScanout(q, terminal[0], terminal[1])) return false;
+    const terminal = parseDockItem(readLog(log_path), 3) orelse return sfail(spec, log_path, "parse the Terminal pill");
+    if (!clickScanout(q, terminal[0], terminal[1])) return sfail(spec, log_path, "click the Terminal pill");
     if (!try waitLogN(log_path, "term: grid", 1, "terminal did not open for output resize", spec, polls)) return false;
     if (!try waitLogN(log_path, "term: fonts frame=true grid=true", 1, "session terminal title font was not initialized", spec, polls)) return false;
-    const settings = parseDockItem(readLog(log_path), 0) orelse return false;
-    if (!clickScanout(q, settings[0], settings[1])) return false;
+    const settings = parseDockItem(readLog(log_path), 0) orelse return sfail(spec, log_path, "parse the Settings pill");
+    if (!clickScanout(q, settings[0], settings[1])) return sfail(spec, log_path, "click the Settings pill");
     sleepMs(250);
     var width: u32 = 1280;
     var height: u32 = 1024;
@@ -6163,6 +6159,7 @@ fn outputSettingsDrive(spec: Spec, log_path: []const u8, polls: *u64, q: *Qmp) !
         ready = countOccurrences(readLog(log_path), "gui: ready");
         const target = if (pass == 0) "gpu: output 1920x1080" else if (pass == 1) "gpu: output 1024x768" else "gpu: output 1280x1024";
         const changes = countOccurrences(readLog(log_path), target);
+        const reflows_before = countOccurrences(readLog(log_path), "term: reflow");
         if (!q.sendKey("tab")) return false;
         sleepMs(100);
         if (!q.sendKey("ret")) return false;
@@ -6170,7 +6167,7 @@ fn outputSettingsDrive(spec: Spec, log_path: []const u8, polls: *u64, q: *Qmp) !
         width = if (pass == 0) 1920 else if (pass == 1) 1024 else 1280;
         height = if (pass == 0) 1080 else if (pass == 1) 768 else 1024;
         if (!try waitLogN(log_path, "gui: ready", ready + 1, "confirmation did not open", spec, polls)) return false;
-        if (!try waitLogN(log_path, "term: reflow", if (pass == 2) 4 else pass + 1, "existing terminal did not follow output resize", spec, polls)) return false;
+        if (!try waitLogN(log_path, "term: reflow", reflows_before + 1, "existing terminal did not follow output resize", spec, polls)) return false;
         sleepMs(500);
         _ = q.screendump(if (pass == 0) check_dir ++ "/display-1920.ppm" else if (pass == 1) check_dir ++ "/display-1024.ppm" else check_dir ++ "/display-restored.ppm");
         if (pass == 0) {
@@ -6199,18 +6196,18 @@ fn outputSettingsDrive(spec: Spec, log_path: []const u8, polls: *u64, q: *Qmp) !
                 return false;
             }
             reflows = countOccurrences(readLog(log_path), "term: reflow");
-            const restore_dots = termDots(readLog(log_path)) orelse return false;
+            const restore_dots = termDots(readLog(log_path)) orelse return sfail(spec, log_path, "the terminal's dots after the resize");
             if (!clickOutput(q, .{ restore_dots[4], restore_dots[5] }, width, height)) return false;
             if (!try waitLogN(log_path, "term: reflow", reflows + 1, "un-maximize did not reflow the terminal", spec, polls)) return false;
             sleepMs(200);
             // Settings back in front for the next mode, as before this detour.
-            const settings_pill = parseDockItem(readLog(log_path), 0) orelse return false;
+            const settings_pill = parseDockItem(readLog(log_path), 0) orelse return sfail(spec, log_path, "parse the Settings pill after the resize");
             if (!clickOutput(q, settings_pill, width, height)) return false;
             sleepMs(250);
         }
         if (pass == 1) {
             const rollbacks = countOccurrences(readLog(log_path), "gpu: output 1920x1080");
-            const term = parseDockItem(readLog(log_path), 3) orelse return false;
+            const term = parseDockItem(readLog(log_path), 3) orelse return sfail(spec, log_path, "parse the Terminal pill after the resize");
             if (!clickOutput(q, term, width, height)) return false;
             sleepMs(150);
             const exits = countOccurrences(readLog(log_path), "dock: running settings=false");
@@ -6263,7 +6260,11 @@ fn popupItem(content: []const u8, label: []const u8) ?[2]u32 {
         const line_end = std.mem.indexOfScalar(u8, rest[at..], '\n') orelse rest.len - at;
         const line = rest[at .. at + line_end];
         const clean = if (line.len > 0 and line[line.len - 1] == '\r') line[0 .. line.len - 1] else line;
-        if (std.mem.endsWith(u8, clean, label)) {
+        // The label is everything after "h=N ": exact, so "Undo" cannot
+        // match "Nothing to undo"'s tail.
+        const h_at = std.mem.indexOf(u8, clean, "h=") orelse return null;
+        const sp = std.mem.indexOfScalarPos(u8, clean, h_at, ' ') orelse return null;
+        if (std.mem.eql(u8, clean[sp + 1 ..], label)) {
             const y = parseAfter(line, "y=") orelse return null;
             const h = parseAfter(line, "h=") orelse return null;
             return .{ px + 30, y + h / 2 };
@@ -6298,13 +6299,11 @@ fn monitorId(content: []const u8) ?[]const u8 {
 /// (other windows log "gui: dots" too).
 fn termDots(content: []const u8) ?[6]u32 {
     const grid_at = std.mem.lastIndexOf(u8, content, "term: grid ") orelse return null;
-    const dots_at = std.mem.lastIndexOf(u8, content[0..grid_at], "gui: dots ") orelse return null;
-    const line = content[dots_at..];
-    return .{
-        parseAfter(line, "close=") orelse return null, parseAfter(line[std.mem.indexOf(u8, line, "close=").? + 6 ..], ",") orelse return null,
-        parseAfter(line, "min=") orelse return null,   parseAfter(line[std.mem.indexOf(u8, line, "min=").? + 4 ..], ",") orelse return null,
-        parseAfter(line, "max=") orelse return null,   parseAfter(line[std.mem.indexOf(u8, line, "max=").? + 4 ..], ",") orelse return null,
-    };
+    const before = content[0..grid_at]; // parseDot reads the last dots line in what it is given
+    const close = parseDot(before, "close=") orelse return null;
+    const min = parseDot(before, "min=") orelse return null;
+    const max = parseDot(before, "max=") orelse return null;
+    return .{ close[0], close[1], min[0], min[1], max[0], max[1] };
 }
 
 fn clickOutput(q: *Qmp, point: [2]u32, width: u32, height: u32) bool {
@@ -6313,7 +6312,7 @@ fn clickOutput(q: *Qmp, point: [2]u32, width: u32, height: u32) bool {
 }
 
 fn openAppMenu(spec: Spec, log_path: []const u8, polls: *u64, q: *Qmp, name: []const u8, width: u32, height: u32) !bool {
-    const menu = parseNamedTopbarMenu(readLog(log_path), name) orelse return sfail(spec, log_path, "focused application's menu title missing");
+    const menu = topbarMenu(readLog(log_path), name) orelse return sfail(spec, log_path, "focused application's menu title missing");
     const popups = countOccurrences(readLog(log_path), "topbar: popup at");
     if (!clickOutput(q, menu, width, height)) return false;
     if (!try waitLogN(log_path, "topbar: popup at", popups + 1, "application menu did not open", spec, polls)) return false;
@@ -6345,12 +6344,12 @@ fn editorMenuDrive(spec: Spec, log_path: []const u8, polls: *u64, q: *Qmp, width
     // Once a menu is open, moving across headings switches it without a
     // second click. Use the current output dimensions after the live resize.
     const hover_popups = countOccurrences(readLog(log_path), "topbar: popup at");
-    const edit_heading = parseNamedTopbarMenu(readLog(log_path), "Edit") orelse return false;
+    const edit_heading = topbarMenu(readLog(log_path), "Edit") orelse return sfail(spec, log_path, "find the Edit menu title");
     if (!q.sendPointer(@intCast(@as(u64, edit_heading[0]) * 32768 / width), @intCast(@as(u64, edit_heading[1]) * 32768 / height))) return false;
     if (!try waitLogN(log_path, "topbar: popup at", hover_popups + 1, "hovering Edit did not switch the open menu", spec, polls)) return false;
     sleepMs(150);
     _ = q.screendump(check_dir ++ "/menu-hover-300-1024.ppm");
-    const file_heading = parseNamedTopbarMenu(readLog(log_path), "File") orelse return false;
+    const file_heading = topbarMenu(readLog(log_path), "File") orelse return sfail(spec, log_path, "find the File menu title after hovering");
     if (!q.sendPointer(@intCast(@as(u64, file_heading[0]) * 32768 / width), @intCast(@as(u64, file_heading[1]) * 32768 / height))) return false;
     if (!try waitLogN(log_path, "topbar: popup at", hover_popups + 2, "hovering File did not switch back", spec, polls)) return false;
     if (!q.sendKey("esc")) return false;
@@ -6381,7 +6380,7 @@ fn editorMenuDrive(spec: Spec, log_path: []const u8, polls: *u64, q: *Qmp, width
     const redos = countOccurrences(readLog(log_path), "topbar: action 151 accepted=true");
     // Select Redo by its stable row, independently of whether Undo remains
     // enabled (typing can span more than one undo group on a slow guest).
-    const popup = parsePopup(readLog(log_path)) orelse return false;
+    const popup = parsePopup(readLog(log_path)) orelse return sfail(spec, log_path, "parse the popup geometry for Redo");
     if (!clickOutput(q, .{ popup[0] + 30, popup[1] + 4 + popup[2] + popup[2] / 2 }, width, height)) return false;
     if (!try waitLogN(log_path, "topbar: action 151 accepted=true", redos + 1, "global Redo was not routed", spec, polls)) return false;
     sleepMs(200);
@@ -6423,13 +6422,14 @@ fn editorMenuDrive(spec: Spec, log_path: []const u8, polls: *u64, q: *Qmp, width
     if (!q.chord("meta_l", "w")) return false;
     if (!q.execute("{\"execute\":\"input-send-event\",\"arguments\":{\"events\":[{\"type\":\"key\",\"data\":{\"down\":false,\"key\":{\"type\":\"qcode\",\"data\":\"shift\"}}}]}}")) return false;
     sleepMs(200);
-    return q.sendKey("tab") and q.sendKey("tab") and q.sendKey("ret"); // Discard
+    if (!(q.sendKey("tab") and q.sendKey("tab") and q.sendKey("ret"))) return sfail(spec, log_path, "discard the dirty tab"); // Discard
+    return true;
 }
 
 /// Reach controls at maximum text scale and minimum output size, using
 /// keyboard focus reveal as well as actual virtio wheel events.
 fn adaptiveSettingsDrive(spec: Spec, log_path: []const u8, polls: *u64, q: *Qmp) !bool {
-    const larger = widgetCenter(readLog(log_path), "larger") orelse return false;
+    const larger = widgetCenter(readLog(log_path), "larger") orelse return sfail(spec, log_path, "find the Larger button");
     for (0..6) |_| {
         const actions = countOccurrences(readLog(log_path), "gui: action larger");
         if (!clickScanout(q, larger[0], larger[1])) return false;
@@ -6499,8 +6499,8 @@ fn adaptiveSettingsDrive(spec: Spec, log_path: []const u8, polls: *u64, q: *Qmp)
             // broker uses the session home, while the editor has no view cap.
             const editor_ready = countOccurrences(readLog(log_path), "editor: ready");
             const editor_exit = countOccurrences(readLog(log_path), "editor: exit");
-            const launcher = parseDockItem(readLog(log_path), 4) orelse return false;
-            if (!clickOutput(q, launcher, width, height)) return false;
+            const editor_pill = parseDockItem(readLog(log_path), 4) orelse return sfail(spec, log_path, "parse the Editor pill");
+            if (!clickOutput(q, editor_pill, width, height)) return sfail(spec, log_path, "click the Editor pill");
             if (!try waitLogN(log_path, "editor: ready", editor_ready + 1, "session editor did not launch", spec, polls)) return false;
             const settings_active = countOccurrences(readLog(log_path), "topbar: active Settings");
             if (!try editorMenuDrive(spec, log_path, polls, q, width, height)) return false;

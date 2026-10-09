@@ -1,12 +1,9 @@
-# The desktop top bar (stage 2): a resident menu bar pinned at the top, with
-# a system menu on the left (its dropdown opens on click) and a live clock +
-# date on the right. `bar: true` selects the bar runtime (chrome-less,
-# pinned, with dropdown popups); `tick: 1000` keeps the clock live.
-#
-# Selecting "Log Out" ends the bar (done: true). "About This System" and
-# "Settings…" just record the choice for now (the settings app is a later
-# stage); the bar keeps running.
-def pad2 [n] { if $n < 10 { "0" + (str $n) } else { str $n } }
+# The standalone top bar (the `topbar` drill): a resident menu bar pinned
+# at the top, with a system menu on the left (its dropdown opens on click),
+# a long "Many" menu that must scroll, and a live clock + date on the
+# right. `bar: true` selects the bar runtime (chrome-less, pinned, with
+# dropdown popups); `tick: 1000` keeps the clock live. Selecting "Log Out"
+# ends the bar (done: true); any other item records the choice.
 def clock-now [] {
   match (fmt-time "en-US") {
     ok $t => $t

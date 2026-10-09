@@ -29,6 +29,11 @@
 //!   fn childPaint(t: *Tree, n: Node, x: usize, y: usize, avail_w: usize, avail_h: usize) Size;
 //!       // paint a child: clip to its allocation, then call Engine.paint
 //!
+//!   fn viewportPaint(t: *Tree, n: Node, child: Node, x: usize, y: usize, w: usize, h: usize) Size;
+//!   fn sectionBegin(t: *Tree, x: usize, y: usize, w: usize, h: usize) void; // the panel
+//!   fn sectionEnd(t: *Tree) void;
+//!   fn dividerPaint(t: *Tree, x: usize, y: usize, h: usize) void;          // a split's rule
+//!
 //! A grid places its children into fixed column tracks (equal, or
 //! weighted like a row's flex tracks), left to right then down, every
 //! row as tall as its tallest cell; a child narrower than its track sits
@@ -44,10 +49,6 @@
 //! leaf that grows (a list, a chart) stretches to the offer. A window
 //! sizes itself with no offer, then paints with its content height, so
 //! a maximized window's table grows into the room instead of scrolling.
-//!   fn viewportPaint(t: *Tree, n: Node, child: Node, x: usize, y: usize, w: usize, h: usize) Size;
-//!   fn sectionBegin(t: *Tree, x: usize, y: usize, w: usize, h: usize) void; // the panel
-//!   fn sectionEnd(t: *Tree) void;
-//!   fn dividerPaint(t: *Tree, x: usize, y: usize, h: usize) void;          // a split's rule
 const std = @import("std");
 const geometry = @import("geometry.zig");
 const Size = geometry.Size;

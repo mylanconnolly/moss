@@ -4217,8 +4217,9 @@ bar and the dock declare the edge they reserve to the compositor
 they resize; a strut dies with its surface), and `work_area` answers
 the area between them. The frame's `workArea()` is that query, with
 the whole scanout as the answer when there is no bar; the constants
-and the dock-height helper left the frame for the one file that lays
-the dock out. The first full gate found the one ordering this creates:
+and the dock-height helper left the frame for guidock.zig, the one
+file that lays the dock out (since 2026-10-09; they sat in guicmds
+for a while). The first full gate found the one ordering this creates:
 the bar re-declares its strut a tick after its metrics change, and
 Settings reopening itself right after a font Apply centred against the
 old strut, so its position drifted by a few pixels across a scale round
@@ -4648,9 +4649,25 @@ script's rows (a sparkline's samples are copied out of the mshl list
 into a stack buffer, 120 at most). The meter and the chart followed
 the same evening (`paint.meters`, `paint.chart`, pixel-tested: the
 fill to the reading, danger past 80%, the caption; the panel, the
-grid, bars at the right edge). With this, nothing a `gui` window
-paints is painted in guicmds any more: every leaf is a toolkit painter
-and the runtime is state, extraction and binding.
+grid, bars at the right edge). The review pass the next day found what
+the sentence "nothing a `gui` window paints is painted in guicmds any
+more" still missed: the text field (a second field painter beside the
+toolkit's, with its own inset and selection colours), the scroll
+viewport's bar (its own thumb beside `listScrollbar`), and the wrapped
+label's line breaker. All three are the toolkit's now (`paint.field`
+with a `secret` style and a named inset the caret hit-test shares,
+`paint.scrollbar`, `paint.wrapText` host-tested on a fixed face), as
+are the button's natural size and a menu row's width, so no layout
+re-derives a painter's insets. The same pass moved the dock's geometry
+into guidock (where the struts paragraph above had claimed it was),
+named the bar's height once, named every capacity the chrome used to
+truncate silently (pills, bar menus, menu rows, grid tracks, breadcrumb
+parts, wrapped lines, lists on screen), made the list table's full
+fallback share its first slot untouched like the field table's, and
+replaced the dialog's index-shifting (the body's widgets recorded then
+moved aside) with not recording them at all while a sheet is up. The
+wire's appearance and role enums are checked against the toolkit's at
+compile time at the frame, the one sanctioned boundary.
 
 **Menus that follow the state, and nest as deep as they need
 (2026-10-08).** The custom schema was the spec's and so fixed for the
