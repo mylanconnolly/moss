@@ -21,6 +21,14 @@ pub const SpinLock = struct {
         self.v.store(0, .release);
     }
 
+    /// Take the lock if it is free, without waiting: for a path whose
+    /// lock order runs the other way (the idle core's steal holds a run
+    /// queue and wants a thread; wake holds the thread and wants the
+    /// queue) — the one that would wait gives up instead.
+    pub fn tryLock(self: *SpinLock) bool {
+        return self.v.cmpxchgStrong(0, 1, .acquire, .monotonic) == null;
+    }
+
     /// Mask IRQs on this core, then take the lock. Returns the saved
     /// interrupt state for unlockRestore.
     pub fn lockIrqSave(self: *SpinLock) arch.cpu.IrqState {

@@ -274,11 +274,10 @@ supervises), and memory history per unit beside the CPU one.
 the drills) landed as four commits; what they found and this pass did
 not fix, each verified by reading:
 
-- **Kernel.** `vm.destroy` waits only for `running == 0`, which is also
-  0 between two guest entries of a VMM thread still inside `vm_run`;
-  a teardown can free the VM under a thread looping back into
-  `enterOnce` — pin the VM for the run (a run counter `destroy` waits
-  on) or defer the release to `finishTeardown`. The guest timer fields
+- **Kernel.** ✅ `vm.destroy` vs a thread still inside `vm_run`: fixed
+  2026-10-08 (a run counter the destroy waits on, `destroying` read at
+  every entry, the pin released by the scheduler when the thread is
+  freed in place; the exit code is the first exit's). The guest timer fields
   (`cntv_ctl`, `host_masked`, `masked_cval`, `timer_pending`) are
   read-modify-written by the timekeeper's tick, the VMM's core before
   `running` is raised, and the core that last ran the guest, with no
@@ -2625,13 +2624,16 @@ not fix, each verified by reading:
   timeout rounds up to it, preemption is per tick, and there is no
   tickless/one-shot timer — an idle machine takes 100 interrupts a
   second per core.
-- Spawn maps and zeroes a domain's whole image eagerly, .bss included:
-  the page domain's 117 MB costs ~110 ms per spawn (after `dc zva`
-  zeroing; 230 before) and the frames are held whether touched or not.
-  Next: a lazily-populated .bss — budget charged at spawn, frames on
-  first touch via the user data-abort path and the kernel's user-range
-  checks (which must fault pages in before the kernel touches them),
-  untouched pages credited at teardown; gated per port.
+- ✅ The .bss is populated on first touch (2026-10-08; aarch64 only —
+  x86_64 still maps the whole image at spawn until its page-fault path
+  calls `domain.faultIn` and its HAL grows `userPagePresent` /
+  `settleMappings`). The budget is still charged whole at spawn, so a
+  frame shortage at touch time (physical RAM, not budget) kills the
+  domain with a named log line where the old spawn would have been
+  refused with no_space; a domain holding a device is populated whole.
+- ✅ An idle core steals a ready thread from a loaded one (2026-10-08);
+  placement at wake stays round-robin with no load awareness, and a
+  running thread is never moved while its core has work.
 
 - Every pool is static and small: 16 domains, 64 threads, 64 channels,
   64 notifications, 64 shared buffers, 256 client badges, 16 devices,

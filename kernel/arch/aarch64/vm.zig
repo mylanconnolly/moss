@@ -152,6 +152,14 @@ pub const Vm = struct {
     s2_root: u64 = 0,
     vmid: u16 = 0,
     first_run: bool = true,
+    /// Set first by `destroy`: `run` refuses to enter the guest again,
+    /// and a run already inside returns at its next exit. `runners`
+    /// counts VMM threads inside `run` — the whole call, not just the
+    /// guest — and destroy waits for it to reach zero before the frames
+    /// go (a thread looping back into enterOnce after the RAM was freed
+    /// ran the guest on nothing; the review pass's follow-on, 2026-10-08).
+    destroying: bool = false,
+    runners: u32 = 0,
     kobj: ?*kalloc.Account = null,
     user_mem: ?*kalloc.Account = null,
     devices: [max_vm_devices]VmDevice = @splat(.{}),
@@ -358,6 +366,11 @@ fn freeTables(vm: *Vm) void {
 /// returns tables and RAM to the owner's accounts.
 pub fn destroy(vm: *Vm) void {
     if (!vm.active) return;
+    // No new entry into the guest from here; a vCPU idle in its wfi wait
+    // is woken to see that; a run in flight leaves at its next exit.
+    @atomicStore(bool, &vm.destroying, true, .release);
+    for (vm.vcpus[0..vm.nvcpus]) |*v| wake(v);
+    while (@atomicLoad(u32, &vm.runners, .acquire) != 0) std.atomic.spinLoopHint();
     for (vm.vcpus[0..vm.nvcpus]) |*v| {
         while (@atomicLoad(u32, &v.running, .acquire) != 0) std.atomic.spinLoopHint();
     }
@@ -560,6 +573,20 @@ extern const __guest_resume: anyopaque;
 /// Run the guest until it exits. `resume_value` completes a pending MMIO
 /// read from the previous exit. Called in the VMM's syscall context.
 pub fn run(vm: *Vm, vcpu: u64, resume_value: u64) Exit {
+    const gone: Exit = .{ .kind = .none, .a = 0, .b = 0, .c = 0, .d = 0 };
+    // Pinned for the whole call; the flag is read after the pin so a
+    // destroy that set it just before sees this runner, and one that
+    // sets it just after is seen at the next exit.
+    // The pin rides on the thread too: killed while blocked in the wfi
+    // wait below, it is freed in place and the scheduler releases it.
+    const self = sched.thisCpu().current;
+    _ = @atomicRmw(u32, &vm.runners, .Add, 1, .acq_rel);
+    self.pin = &vm.runners;
+    defer {
+        self.pin = null;
+        _ = @atomicRmw(u32, &vm.runners, .Sub, 1, .acq_rel);
+    }
+    if (@atomicLoad(bool, &vm.destroying, .acquire)) return gone;
     const v = &vm.vcpus[vcpu];
     if (!v.online) return .{ .kind = .fault, .a = 0, .b = 0, .c = 0, .d = 0 };
     if (v.pending_read) {
@@ -575,6 +602,7 @@ pub fn run(vm: *Vm, vcpu: u64, resume_value: u64) Exit {
         if (v.pending_advance) v.pc += 4;
     }
     while (true) {
+        if (@atomicLoad(bool, &vm.destroying, .acquire)) return gone;
         v.exit_kind = 0;
         enterOnce(vm, v);
         if (v.exit_kind == @intFromEnum(shared.VmExit.wfi)) {

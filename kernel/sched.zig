@@ -112,6 +112,11 @@ pub const Thread = struct {
     /// IPC mailbox: message words, an optional cap in transit, and the
     /// status the blocked operation completed with.
     ipc_data: [4]u64 = @splat(0),
+    /// A counter this thread holds up while inside a kernel operation
+    /// that must not be torn down under it (vm.run's `runners`). A thread
+    /// freed in place — killed while blocked, its kernel stack never
+    /// unwound — releases it in freeThread, as it does the cap in transit.
+    pin: ?*u32 = null,
     ipc_cap_type: u8 = 0,
     ipc_cap_obj: u64 = 0,
     ipc_cap_badge: u64 = 0,
@@ -736,8 +741,8 @@ pub fn debugDump() void {
         var tlen: usize = 0;
         var tit = c.throttled.first;
         while (tit) |node| : (tit = node.next) tlen += 1;
-        log.info("cpu{d}: qlen={d} evict={d} throttled={d} need_resched={} current={s} ticks={d}", .{
-            c.id, qlen, elen, tlen, c.need_resched, c.current.name, c.ticks,
+        log.info("cpu{d}: qlen={d} evict={d} throttled={d} need_resched={} current={s} ticks={d} stolen(all)={d}", .{
+            c.id, qlen, elen, tlen, c.need_resched, c.current.name, c.ticks, stolen,
         });
     }
 }
@@ -895,6 +900,11 @@ fn scheduleLocked() void {
             t.queued_on = null;
             break :blk t;
         }
+        // Nothing of our own, and the running thread is leaving or over
+        // budget: before idling, take a thread another core has waiting.
+        if (!(prev.state == .running and !(prev != cpu.idle and overBudget(prev)))) {
+            if (stealLocked(cpu)) |t| break :blk t;
+        }
         break :blk null;
     };
     const next: *Thread = if (picked) |t| t else if (prev.state == .running and !(prev != cpu.idle and overBudget(prev))) {
@@ -953,6 +963,43 @@ fn scheduleLocked() void {
     finishSwitch();
 }
 
+/// An idle core pulls a ready thread off another core's queue (2026-10-08).
+/// Placement is round-robin at wake and a running thread never moves,
+/// so two spinners placed on one core shared it while a neighbour sat
+/// idle (the CPU drill's greedy domain at 957‰ of a core, 1940‰ when
+/// the dice fell the other way). Lock order: this core's queue is held
+/// by the caller, the victim's and the thread's are tried, never waited
+/// for — wake holds a thread and then takes a queue, two idle cores may
+/// eye each other, and nothing here may wait on either. Only a thread
+/// without affinity, placeable here and within budget is taken; the
+/// victim keeps its throttled and evicted lists.
+fn stealLocked(cpu: *PerCpu) ?*Thread {
+    var i: u32 = 1;
+    while (i < max_cpus) : (i += 1) {
+        const c = (cpu.id + i) % max_cpus;
+        const victim = &cpus[c];
+        if (!victim.online or victim.queue.first == null) continue;
+        if (!victim.lock.tryLock()) continue;
+        defer victim.lock.unlock();
+        var it = victim.queue.first;
+        while (it) |node| : (it = node.next) {
+            const t: *Thread = @alignCast(@fieldParentPtr("node", node));
+            if (t.affinity != null or !placeable(t, cpu.id) or overBudget(t)) continue;
+            if (!t.lock.tryLock()) continue;
+            defer t.lock.unlock();
+            // Re-read under the thread's lock: still ours to take?
+            if (t.state != .ready or t.park != .none or t.queued_on != c) continue;
+            victim.queue.remove(node);
+            t.queued_on = null;
+            stolen += 1;
+            return t;
+        }
+    }
+    return null;
+}
+/// Threads an idle core took from a loaded one (the debug dump shows it).
+var stolen: u64 = 0;
+
 /// The other side of a switch, on the new thread: the predecessor is now
 /// fully off this core — reap it if it exited, else let others run it —
 /// and the run-queue lock taken before the switch is released.
@@ -973,6 +1020,10 @@ fn finishSwitch() void {
 /// registers saved). The slot is recycled under the table lock; the lock
 /// word survives so a late unlock by a racing peek cannot clobber it.
 fn freeThread(t: *Thread) void {
+    if (t.pin) |p| {
+        _ = @atomicRmw(u32, p, .Sub, 1, .acq_rel);
+        t.pin = null;
+    }
     pmem.freeContiguous(t.stack_pa, stack_pages);
     t.stack_account.credit(stack_pages * mem.page_size);
     threads_lock.lock();

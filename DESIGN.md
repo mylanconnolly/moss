@@ -2415,9 +2415,61 @@ optional: a port without it gets the plain store), 2.5 GB/s under the
 hypervisor. The gap is 166 ms; the whole gate got faster with the tick
 (ipc 5.4 s → 1.6 s, net 9 s → 3.6 s), the CPU-budget drill's "three and
 a half periods" had to be written in period ticks rather than as 35.
-What is left of the gap is the spawn mapping 117 MB it will mostly never
-touch: a lazily-populated .bss (budget charged at spawn, frames on first
-touch) is the next step, noted in ROADMAP.
+What was left of the gap was the spawn mapping 117 MB it will mostly
+never touch.
+
+**The .bss is populated as it is touched (2026-10-08).** On a port whose
+HAL says `arch.mmu.demand_zero` (aarch64; x86_64 says no until its
+page-fault path is wired), spawn maps only what the blob fills — text
+and data, 3 MB for the page domain — and charges the rest of the image
+to the domain's memory account whole, so admission is exactly what it
+was: a budget that cannot host the image refuses the spawn. The pages
+past `load_size` are mapped on first touch with a zero frame: from EL0,
+the translation fault lands in `domain.faultIn` before anything calls
+it a fault (the access is retried); from the kernel, the user-range
+checks that precede every copy (`userRangeOk` / `userRangeWritable`)
+populate the lazy pages in the range first, because a kernel store into
+an unmapped page would be an EL1 abort a caller could provoke. Two
+threads taking the same fault serialize on a per-domain lock and the
+second finds the page present. The IOMMU shares a domain's tables and a
+DMA into an unmapped page is a refused transaction, not a fault to fill,
+so a domain is populated whole the moment a device cap reaches it. At
+teardown the frames mapped are freed and credited one by one as before
+and the pages never touched are credited by count, so the leak bar
+(every account back to zero) holds unchanged. The page domain's spawn is
+~5 ms; the browser's navigation gap is 44 ms (393 at the start of the
+round), and a page that touches 20 MB of its 117 holds 20.
+
+**An idle core steals (2026-10-08).** The CPU-budget drill then failed
+under the parallel gate with its greedy domain at 957‰ of a core where it
+had 1940 the run before: placement is round-robin at wake and a running
+thread never moves, so two spinners placed on one core shared it while
+the neighbour sat idle. `scheduleLocked`, finding nothing of its own and
+about to idle, now takes a ready thread off another core's queue
+(`stealLocked`) — one without affinity, placeable here, within budget;
+the victim's and the thread's locks are tried, never waited for, since
+wake holds a thread and then takes a queue and two idle cores may eye
+each other. The dump counts steals. The drill reads 1938‰ under load.
+
+**What the faster machine shook loose: the VM torn down under its vCPUs
+(2026-10-08).** The guest drill then failed: the guest powered off
+cleanly, its vCPU 0 thread called exit(0), and the other vCPU threads
+— scheduled sooner now — re-entered the guest after the teardown had
+freed its RAM, took stage-2 faults, logged "guest faulted" and exited
+134, which became the domain's exit code. The review pass had named the
+race: `vm.destroy` waited only for `running == 0`, which is also zero
+between two guest entries of a thread still inside `vm_run`. Now a VM
+is pinned for the whole `run` call (a `runners` count), `destroy` sets
+`destroying` first, wakes any vCPU idle in its wfi wait, and waits for
+the runners to leave; `run` refuses to enter the guest again and answers
+`.none`, which the VMM reads as "the VM is gone" and ends the thread
+quietly — as it does any exit after it has seen the power-off. The pin
+rides on the thread too (`Thread.pin`): a vCPU thread killed while
+blocked in that wait is freed in place, its kernel stack never unwound,
+and the scheduler releases the pin as it releases a cap in transit —
+without that the nodevm drill's teardown spun forever. And a domain's
+exit code is the first exit's or fault's (`claimExit`): a straggler's
+later exit does not rewrite the story.
 The ABI is IPv6-native: addresses are always 128 bits (two words), IPv4
 rides v4-mapped, and there is no v4-only path to fossilize. Local
 destinations (own addresses, ::1, 127/8) short-circuit through the stack,

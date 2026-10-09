@@ -183,11 +183,18 @@ fn vcpuThread(idx: u64) callconv(.c) void {
     usys.exit(0); // power-off from any vCPU ends the VMM
 }
 
+/// Set when the guest asked to power off: the other vCPU threads'
+/// exits from then on (the VM being torn down under them) are not news.
+var done: bool = false;
+
 fn runLoop(vcpu: u64) void {
     var value: u64 = 0;
     while (true) {
         const r = usys.vmRun(vm_handle, vcpu, value);
-        if (r.err != .ok) usys.exit(133);
+        if (r.err != .ok) {
+            if (@atomicLoad(bool, &done, .acquire)) return;
+            usys.exit(133);
+        }
         value = 0;
         const kind: shared.VmExit = @enumFromInt(r.data[0]);
         switch (kind) {
@@ -199,6 +206,7 @@ fn runLoop(vcpu: u64) void {
                 if (r.data[1] == 0x3f8) {
                     uartByte(@truncate(r.data[3]));
                 } else if (r.data[1] == 0x604 and r.data[3] & (1 << 13) != 0) {
+                    @atomicStore(bool, &done, true, .release);
                     _ = usys.log(log_h, "vmm: guest asked ACPI to power off; VM done");
                     return;
                 }
@@ -211,6 +219,7 @@ fn runLoop(vcpu: u64) void {
                 // into the guest's x0; power-off ends the VM.
                 // x5 of a vm_run result (the guest's x3) rides the cap slot.
                 const ans = psci(r.data[1], r.data[2], r.data[3], r.cap) orelse {
+                    @atomicStore(bool, &done, true, .release);
                     _ = usys.log(log_h, "vmm: guest asked PSCI to power off; VM done");
                     return;
                 };
@@ -218,6 +227,9 @@ fn runLoop(vcpu: u64) void {
             },
             .interrupted => {},
             .fault, .none => {
+                // The VM is gone (`.none`: the kernel refused to enter it
+                // again) or faulted after the power-off: this thread is done.
+                if (kind == .none or @atomicLoad(bool, &done, .acquire)) return;
                 var msg: [160]u8 = undefined;
                 var n: usize = 0;
                 n = put(&msg, n, "vmm: guest faulted (esr 0x");

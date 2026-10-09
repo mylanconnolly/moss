@@ -191,6 +191,26 @@ pub const UserPerms = enum {
     }
 };
 
+/// Spawn may leave a domain's .bss unmapped and let the first touch of
+/// each page populate it (domain.faultIn): the port answers a user
+/// translation fault by name and its IOMMU shares the domain's tables
+/// (domain.populateLazy runs before a device attaches).
+pub const demand_zero = true;
+
+/// Whether `va` has a page mapped in the domain's tree; no allocation.
+pub fn userPagePresent(root_pa_user: u64, va: u64) bool {
+    const l2 = lookupUser(root_pa_user, l1Index(va)) orelse return false;
+    const l3 = lookupUser(l2, l2Index(va)) orelse return false;
+    return entryAt(l3, l3Index(va)).* & valid != 0;
+}
+
+/// A page table write is complete for the table walker on every core:
+/// what a page mapped from a fault needs before the faulting access is
+/// retried.
+pub fn settleMappings() void {
+    asm volatile ("dsb ishst" ::: .{ .memory = true });
+}
+
 /// Map one user page into a domain's TTBR0 tree, allocating intermediate
 /// tables from the domain's kernel-object account. Unowned mappings (shm
 /// grants) are tagged so teardown leaves their frames to the object that

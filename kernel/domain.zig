@@ -145,6 +145,16 @@ pub const Domain = struct {
     image_end_va: u64 = 0,
     stack_base: u64 = 0,
     stack_top: u64 = 0,
+    /// The image's pages past load_size that spawn left unmapped (a port
+    /// with `arch.mmu.demand_zero`): .bss, populated with a zero frame on
+    /// first touch — from EL0 by the data abort, from the kernel by the
+    /// user-range checks before a copy — against a budget charged whole
+    /// at spawn. `lazy_left` counts the pages never touched, credited
+    /// back at teardown so the account returns to zero as before.
+    lazy_base: u64 = 0,
+    lazy_end: u64 = 0,
+    lazy_left: u64 = 0,
+    lazy_lock: lock.SpinLock = .{},
     init_handle: u64 = 0,
     init_handle2: u64 = 0,
     init_arg: u64 = 0,
@@ -154,6 +164,10 @@ pub const Domain = struct {
     supervisor: ?*ipc.Channel = null,
     threads_alive: std.atomic.Value(u32) = .init(0),
     exit_code: u64 = 0,
+    /// The first thread to exit (or fault) names the exit code; a
+    /// straggler's later exit — a VMM's second vCPU thread finding its
+    /// VM gone after the first asked to power off — does not rewrite it.
+    exit_claimed: bool = false,
     auto_reap: bool = false,
     watcher: ?*ipc.Notification = null,
     /// This domain's registered death-watch (for domains IT spawns).
@@ -542,10 +556,18 @@ pub fn spawn(name: ?[]const u8, image: ImageSource, manifest: Manifest) Error!*D
     d.user_root_pa = mem.virtToPhys(@intFromPtr(root_page));
 
     // Image pages: copy from the blob (zero-filled past load_size for BSS),
-    // text pages mapped R+X, the rest RW.
+    // text pages mapped R+X, the rest RW. A port with demand_zero maps
+    // only what the blob fills; .bss is charged now and populated as it
+    // is touched (the page domain's 117 MB took 110 ms to zero and map
+    // per spawn, most of it never read, 2026-10-08).
     const base = shared.user_image_base;
+    d.lazy_base = 0;
+    d.lazy_end = 0;
+    d.lazy_left = 0;
+    d.exit_claimed = false;
+    const eager_end: u64 = if (comptime arch.mmu.demand_zero) header.load_size else header.mem_size;
     var off: u64 = 0;
-    while (off < header.mem_size) : (off += mem.page_size) {
+    while (off < eager_end) : (off += mem.page_size) {
         const page = try kalloc.allocPage(&d.user_mem);
         if (off < avail) {
             const n = @min(avail - off, mem.page_size);
@@ -559,6 +581,13 @@ pub fn spawn(name: ?[]const u8, image: ImageSource, manifest: Manifest) Error!*D
             perms,
             &d.kobj,
         ) catch return Error.QuotaExceeded;
+    }
+    if (eager_end < header.mem_size) {
+        const lazy_bytes = header.mem_size - eager_end;
+        d.user_mem.charge(lazy_bytes) catch return Error.QuotaExceeded;
+        d.lazy_base = base + eager_end;
+        d.lazy_end = base + header.mem_size;
+        d.lazy_left = lazy_bytes / mem.page_size;
     }
     d.entry_va = base + @sizeOf(shared.UserImageHeader);
     d.text_end_va = base + header.text_size;
@@ -679,6 +708,7 @@ fn abortSpawn(d: *Domain) void {
         arch.mmu.destroyUserSpace(d.user_root_pa, &d.user_mem, &d.kobj, d.asid);
         d.user_root_pa = 0;
     }
+    creditUntouched(d);
     if (d.watcher) |n| {
         d.watcher = null;
         ipc.unrefNotification(n);
@@ -764,6 +794,7 @@ pub fn finishTeardown(d: *Domain) void {
     std.debug.assert(d.state == .dying and drained(d));
     if (d.destroying.load(.acquire)) std.debug.panic("domain {s}: finishTeardown while destroy() is still running", .{d.name});
     arch.mmu.destroyUserSpace(d.user_root_pa, &d.user_mem, &d.kobj, d.asid);
+    creditUntouched(d);
     // Stragglers: destroy() releases the cap table while threads on other
     // cores are only marked to die and may still be finishing a syscall.
     // One that inserts a cap after that walk — shm_create's cap between
@@ -951,6 +982,75 @@ pub fn unmapShm(d: *Domain, va: u64) !void {
         }
     }
     ipc.unrefShm(x.shm.?);
+}
+
+/// Set the exit code if no thread of the domain has yet: the first
+/// exit or fault is the domain's story, later ones are its stragglers'.
+pub fn claimExit(d: *Domain, code: u64) void {
+    if (@cmpxchgStrong(bool, &d.exit_claimed, false, true, .acq_rel, .acquire) == null) d.exit_code = code;
+}
+
+/// The .bss pages never touched go back to the budget (teardown freed
+/// and credited the touched ones frame by frame).
+fn creditUntouched(d: *Domain) void {
+    if (d.lazy_left != 0) d.user_mem.credit(d.lazy_left * mem.page_size);
+    d.lazy_left = 0;
+    d.lazy_base = 0;
+    d.lazy_end = 0;
+}
+
+/// A touch of an unpopulated .bss page: map a zero frame there. False
+/// when `va` is not a lazy page of this domain (a real fault), or no
+/// frame or table could be had — the log names which, and the caller
+/// treats it as the fault it is.
+pub fn faultIn(d: *Domain, va: u64) bool {
+    if (comptime !arch.mmu.demand_zero) return false;
+    if (va < d.lazy_base or va >= d.lazy_end) return false;
+    const page_va = va & ~@as(u64, mem.page_size - 1);
+    const irqs = d.lazy_lock.lockIrqSave();
+    defer d.lazy_lock.unlockRestore(irqs);
+    // Another thread of the domain may have taken the same fault first.
+    if (arch.mmu.userPagePresent(d.user_root_pa, page_va)) return true;
+    const pa = pmem.allocZeroed() orelse {
+        log.warn("domain {s}: no frame for a .bss page at 0x{x} ({d} KB of its budget untouched)", .{ d.name, page_va, d.lazy_left * mem.page_size / 1024 });
+        return false;
+    };
+    // The frame is already in the budget (charged whole at spawn); only
+    // a page table may still be needed, from the kernel-object account.
+    arch.mmu.mapUserPage(d.user_root_pa, page_va, pa, .data, &d.kobj) catch {
+        pmem.free(pa);
+        log.warn("domain {s}: no room in its kernel-object budget for a page table (.bss page at 0x{x})", .{ d.name, page_va });
+        return false;
+    };
+    arch.mmu.settleMappings();
+    d.lazy_left -= 1;
+    return true;
+}
+
+/// Before the kernel touches [ptr, ptr+len) of a domain's image: the
+/// lazy pages in it are populated (a kernel store into an unmapped page
+/// would be an EL1 abort — a panic the caller could provoke). False
+/// when a page could not be had.
+pub fn touchRange(d: *Domain, ptr: u64, len: u64) bool {
+    if (comptime !arch.mmu.demand_zero) return true;
+    if (d.lazy_left == 0) return true;
+    const lo = @max(ptr, d.lazy_base);
+    const hi = @min(ptr +| len, d.lazy_end);
+    if (lo >= hi) return true;
+    var va = lo & ~@as(u64, mem.page_size - 1);
+    while (va < hi) : (va += mem.page_size) if (!faultIn(d, va)) return false;
+    return true;
+}
+
+/// A device is about to translate through this domain's tables (the
+/// IOMMU shares them, and a DMA into an unmapped page is a refused
+/// transaction, not a fault to fill): every page left is populated
+/// first. False when one could not be.
+pub fn populateLazy(d: *Domain) bool {
+    if (comptime !arch.mmu.demand_zero) return true;
+    var va = d.lazy_base;
+    while (va < d.lazy_end) : (va += mem.page_size) if (!faultIn(d, va)) return false;
+    return true;
 }
 
 /// Is [ptr, ptr+len) inside one live window mapping (writable, if the

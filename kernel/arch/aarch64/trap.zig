@@ -234,7 +234,10 @@ fn handleUserSync(frame: *TrapFrame) void {
     );
     const t = sched.thisCpu().current;
     const d: *domain.Domain = @ptrCast(@alignCast(t.user_ctx.?));
-    d.exit_code = 0xdead;
+    // A translation fault (DFSC 0b0001xx) on an unpopulated .bss page is
+    // not a fault but a page to give; the access is retried.
+    if (ec == 0x24 and (esr & 0x3c) == 0x04 and domain.faultIn(d, far)) return;
+    domain.claimExit(d, 0xdead);
     // Fault-as-message: a supervised domain's faults go to its supervisor,
     // which decides its fate; only unsupervised domains are killed here.
     if (domain.reportFaultToSupervisor(d, esr, far, frame.elr)) unreachable;

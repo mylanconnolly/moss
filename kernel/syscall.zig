@@ -768,6 +768,10 @@ fn deliver(d: *domain.Domain, msg: ipc.Msg, frame: *arch.trap.TrapFrame) void {
             // last holder handed the cap is the one whose memory it sees.
             if (ct == .device) {
                 domain.ensureMsiDoorbell(d);
+                // The device translates through this domain's tables, and a
+                // DMA into a page never touched would be refused, not
+                // filled: every .bss page is populated first.
+                if (!domain.populateLazy(d)) log.warn("domain {s}: its .bss could not be populated whole before its device attached; DMA into untouched pages will be refused", .{d.name});
                 arch.iommu.attach(msg.cap_obj, d.user_root_pa, d.asid, @ptrCast(d));
             }
         } else {
@@ -889,7 +893,7 @@ fn sysThreadCreate(d: *domain.Domain, entry: u64, x0: u64, x1: u64, sp: u64) u64
 }
 
 fn sysExit(d: *domain.Domain, code: u64) noreturn {
-    d.exit_code = code;
+    domain.claimExit(d, code);
     domain.destroy(d); // marks this very thread exited
     sched.exit();
 }
@@ -903,8 +907,9 @@ fn userRangeOk(d: *domain.Domain, ptr: u64, len: u64) bool {
     const end = ptr +% len;
     if (end < ptr) return false;
     const in_image = ptr >= shared.user_image_base and end <= d.image_end_va;
+    if (in_image) return domain.touchRange(d, ptr, len);
     const in_stack = ptr >= d.stack_base and end <= d.stack_top;
-    return in_image or in_stack or domain.windowRangeOk(d, ptr, len, false);
+    return in_stack or domain.windowRangeOk(d, ptr, len, false);
 }
 
 /// A user range the kernel may WRITE: like userRangeOk minus the
@@ -915,8 +920,9 @@ fn userRangeWritable(d: *domain.Domain, ptr: u64, len: u64) bool {
     const end = ptr +% len;
     if (end < ptr) return false;
     const in_data = ptr >= d.text_end_va and end <= d.image_end_va;
+    if (in_data) return domain.touchRange(d, ptr, len);
     const in_stack = ptr >= d.stack_base and end <= d.stack_top;
-    return in_data or in_stack or domain.windowRangeOk(d, ptr, len, true);
+    return in_stack or domain.windowRangeOk(d, ptr, len, true);
 }
 
 fn errno(e: shared.Errno) u64 {

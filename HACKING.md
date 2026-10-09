@@ -629,6 +629,22 @@ barriers in the virtio drivers, and `user/vmm.zig`.
   that existed, and every `sleep(1)` meant 100 ms until the tick moved —
   the move converted them all to milliseconds). Every wait rounds up to
   a tick, so a poll loop's cadence is the tick, whatever it asks.
+- **A domain's .bss is mapped on first touch** (aarch64). Kernel code
+  that touches user memory goes through `userRangeOk` /
+  `userRangeWritable`, which populate the pages first; a new path that
+  dereferences a user address without them hits an EL1 abort on a page
+  no one has touched — a kernel panic, so route it through the checks.
+  A device sees a domain's tables directly, hence `populateLazy` before
+  `iommu.attach`.
+- **Scheduler lock order** is thread → run queue (wake, destroy). The
+  idle steal runs the other way and uses `tryLock` for both; anything
+  new that holds a queue and wants a thread must do the same.
+- **A thread killed while blocked is freed in place**: its kernel stack
+  never unwinds, so a `defer` in the syscall it was inside never runs.
+  State the kernel must release for it goes on the Thread (`ipc_cap_*`
+  for a cap in transit, `pin` for a counter such as a VM's runners) and
+  `freeThread` releases it. A domain's exit code is the first exit's
+  (`claimExit`); do not assign `exit_code` directly.
   programs hardcode the slots they expect (documented per program).
 - The kernel embeds exactly one blob, the boot archive; `spawn` takes an
   shm cap holding a staged image, never an index. An shm mapping refs

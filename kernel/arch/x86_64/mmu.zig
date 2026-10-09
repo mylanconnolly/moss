@@ -60,6 +60,12 @@ extern const __requests_end: u8;
 
 pub const Error = error{OutOfFrames};
 
+/// The port maps a domain's whole image at spawn (see the aarch64 port's
+/// `demand_zero` for the lazily-populated .bss; wiring it here needs the
+/// page-fault path to call domain.faultIn and `userPagePresent` +
+/// `settleMappings` below the HAL).
+pub const demand_zero = false;
+
 pub fn init(regions: []const platform.MemRegion) Error!void {
     root_pa = pmem.allocZeroed() orelse return Error.OutOfFrames;
     for (regions) |r| {
