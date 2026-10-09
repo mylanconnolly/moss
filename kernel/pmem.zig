@@ -98,9 +98,14 @@ pub fn freeContiguous(pa: u64, n: usize) void {
 }
 
 /// A port may zero whole pages faster than a store loop (aarch64's DC
-/// ZVA); without that, the plain store.
+/// ZVA; compiler-rt's memset is a byte loop in a kernel built without
+/// NEON, 650 MB/s); without that, the plain store. `len` is a multiple
+/// of the page size and `ptr` page-aligned: frames, never a sub-page.
+pub fn zeroPages(ptr: [*]u8, len: usize) void {
+    if (@hasDecl(arch.cpu, "zeroPages")) arch.cpu.zeroPages(ptr, len) else @memset(ptr[0..len], 0);
+}
 fn zeroPage(page: [*]u8) void {
-    if (@hasDecl(arch.cpu, "zeroPages")) arch.cpu.zeroPages(page, mem.page_size) else @memset(page[0..mem.page_size], 0);
+    zeroPages(page, mem.page_size);
 }
 
 pub fn allocZeroed() ?u64 {

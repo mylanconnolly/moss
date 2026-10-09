@@ -200,6 +200,19 @@ pub const PerCpu = struct {
 };
 
 var cpus: [max_cpus]PerCpu = undefined;
+
+/// A core's tick count, for the timer's cross-core watch; null while it
+/// is offline.
+pub fn coreTicks(c: u32) ?u64 {
+    if (c >= max_cpus or !cpus[c].online) return null;
+    return @atomicLoad(u64, &cpus[c].ticks, .monotonic);
+}
+
+/// The name of the thread a core is running (a stalled core, named).
+pub fn coreCurrentName(c: u32) []const u8 {
+    if (c >= max_cpus or !cpus[c].online) return "-";
+    return cpus[c].current.name;
+}
 var threads: [max_threads]Thread = @splat(.{});
 var threads_lock: lock.SpinLock = .{};
 var sleepers: std.DoublyLinkedList = .{};

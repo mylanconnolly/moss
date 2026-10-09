@@ -274,6 +274,10 @@ fn scriptNow() f64 {
     return @floatFromInt(usys.nowMs());
 }
 
+fn scriptClock() u64 {
+    return usys.nowMs();
+}
+
 /// A script asks where an element is: the layout is brought up to date
 /// first (a browser flushes layout on such a read), then the box in CSS
 /// pixels relative to the viewport.
@@ -419,9 +423,36 @@ fn scriptScroll(_: *anyopaque, _: f64, y: f64) void {
     if (scripts_up) scripts.setScroll(0, page.scroll_y / zoomScale());
 }
 
+/// Whether a document can run any script at all: a script element (in
+/// any namespace), an event-handler attribute, a `javascript:` URL, or
+/// a frame (whose own document may hold any of those). A page without
+/// them never needs the engine, and bringing it up — the VM, 91
+/// interfaces, the window's natives, a 47 KB prelude — was the whole
+/// "scripts" phase of a script-less page's load (160 ms of 630 on the
+/// fixture's front page, 2026-10-09).
+fn needsScripts(doc: *dom.Document) bool {
+    var w = doc.walk(dom.document_id);
+    while (w.next()) |id| {
+        const n = doc.get(id);
+        if (n.kind != .element) continue;
+        const tag = n.name;
+        if (std.mem.eql(u8, tag, "script") or std.mem.eql(u8, tag, "iframe") or std.mem.eql(u8, tag, "frame") or std.mem.eql(u8, tag, "object") or std.mem.eql(u8, tag, "embed")) return true;
+        for (n.attrs.items) |at| {
+            if (at.name.len > 2 and at.name[0] == 'o' and at.name[1] == 'n') return true;
+            const v = std.mem.trimStart(u8, at.value, " \t\r\n\x0c");
+            if (v.len >= 11 and std.ascii.eqlIgnoreCase(v[0..11], "javascript:")) return true;
+        }
+    }
+    return false;
+}
+
 /// Bring the engine up for the current document and run its scripts.
 fn runScripts(doc: *dom.Document) void {
     if (!scripting) return;
+    if (!needsScripts(doc)) {
+        _ = usys.log(glog, "webpage: no scripts in the document; the engine stays down");
+        return;
+    }
     js_meta = mosslib.heapalloc.Allocator.init(&js_meta_buf);
     // A page's scripts get a shallower stack than the runner's: 64K
     // values and 4,000 frames (the defaults cost 4 MB of the 8 here).
@@ -434,7 +465,7 @@ fn runScripts(doc: *dom.Document) void {
     // The bindings cascade a frame's document themselves (the page lays
     // out only its own): they need the user-agent sheet, parsed once.
     _ = uaSheet(env());
-    scripts.init(&vm, doc, js_meta.allocator(), .{ .ctx = @ptrCast(&page), .log = scriptLog, .fetch = scriptFetch, .release = scriptRelease, .roots = scriptRoots, .swept = scriptSwept, .rect = scriptRect, .computed = scriptComputed, .scroll = scriptScroll, .element_scroll = scriptElementScroll, .request = scriptRequest, .storage = scriptStorage, .navigate = scriptNavigate, .changed = scriptChanged, .submit = scriptSubmit, .activate = scriptActivate, .ua_sheet = &ua_sheet.?, .scratch = scriptScratch }) catch {
+    scripts.init(&vm, doc, js_meta.allocator(), .{ .ctx = @ptrCast(&page), .log = scriptLog, .fetch = scriptFetch, .release = scriptRelease, .roots = scriptRoots, .swept = scriptSwept, .rect = scriptRect, .computed = scriptComputed, .scroll = scriptScroll, .element_scroll = scriptElementScroll, .request = scriptRequest, .storage = scriptStorage, .navigate = scriptNavigate, .changed = scriptChanged, .submit = scriptSubmit, .activate = scriptActivate, .ua_sheet = &ua_sheet.?, .scratch = scriptScratch, .clock = scriptClock }) catch {
         _ = usys.log(glog, "webpage: the bindings did not fit");
         return;
     };

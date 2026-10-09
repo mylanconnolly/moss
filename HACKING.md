@@ -473,6 +473,28 @@ barriers in the virtio drivers, and `user/vmm.zig`.
   ~5 µs each and look like a hang. The framebuffer console prints its
   address and a scroll's cost at attach; if the drills with `pcisvc`
   stall while the kernel-only ones do not, a BAR moved.
+- A drill that goes silent with no hang dump: core 0 keeps time (sleeper
+  wakeups, timers, the hang deadline itself), so a core 0 stuck with
+  interrupts masked stops every sleep in the system and the deadline
+  with it. Since 2026-10-09 each core watches the others' tick counts
+  from its own tick (`timer.watchCores`): three seconds of silence from
+  a core prints "core N has not ticked", the thread it was running, and
+  the dumps, from the core that noticed. And a QMP-driven drill's
+  failure (every driver that connects to QMP sets `fail_qmp`) writes every
+  vCPU's registers to `zig-out/check/<drill>-vcpus.txt` and prints the
+  PCs — symbolize them with `objdump -d zig-out/bin/moss-kernel.elf`
+  (or the user image's `.elf` for an EL0 PC); a PC that is the same in
+  two dumps is a spin.
+- `zig build test` printing `+- run test w` over the lib tests' output
+  and ending with `failed command: …/test --listen=-` is not a failure:
+  Zig 0.16's build runner shows any step's stderr under that heading
+  (`w` = wrote to stderr), and the lib tests print their measured counts
+  there. The exit status is 0. It appears only when the step actually
+  reruns — the test step is cached while its inputs are unchanged, so
+  the same run can look clean one time and "failed" the next; `touch
+  lib/lib.zig` forces a rerun. A real failure has an `error:` line and
+  a `N fail`/`N crash` count on the step line. This cost an afternoon
+  of chasing a "1-in-3 flake" that was the cache.
 
 ## Conventions and invariants (the short list)
 

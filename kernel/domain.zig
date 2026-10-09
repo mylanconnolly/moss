@@ -1129,7 +1129,7 @@ pub fn mapDma(d: *Domain, npages: u64) !struct { va: u64, dev: u64 } {
     try d.user_mem.charge(npages * mem.page_size);
     errdefer d.user_mem.credit(npages * mem.page_size);
     const bytes = mem.physToPtr([*]u8, pa);
-    @memset(bytes[0 .. npages * mem.page_size], 0);
+    pmem.zeroPages(bytes, npages * mem.page_size);
     const base = try reserveWindow(d, npages, null, true);
     for (0..npages) |i| {
         try arch.mmu.mapUserPage(
@@ -1194,7 +1194,7 @@ pub fn setSystemBlob(blob: []const u8) void {
     const npages = mem.alignUp(blob.len, mem.page_size) / mem.page_size;
     const pa = pmem.allocContiguous(@intCast(npages)) orelse @panic("boot archive: out of frames");
     const dst = mem.physToPtr([*]u8, pa);
-    @memset(dst[0 .. npages * mem.page_size], 0);
+    pmem.zeroPages(dst, npages * mem.page_size);
     @memcpy(dst[0..blob.len], blob);
     system_blob_pa = pa;
     system_blob_len = blob.len;

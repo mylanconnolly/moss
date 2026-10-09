@@ -745,6 +745,11 @@ fn scriptScratch(_: *anyopaque) std.mem.Allocator {
     return gpa;
 }
 
+/// The wall clock for the page host's setup line (the page's own clock is faked).
+fn hostClock() u64 {
+    return @intCast(@divTrunc(std.Io.Clock.awake.now(io).nanoseconds, std.time.ns_per_ms));
+}
+
 fn scriptNow() f64 {
     return fake_now;
 }
@@ -776,7 +781,7 @@ fn runPageScripts(doc: *dom.Document, ua: *const web.style.Sheet, env: web.style
     // see what the scan keeps alive; unsafe under natives).
     if (std.c.getenv("WEBSHOT_NOSCAN") != null) vm.heap.stack_hi = 0;
     vm.step_limit = steps_mb * 1_000_000;
-    page.init(&vm, doc, meta, .{ .ctx = @ptrCast(&ctx), .log = scriptLog, .fetch = scriptFetch, .rect = scriptRect, .computed = scriptComputed, .request = scriptRequest, .navigate = scriptNavigate, .ua_sheet = ua, .scratch = scriptScratch }) catch {
+    page.init(&vm, doc, meta, .{ .ctx = @ptrCast(&ctx), .log = scriptLog, .fetch = scriptFetch, .rect = scriptRect, .computed = scriptComputed, .request = scriptRequest, .navigate = scriptNavigate, .ua_sheet = ua, .scratch = scriptScratch, .clock = hostClock }) catch {
         std.debug.print("webshot: the bindings did not fit\n", .{});
         return;
     };

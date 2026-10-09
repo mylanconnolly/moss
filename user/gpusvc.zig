@@ -1974,7 +1974,7 @@ fn serveSurfaces(chan_h: u64) noreturn {
                 // Like `next_input`, but this reader also wants a periodic
                 // tick (arms the timer via `parkReader`). Real input still
                 // follows an already-due tick, so input cannot starve refresh.
-                const ticks = if (q.ms == 0) 0 else @max(@as(u64, 1), q.ms / 100);
+                const ticks = if (q.ms == 0) 0 else usys.msToTicks(q.ms);
                 parkReader(badge, token, ticks);
                 // Alternate an overdue refresh with queued input, so neither
                 // continuous motion nor a slow-rendering client starves the other.

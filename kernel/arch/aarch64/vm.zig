@@ -207,7 +207,7 @@ pub fn create(owner: *anyopaque, kobj: *kalloc.Account, user_mem: *kalloc.Accoun
     errdefer pmem.freeContiguous(pa, @intCast(pages));
     user_mem.charge(pages * mem.page_size) catch return Error.OutOfFrames;
     errdefer user_mem.credit(pages * mem.page_size);
-    @memset(mem.physToPtr([*]u8, pa)[0 .. pages * mem.page_size], 0);
+    pmem.zeroPages(mem.physToPtr([*]u8, pa), pages * mem.page_size);
     vm.ram_pa = pa;
     vm.ram_pages = pages;
 

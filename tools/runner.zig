@@ -813,6 +813,8 @@ fn gpuScreendump(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         return false;
     };
     defer q.close();
+    fail_qmp = &q;
+    defer fail_qmp = null;
     const ppm_path = try std.fmt.allocPrint(gpa, "{s}/{s}.ppm", .{ check_dir, spec.name });
     if (!q.screendump(ppm_path)) {
         reportFailure(spec.name, "QMP screendump failed", log_path);
@@ -876,6 +878,8 @@ fn termScreendump(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         return false;
     };
     defer q.close();
+    fail_qmp = &q;
+    defer fail_qmp = null;
     const ppm_path = try std.fmt.allocPrint(gpa, "{s}/{s}.ppm", .{ check_dir, spec.name });
     if (!q.screendump(ppm_path)) {
         reportFailure(spec.name, "QMP screendump failed", log_path);
@@ -951,6 +955,8 @@ fn ptrInject(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         return false;
     };
     defer q.close();
+    fail_qmp = &q;
+    defer fail_qmp = null;
     // Move to the centre of the tablet's 0..32767 range, then click.
     if (!q.sendPointer(16384, 16384)) {
         reportFailure(spec.name, "QMP could not move the pointer", log_path);
@@ -999,6 +1005,8 @@ fn pointerDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         return false;
     };
     defer q.close();
+    fail_qmp = &q;
+    defer fail_qmp = null;
     // The client's window is (200,150)+300x200 on the scanout; aim the
     // cursor at (350,249) (its centre), so the hotspot's white fill lands at
     // (351,251) over the window's blue. abs = pos * 32768 / dim.
@@ -1119,6 +1127,8 @@ fn guiclickDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         return false;
     };
     defer q.close();
+    fail_qmp = &q;
+    defer fail_qmp = null;
     // A press dragged onto another button must cancel, not activate either
     // action. The final count below also catches activation on mouse-down.
     if (!moveScanout(&q, inc[0], inc[1]) or !q.sendClick(true)) return false;
@@ -1225,6 +1235,8 @@ fn listdemoDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         return false;
     };
     defer q.close();
+    fail_qmp = &q;
+    defer fail_qmp = null;
     // Arrow the selection down 12 rows — well past the viewport, so the list
     // must auto-scroll to keep it visible — then Enter to open it.
     var k: usize = 0;
@@ -1296,6 +1308,8 @@ fn browserDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         return false;
     };
     defer q.close();
+    fail_qmp = &q;
+    defer fail_qmp = null;
     if (!try desktopSignIn(spec, log_path, polls, &q, "alice", "alice-pass")) return false;
     if (!try waitLogN(log_path, "topbar: ready", 1, "the desktop top bar never came up", spec, polls)) return false;
     if (!try waitLogN(log_path, "dock: ready", 1, "the desktop dock never came up", spec, polls)) return false;
@@ -1319,20 +1333,34 @@ fn browserDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     const go1 = widgetCenter(readLog(log_path), "go") orelse return false;
     if (!clickScanout(&q, go1[0], go1[1])) return sfail(spec, log_path, "click Go for the home page");
     if (!try waitLogN(log_path, "page t1: load done", 1, "the first tab never loaded the fixture over TLS", spec, polls)) return false;
-    // The page's commit reaches the window on the next tick; give it a moment.
-    sleepMs(700);
-    _ = q.screendump(check_dir ++ "/browser-front.ppm");
-    const front = readPpm(check_dir ++ "/browser-front.ppm") orelse return sfail(spec, log_path, "read the browser screendump");
+    // The page's commit reaches the window on the next tick. Poll the
+    // screendump for the heading rather than sleeping a fixed time: a
+    // slow arrival is reported with its delay, and one that never comes
+    // is waited out until the kernel's hang deadline prints its dump, so
+    // the failure comes with the threads and notifications, not a blank
+    // page and a guess (2026-10-09: one gate out of many showed the
+    // window still "Loading" 700 ms after its own "load done" line).
     const r1 = pageRect(readLog(log_path), "t1") orelse {
         reportFailure(spec.name, "could not parse the first page's rect", log_path);
         return false;
     };
-    const heading = countRgbIn(front, r1, 51, 102, 153);
-    if (heading < 20) {
-        var b: [96]u8 = undefined;
-        reportFailure(spec.name, std.fmt.bufPrint(&b, "the heading's colour is not in the page rect ({d} pixels)", .{heading}) catch "no heading", log_path);
-        return false;
+    var heading: usize = 0;
+    var waited_ms: u64 = 0;
+    while (true) {
+        _ = q.screendump(check_dir ++ "/browser-front.ppm");
+        const front = readPpm(check_dir ++ "/browser-front.ppm") orelse return sfail(spec, log_path, "read the browser screendump");
+        heading = countRgbIn(front, r1, 51, 102, 153);
+        if (heading >= 20) break;
+        if (waited_ms >= 75_000 or std.mem.indexOf(u8, readLog(log_path), "HANG") != null) {
+            var b: [96]u8 = undefined;
+            reportFailure(spec.name, std.fmt.bufPrint(&b, "the heading's colour is not in the page rect ({d} pixels) after {d} ms", .{ heading, waited_ms }) catch "no heading", log_path);
+            return false;
+        }
+        const step: u64 = if (waited_ms < 3000) 100 else 1000;
+        sleepMs(step);
+        waited_ms += step;
     }
+    if (waited_ms > 700) std.debug.print("[note] {s}: the front page's heading took {d} ms to reach the window after load done\n", .{ spec.name, waited_ms });
     // A second tab: type a URL into its address field and go.
     const newtab = widgetCenter(readLog(log_path), "newtab") orelse {
         reportFailure(spec.name, "could not find the New Tab button", log_path);
@@ -1571,6 +1599,8 @@ fn explorerDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         return false;
     };
     defer q.close();
+    fail_qmp = &q;
+    defer fail_qmp = null;
     _ = q.screendump(check_dir ++ "/explorer-polish.ppm");
     // Click the first row (a directory), then Enter to open it.
     if (!clickScanout(&q, cx, rows_top + row_h / 2)) {
@@ -1633,6 +1663,8 @@ fn consoleDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         return false;
     };
     defer q.close();
+    fail_qmp = &q;
+    defer fail_qmp = null;
     sleepMs(1200); // a tick: the table follows the newest line
     _ = q.screendump(check_dir ++ "/console.ppm");
     // Filter to the font service's lines: click the field, type, Filter.
@@ -1677,6 +1709,8 @@ fn activityDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         return false;
     };
     defer q.close();
+    fail_qmp = &q;
+    defer fail_qmp = null;
     _ = q.screendump(check_dir ++ "/activity.ppm");
     // Quit: win-alpha is asked to close and closes itself, like Cmd-W.
     const row = activityRow(readLog(log_path), "win-alpha") orelse {
@@ -1868,6 +1902,8 @@ fn cascadeDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         return false;
     };
     defer q.close();
+    fail_qmp = &q;
+    defer fail_qmp = null;
     // Close both by their close dots (top one first); whichever is the
     // essential unit ends the boot.
     if (!clickScanout(&q, second[0], second[1])) {
@@ -1887,6 +1923,8 @@ fn editorDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     if (!try waitLogN(log_path, "editor: ready", 1, "the editor never rendered", spec, polls)) return false;
     var q = qmpConnect(qmpPort()) catch return sfail(spec, log_path, "connect editor QMP");
     defer q.close();
+    fail_qmp = &q;
+    defer fail_qmp = null;
     const Frame = struct {
         fn read(path: []const u8) ?[5]u32 {
             return frameAfter(path, "editor: frame ");
@@ -2045,6 +2083,8 @@ fn terminalDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         return false;
     };
     defer q.close();
+    fail_qmp = &q;
+    defer fail_qmp = null;
     sleepMs(600); // let msh print its banner + first prompt
     _ = q.screendump(check_dir ++ "/terminal-font-title.ppm");
     // A real command first (exercises the read path).
@@ -2171,6 +2211,8 @@ fn desktopDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         return false;
     };
     defer q.close();
+    fail_qmp = &q;
+    defer fail_qmp = null;
     // Alpha (320px) opened at (120,200), Beta at (560,240) — no overlap; a
     // titlebar is ~50px, its drag band clear of the dots at x≈120..170.
     // Click Alpha's titlebar to raise it above Beta (which opened later).
@@ -2266,6 +2308,8 @@ fn topbarDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         return false;
     };
     defer q.close();
+    fail_qmp = &q;
+    defer fail_qmp = null;
     const popups = countOccurrences(readLog(log_path), "topbar: popup at");
     const dismissals = countOccurrences(readLog(log_path), "topbar: dismissed");
     if (!q.sendKey("f10")) return false;
@@ -2376,6 +2420,8 @@ fn dockDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         return false;
     };
     defer q.close();
+    fail_qmp = &q;
+    defer fail_qmp = null;
     // Click the first pill: the dock launches win-alpha through init.
     if (!clickScanout(&q, item[0], item[1])) {
         reportFailure(spec.name, "QMP could not click the Alpha pill", log_path);
@@ -2422,6 +2468,8 @@ fn inputInject(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         return false;
     };
     defer q.close();
+    fail_qmp = &q;
+    defer fail_qmp = null;
     if (!q.sendKey("h") or !q.sendKey("i")) {
         reportFailure(spec.name, "QMP could not inject key presses", log_path);
         return false;
@@ -2466,6 +2514,8 @@ fn seatDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         return false;
     };
     defer q.close();
+    fail_qmp = &q;
+    defer fail_qmp = null;
     if (!q.sendKey("h") or !q.sendKey("i") or !q.sendKey("ret")) {
         reportFailure(spec.name, "QMP could not type the line", log_path);
         return false;
@@ -2531,6 +2581,8 @@ fn gseatDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         return false;
     };
     defer q.close();
+    fail_qmp = &q;
+    defer fail_qmp = null;
     if (!q.typeText("echo hi\n")) {
         reportFailure(spec.name, "QMP could not type a command", log_path);
         return false;
@@ -2588,6 +2640,8 @@ fn compScreendump(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         return false;
     };
     defer q.close();
+    fail_qmp = &q;
+    defer fail_qmp = null;
     const ppm_path = try std.fmt.allocPrint(gpa, "{s}/{s}.ppm", .{ check_dir, spec.name });
     if (!q.screendump(ppm_path)) {
         reportFailure(spec.name, "QMP screendump failed", log_path);
@@ -2639,6 +2693,8 @@ fn focusDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         return false;
     };
     defer q.close();
+    fail_qmp = &q;
+    defer fail_qmp = null;
     if (!q.sendKey("a") or !q.sendKey("tab") or !q.chord("alt", "tab") or !q.sendKey("b")) {
         reportFailure(spec.name, "QMP could not type the focus sequence", log_path);
         return false;
@@ -2701,6 +2757,8 @@ fn trustDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         return false;
     };
     defer q.close();
+    fail_qmp = &q;
+    defer fail_qmp = null;
     // Type the "passphrase" key. It must reach the login greeter and no one else.
     if (!q.sendKey("p")) {
         reportFailure(spec.name, "QMP could not type the passphrase key", log_path);
@@ -2778,6 +2836,8 @@ fn guiDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         return false;
     };
     defer q.close();
+    fail_qmp = &q;
+    defer fail_qmp = null;
     // Enter fires "increment" (count -> 1). Give the app a moment to
     // update + re-render, then keep a screendump of the live window for
     // the record — before we close it.
@@ -2889,6 +2949,8 @@ fn guiLoginDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         return false;
     };
     defer q.close();
+    fail_qmp = &q;
+    defer fail_qmp = null;
     // Edit "axice" into "alice": Emacs home/forward, Shift selection,
     // replace, kill/yank; then reverse traversal must return to this field.
     if (!q.typeText("axice") or !q.chord("ctrl", "a") or !q.chord("ctrl", "f") or
@@ -2951,6 +3013,8 @@ fn gtrustDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         return false;
     };
     defer q.close();
+    fail_qmp = &q;
+    defer fail_qmp = null;
     // The secure strip: a band across the very top of the scanout, the
     // compositor's own, lit only while the login surface has focus.
     const ppm_path = try std.fmt.allocPrint(gpa, "{s}/{s}.ppm", .{ check_dir, spec.name });
@@ -3026,6 +3090,8 @@ fn gsessionDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         return false;
     };
     defer q.close();
+    fail_qmp = &q;
+    defer fail_qmp = null;
     if (!q.typeText("alice")) {
         reportFailure(spec.name, "QMP could not type the username", log_path);
         return false;
@@ -3143,6 +3209,8 @@ fn powerMenuDrive(spec: Spec, log_path: []const u8, polls: *u64, label: []const 
         return false;
     };
     defer q.close();
+    fail_qmp = &q;
+    defer fail_qmp = null;
     if (!try desktopSignIn(spec, log_path, polls, &q, "alice", "alice-pass")) return false;
     if (!try waitLogN(log_path, "topbar: ready", 1, "the desktop top bar never came up", spec, polls)) return false;
     if (!try waitLogN(log_path, "dock: ready", 1, "the desktop dock never came up", spec, polls)) return false;
@@ -3214,6 +3282,8 @@ fn guishellDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         return false;
     };
     defer q.close();
+    fail_qmp = &q;
+    defer fail_qmp = null;
     if (!try desktopSignIn(spec, log_path, polls, &q, "alice", "alice-pass")) return false;
     // The desktop comes up: top bar + dock (eager), and the bar applies the
     // user's saved scale (1.5, seeded on first login) to the whole session.
@@ -3704,6 +3774,8 @@ fn guishellroDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         return false;
     };
     defer q.close();
+    fail_qmp = &q;
+    defer fail_qmp = null;
     if (!try bobSettingsOpen(spec, log_path, polls, &q)) return false;
     // Reopen Settings in the same process after each Apply. Both cached
     // metrics and the resident bars must follow 1.5 -> 1.0 -> 1.5.
@@ -3891,6 +3963,8 @@ fn displayDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         return false;
     };
     defer q.close();
+    fail_qmp = &q;
+    defer fail_qmp = null;
     if (!try bobSettingsOpen(spec, log_path, polls, &q)) return false;
     if (!try outputSettingsDrive(spec, log_path, polls, &q)) return false;
     return desktopLogout(spec, log_path, polls, &q);
@@ -3906,6 +3980,8 @@ fn largetextDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         return false;
     };
     defer q.close();
+    fail_qmp = &q;
+    defer fail_qmp = null;
     if (!try bobSettingsOpen(spec, log_path, polls, &q)) return false;
     if (!try adaptiveSettingsDrive(spec, log_path, polls, &q)) return false;
     return desktopLogout(spec, log_path, polls, &q);
@@ -3940,6 +4016,8 @@ fn lconsoleDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         return false;
     };
     defer q.close();
+    fail_qmp = &q;
+    defer fail_qmp = null;
     sleepMs(200);
     _ = q.typeText("echo hi");
     _ = q.sendKey("ret");
@@ -4008,6 +4086,8 @@ fn gisessionDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         return false;
     };
     defer q.close();
+    fail_qmp = &q;
+    defer fail_qmp = null;
     if (!q.typeText("alice")) return sfail(spec, log_path, "type user");
     sleepMs(100);
     _ = q.sendKey("tab");
@@ -4090,6 +4170,8 @@ fn gboomDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         return false;
     };
     defer q.close();
+    fail_qmp = &q;
+    defer fail_qmp = null;
     // Enter fires the focused "boom" button: its update overflows the
     // worker's stack, so the worker domain faults.
     if (!q.sendKey("ret")) return sfail(spec, log_path, "type the boom key");
@@ -4913,6 +4995,8 @@ fn runFabGui(spec: Spec, bin: []const u8, polls: *u64) !bool {
         return false;
     };
     defer q.close();
+    fail_qmp = &q;
+    defer fail_qmp = null;
     // Focus starts on "increment": fire it twice (each event round-trips to
     // node 1 and comes back with the new count in the view), Tab to "quit",
     // and fire it — the final state (count 2) comes back from the remote.
@@ -4952,6 +5036,8 @@ fn nodevmDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         return false;
     };
     defer q.close();
+    fail_qmp = &q;
+    defer fail_qmp = null;
     sleepMs(500);
     _ = q.screendump(check_dir ++ "/nodevm-alone.ppm");
     const start = widgetCenter(readLog(log_path), "start") orelse return sfail(spec, log_path, "no Start button was logged");
@@ -5048,6 +5134,8 @@ fn runNodes(spec: Spec, bin: []const u8, polls: *u64) !bool {
         return false;
     };
     defer q.close();
+    fail_qmp = &q;
+    defer fail_qmp = null;
     const g = waitListGeom(spec, log2, polls, "nodes") orelse {
         reportFailure(spec.name, "the table's geometry was never logged", log2);
         return false;
@@ -5123,6 +5211,8 @@ fn runNetBrowse(spec: Spec, bin: []const u8, polls: *u64) !bool {
         return false;
     };
     defer q.close();
+    fail_qmp = &q;
+    defer fail_qmp = null;
     // The Network sidebar lists node 1 (the one live peer); click its row to
     // browse it. The list only appears once node 1 has joined and gossiped
     // its membership, so poll the geometry until it is logged.
@@ -5222,6 +5312,8 @@ fn runWebFab(spec: Spec, bin: []const u8, polls: *u64) !bool {
         return false;
     };
     defer q.close();
+    fail_qmp = &q;
+    defer fail_qmp = null;
     if (!try desktopSignIn(spec, log1, polls, &q, "alice", "alice-pass")) return false;
     if (!try waitLogN(log1, "topbar: ready", 1, "the desktop top bar never came up", spec, polls)) return false;
     if (!try waitLogN(log1, "dock: ready", 1, "the desktop dock never came up", spec, polls)) return false;
@@ -5350,6 +5442,8 @@ fn runWebExit(spec: Spec, bin: []const u8, polls: *u64) !bool {
         return false;
     };
     defer q.close();
+    fail_qmp = &q;
+    defer fail_qmp = null;
     if (!try desktopSignIn(spec, log1, polls, &q, "alice", "alice-pass")) return false;
     if (!try waitLogN(log1, "topbar: ready", 1, "the desktop top bar never came up", spec, polls)) return false;
     if (!try waitLogN(log1, "dock: ready", 1, "the desktop dock never came up", spec, polls)) return false;
@@ -5746,6 +5840,27 @@ const Qmp = struct {
         return q.execute(cmd);
     }
 
+    /// Run a monitor (HMP) command and return its whole reply — the
+    /// JSON object, read to its closing newline, since a register dump
+    /// is many kilobytes and `awaitReply` stops at the first `return`.
+    fn hmp(q: *Qmp, cmdline: []const u8) ?[]const u8 {
+        const cmd = std.fmt.allocPrint(gpa, "{{\"execute\":\"human-monitor-command\",\"arguments\":{{\"command-line\":\"{s}\"}}}}", .{cmdline}) catch return null;
+        q.send(cmd);
+        var out: std.ArrayList(u8) = .empty;
+        var tries: usize = 0;
+        while (tries < 100) : (tries += 1) {
+            if (out.items.len > 0 and std.mem.endsWith(u8, out.items, "}\r\n") and (std.mem.indexOf(u8, out.items, "\"return\"") != null or std.mem.indexOf(u8, out.items, "\"error\"") != null)) break;
+            var pfd = [_]std.posix.pollfd{.{ .fd = q.stream.socket.handle, .events = std.posix.POLL.IN, .revents = 0 }};
+            const ready = std.posix.poll(&pfd, 100) catch return null;
+            if (ready == 0) continue;
+            var chunk: [4096]u8 = undefined;
+            const n = std.posix.read(q.stream.socket.handle, &chunk) catch return null;
+            if (n == 0) break;
+            out.appendSlice(gpa, chunk[0..n]) catch return null;
+        }
+        return out.items;
+    }
+
     /// Press and release one key (a QEMU qcode, e.g. "h"). QEMU translates
     /// it to the guest's evdev keycode for the virtio keyboard.
     fn sendKey(q: *Qmp, qcode: []const u8) bool {
@@ -5996,6 +6111,7 @@ fn watch(log_path: []const u8, spec: Spec, extra: ?[]const u8, polls: *u64) Verd
 
 fn reportFailure(name: []const u8, why: []const u8, log_path: []const u8) void {
     std.debug.print("[FAIL] {s}: {s} (log: {s})\n", .{ name, why, log_path });
+    if (fail_qmp) |q| dumpVcpus(q, name);
     const content = readLog(log_path);
     if (content.len == 0) return;
     var start = content.len;
@@ -6005,6 +6121,45 @@ fn reportFailure(name: []const u8, why: []const u8, log_path: []const u8) void {
         if (content[start] == '\n') lines += 1;
     }
     std.debug.print("------ last lines ------\n{s}\n------------------------\n", .{content[start..]});
+}
+
+/// The QMP connection of the drill being driven, if any: a failure then
+/// comes with every vCPU's registers (`info registers -a`), the one
+/// view into a guest that went silent without a dump — a core spinning
+/// with interrupts masked shows as a PC that never moves. Drivers set
+/// it after connecting and clear it on the way out.
+var fail_qmp: ?*Qmp = null;
+
+fn dumpVcpus(q: *Qmp, name: []const u8) void {
+    const reply = q.hmp("info registers -a") orelse {
+        std.debug.print("[note] {s}: no vCPU registers (QMP did not answer)\n", .{name});
+        return;
+    };
+    const path = std.fmt.allocPrint(gpa, check_dir ++ "/{s}-vcpus.txt", .{name}) catch return;
+    // The reply is one JSON string: unescape its line breaks so the
+    // file reads as the monitor printed it.
+    var text: std.ArrayList(u8) = .empty;
+    var i: usize = 0;
+    while (i < reply.len) : (i += 1) {
+        if (reply[i] == '\\' and i + 1 < reply.len) {
+            switch (reply[i + 1]) {
+                'n' => text.append(gpa, '\n') catch return,
+                'r' => {},
+                't' => text.append(gpa, '\t') catch return,
+                '"' => text.append(gpa, '"') catch return,
+                '\\' => text.append(gpa, '\\') catch return,
+                else => text.appendSlice(gpa, reply[i .. i + 2]) catch return,
+            }
+            i += 1;
+        } else text.append(gpa, reply[i]) catch return;
+    }
+    std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = text.items }) catch {};
+    // The per-core program counters inline; the rest is in the file.
+    std.debug.print("------ vCPUs ({s}) ------\n", .{path});
+    var it = std.mem.splitScalar(u8, text.items, '\n');
+    while (it.next()) |line| {
+        if (std.mem.indexOf(u8, line, "CPU#") != null or std.mem.indexOf(u8, line, "PC=") != null or std.mem.indexOf(u8, line, "PSTATE=") != null) std.debug.print("{s}\n", .{std.mem.trim(u8, line, " \r")});
+    }
 }
 
 fn spawnQemu(argv: []const []const u8) !std.process.Child {

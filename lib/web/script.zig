@@ -39,6 +39,10 @@ pub const Level = enum { log, warn, err };
 pub const Host = struct {
     ctx: *anyopaque,
     log: *const fn (ctx: *anyopaque, level: Level, text: []const u8) void,
+    /// A wall clock in milliseconds, for the setup line `init` logs
+    /// (the VM's `host_now` is the page's own clock, which a tool may
+    /// drive by hand). Without one, no line.
+    clock: ?*const fn () u64 = null,
     fetch: ?*const fn (ctx: *anyopaque, abs_url: []const u8) ?[]const u8 = null,
     /// A fetched body is done with (the code keeps its own copy): the
     /// host may free it.
@@ -875,6 +879,11 @@ pub const Page = struct {
     mutation_records: std.ArrayList(PendingRecord) = .empty,
     deliver_fn: Value = Value.undefined_,
     delivery_queued: bool = false,
+    /// The setup's clock stamps (ms since `init` began, by `host.clock`):
+    /// after the interfaces, the window's natives, the storage proxies
+    /// and rule lists, the prelude, and the rest of the window.
+    setup_t0: u64 = 0,
+    setup_ms: [5]u32 = @splat(0),
 
     /// Install the bindings into `vm` for `doc`. The VM's `host_data`
     /// becomes this page and its embedder roots this page's tables.
@@ -888,10 +897,22 @@ pub const Page = struct {
         p.sym_listeners = try vm.newSymbol(try vm.strings.fromUtf8("listeners"));
         p.sym_slot = try vm.newSymbol(try vm.strings.fromUtf8("slot"));
         p.sym_style = try vm.newSymbol(try vm.strings.fromUtf8("style"));
+        if (host.clock) |c| p.setup_t0 = c();
         try p.installInterfaces();
+        p.stamp(0);
         try p.installWindow(null);
+        p.stamp(4);
         vm.host_load = hostLoad;
         vm.host_import_meta = hostImportMeta;
+        if (host.clock != null) {
+            const m = p.setup_ms;
+            p.logf(.log, "script: setup {d} ms: interfaces {d}, window natives {d}, storage proxies {d}, prelude {d}, rest {d}", .{ m[4], m[0], m[1] -| m[0], m[2] -| m[1], m[3] -| m[2], m[4] -| m[3] });
+        }
+    }
+
+    /// Stamp setup phase `i` (see `setup_ms`).
+    fn stamp(p: *Page, i: usize) void {
+        if (p.host.clock) |c| p.setup_ms[i] = @intCast(@min(c() -| p.setup_t0, std.math.maxInt(u32)));
     }
 
     pub fn deinit(p: *Page) void {
@@ -1272,14 +1293,17 @@ pub const Page = struct {
         // Named access (`localStorage.foo`) through a Proxy over each store,
         // made by the engine's own Proxy: the bindings have no exotic
         // objects, the language has.
+        if (frame_owner == null) p.stamp(1);
         p.runSource(named_storage_source, "the storage proxies");
         p.runSource(live_rules_source, "the live rule lists");
+        if (frame_owner == null) p.stamp(2);
         // The platform's smaller APIs, in JavaScript (`script_prelude.zig`),
         // over three natives: the URL parser, the clock, the current script.
         _ = try vm.defineNative(g, "__urlParse", 2, urlParseNative);
         _ = try vm.defineNative(g, "__perfNow", 0, perfNowNative);
         _ = try vm.defineNative(g, "__currentScript", 0, currentScriptNative);
         p.runSource(@import("script_prelude.zig").source, "the web APIs prelude");
+        if (frame_owner == null) p.stamp(3);
         if (frame_owner == null) p.scripts_run = 0; // the page's own count starts at its scripts
         _ = try vm.defineNative(g, "matchMedia", 1, matchMedia);
         try p.installDomException();

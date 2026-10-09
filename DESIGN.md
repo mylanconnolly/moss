@@ -2412,7 +2412,10 @@ and the timer-arm cap expressed in it, and every raw `sleep(n)` in
 userspace rewritten in milliseconds, since each one meant 100 ms × n);
 and pages are zeroed with `dc zva` behind the HAL (`arch.cpu.zeroPages`,
 optional: a port without it gets the plain store), 2.5 GB/s under the
-hypervisor. The gap is 166 ms; the whole gate got faster with the tick
+hypervisor; the kernel's other whole-frame zeroings — a shared-memory
+object at creation, a DMA window, the boot archive's frames, a guest's
+RAM — go through the same `pmem.zeroPages` rather than their own
+`@memset`. The gap is 166 ms; the whole gate got faster with the tick
 (ipc 5.4 s → 1.6 s, net 9 s → 3.6 s), the CPU-budget drill's "three and
 a half periods" had to be written in period ticks rather than as 35.
 What was left of the gap was the spawn mapping 117 MB it will mostly
@@ -2470,6 +2473,42 @@ and the scheduler releases the pin as it releases a cap in transit —
 without that the nodevm drill's teardown spun forever. And a domain's
 exit code is the first exit's or fault's (`claimExit`): a straggler's
 later exit does not rewrite the story.
+
+**The engine only when there is something to run (2026-10-09).** The
+page host now stamps its own setup (`script: setup N ms: interfaces,
+window natives, storage proxies, prelude, rest`, by a wall clock the
+embedder hands it) and the numbers said where the fixture's front page
+spent 162 of its 633 ms with no script on it: the VM, 91 interfaces
+with their 340 natives, the storage proxies, a 47 KB prelude — 4 ms on
+the host's own core, 30-40× that under TCG, which is what the gate and
+`run-gui` both run. A document with no `script` element, no handler
+attribute, no `javascript:` URL and no frame (`needsScripts`) now never
+brings the engine up; the twenty places that already asked
+`scripts_up` cover a page without one. The fixture's front page now
+loads in 42 ms with 2 in "scripts" (633 and 162 before, on the same
+drill), and the gate is 187 s (202). A page with scripts pays as
+before — Acid3's setup line under TCG reads 107 ms: interfaces 29,
+window natives 3, storage proxies 24, prelude 49 — and the next lever
+is in those numbers: two tiny sources cost 24 ms, so most of that is a
+compile's fixed cost, paid three times per page.
+
+**The tick's other tenant.** The compositor converted a window's tick
+request to kernel ticks with its own `/ 100` — missed by the 10 ms
+commit's sweep of raw sleeps — so every ticking window woke ten times
+as often as it asked (a 40 ms page tick at 10 ms, the bar's second at
+100 ms). It uses `msToTicks` now. Two of thirteen browser runs that
+day went silent after a click — no line after a triple-click, no re-
+render after a load, and no hang dump even after minutes, which is the
+signature of core 0's tick dying, since core 0 keeps time and the hang
+deadline is a sleeping thread. Two instruments came out of it before
+the cause: every core now watches the others' tick counts from its own
+tick and, on three seconds of silence, names the core and its thread
+and prints the dumps itself (`timer.watchCores`); and a GUI drill's
+failure now comes with every vCPU's registers over QMP
+(`info registers -a`, `zig-out/check/<drill>-vcpus.txt`), the one view
+into a guest that went quiet — a spin with interrupts masked is a PC
+that never moves.
+
 The ABI is IPv6-native: addresses are always 128 bits (two words), IPv4
 rides v4-mapped, and there is no v4-only path to fossilize. Local
 destinations (own addresses, ::1, 127/8) short-circuit through the stack,

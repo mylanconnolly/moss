@@ -881,6 +881,15 @@ not fix, each verified by reading:
       HVF — ten times
       the speed — where the filesystem service never speaks after start
       (disk I/O under Hypervisor.framework; `run-hvf` boots no disk).
+      Then (2026-10-08/09, DESIGN "Performance round") the network's
+      two seconds, the tick, the zeroing and the lazy .bss: the first
+      page 2663 → 158 ms, the navigation gap 393 → 44, and a page with
+      no script never brings the engine up (the fixture's front page
+      633 → 42 ms). Still paid, by a page with scripts, under TCG: a
+      107 ms setup — interfaces 29, storage proxies 24, prelude 49 —
+      where two tiny sources costing 24 says a compile's fixed cost
+      is paid three times per page; a snapshot of the set-up realm, or
+      one compile of the three sources, is the lever.
     - ✅ *Polish (asked for and landed 2026-09-18):* the Web app's chrome
       buttons are Phosphor glyphs — carets back and forward, a refresh
       arrow, the accent arrow for Go, plus and X for tabs, the bookmark
@@ -2634,6 +2643,15 @@ not fix, each verified by reading:
 - ✅ An idle core steals a ready thread from a loaded one (2026-10-08);
   placement at wake stays round-robin with no load awareness, and a
   running thread is never moved while its core has work.
+- An unexplained GUI stall (2026-10-09): two of thirteen browser-drill
+  runs went silent after a click — no log line, no re-render, and no
+  hang dump for minutes, which is what a core 0 stuck with interrupts
+  masked looks like, since core 0 keeps time and the hang deadline is
+  a sleeping thread. Not reproduced in 24 further runs after the
+  compositor's tick conversion was fixed (`msToTicks`; every window
+  had ticked ten times too often). Each core now watches the others'
+  tick counts (`timer.watchCores`) and a QMP-driven drill's failure
+  dumps every vCPU's registers, so the next one carries evidence.
 
 - Every pool is static and small: 16 domains, 64 threads, 64 channels,
   64 notifications, 64 shared buffers, 256 client badges, 16 devices,
