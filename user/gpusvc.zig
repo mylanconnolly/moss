@@ -147,7 +147,7 @@ const Surface = struct {
     /// had no reader parked when it happened, so pumpFocus delivers it
     /// when one is — an event to an unparked owner used to be lost.
     wake_kind: u64 = 0,
-    title: [16]u8 = @splat(0), // the window title, so the dock can restore it by name
+    title: [shared.window_title_bytes]u8 = @splat(0), // the window title, so the dock can restore it by name
     title_len: u8 = 0,
     menu_profile: shared.menus.Profile = .generic,
     menu_enabled: u64 = 0,
@@ -518,7 +518,7 @@ fn syncMenuApp() void {
 }
 fn menuTarget(token: u64) ?*Surface {
     syncMenuApp();
-    if (token == 0 or token != menu_token) return null;
+    if (token == 0 or (token & shared.menus.token_bits) != (menu_token & shared.menus.token_bits)) return null;
     const sf = findSurface(menu_app) orelse return null;
     if (sf.trusted or sf.hidden) return null;
     if (findSurface(focused)) |f| if (f.trusted) return null;
@@ -613,6 +613,11 @@ fn destroySurface(sf: *Surface) void {
     if (findSurface(hover_surface)) |old| {
         if (old == sf) hover_surface = 0;
     }
+    // A dialog that served this window serves nobody now: the id will be
+    // reused, and a stranger must not inherit the panel.
+    for (&surfaces) |*o| if (o.used and o.dialog and o.dialog_for == id) {
+        o.dialog_for = 0;
+    };
     if (sf.va != 0) _ = usys.shmUnmap(sf.va);
     if (sf.shm != 0) _ = usys.capDrop(sf.shm);
     sf.* = .{};
@@ -865,6 +870,7 @@ fn cycleFocus(chan_h: u64) void {
         id = (id % max_surfaces) + 1; // 1..max_surfaces, wrapping
         const sf = findSurface(id) orelse continue;
         if (any_window and sf.title_len == 0 and !sf.trusted) continue;
+        if (sf.no_focus) continue;
         if (sf.hidden) {
             // Switching to a minimized window restores it — the dock
             // pill's restore, by keyboard: unhide, raise, and wake the
@@ -1297,6 +1303,7 @@ fn surfaceUnderCursor() u64 {
 fn focusSurface(id: u64) void {
     if (id == focused) return;
     const target = findSurface(id) orelse return;
+    if (target.no_focus) return; // one flag, one rule: never, by any path
     const trusted_has_focus = if (findSurface(focused)) |f| f.trusted else false;
     if (trusted_has_focus and !target.trusted) return;
     focused = id;
@@ -1519,7 +1526,10 @@ fn serveSurfaces(chan_h: u64) noreturn {
                     continue;
                 }
                 const mask = q.enabled & shared.menus.offered(profile.?);
-                if (sf.?.menu_profile != profile.? or sf.?.menu_enabled != mask) {
+                // A custom profile's `set_menu` is the commit of a publication
+                // (titles and items carry no bump of their own, so the bar
+                // never reads a half-published schema): it bumps every time.
+                if (sf.?.menu_profile != profile.? or sf.?.menu_enabled != mask or profile.? == .custom) {
                     sf.?.menu_profile = profile.?;
                     sf.?.menu_enabled = mask;
                     if (menu_app == q.surface) menu_token += 1;
@@ -1542,44 +1552,58 @@ fn serveSurfaces(chan_h: u64) noreturn {
                 const n = @min(t.len, shared.menus.title_bytes);
                 @memcpy(sf.?.menu_titles[sl.slot][0..n], t[0..n]);
                 sf.?.menu_title_len[sl.slot] = @intCast(n);
-                if (menu_app == sl.id) menu_token += 1;
                 _ = usys.replyTypedTo(shared.GpuResp, chan_h, .ok, 0, token);
             },
             .set_menu_item => |q| {
                 const m = shared.menus.unpackItemMeta(q.meta);
                 const sf = findSurface(m.surface);
-                if (sf == null or sf.?.owner != badge or m.index >= shared.menus.max_app_items or m.menu >= shared.menus.max_menus or m.sub > shared.menus.max_menus) {
+                if (sf == null or sf.?.owner != badge or m.index >= shared.menus.max_app_items) {
                     _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 22 } }, 0, token);
                     continue;
                 }
                 if (m.part == shared.menus.part_truncate) {
                     for (sf.?.menu_items[m.index..]) |*rest| rest.* = .{};
-                    if (menu_app == m.surface) menu_token += 1;
                     _ = usys.replyTypedTo(shared.GpuResp, chan_h, .ok, 0, token);
                     continue;
                 }
+                // The schema must be honest: an item's key is 0 (a rule, a
+                // submenu header) or the application key of its own index,
+                // which is what `menu_invoke` checks a key against.
+                const honest = m.menu < shared.menus.max_menus and m.sub <= shared.menus.max_menus and (m.key == 0 or m.key == shared.menus.appItemKey(m.index));
                 const item = &sf.?.menu_items[m.index];
                 var lbuf: [24]u8 = undefined;
                 const part = shared.wordsToStr(&lbuf, .{ q.a, q.b, 0 });
                 const half = shared.menus.label_bytes / 2;
                 const n = @min(part.len, half);
-                if (m.part == 0) {
+                // A write the schema cannot take is refused, not dropped:
+                // a client bug shows up where it is made.
+                var ok = honest;
+                if (!honest) {} else if (m.part == 0) {
                     item.* = .{ .used = true, .menu = m.menu, .key = m.key, .sub = m.sub };
                     @memcpy(item.label[0..n], part[0..n]);
                     item.label_len = @intCast(n);
-                } else if (m.part == 1 and item.used and item.label_len == half) {
-                    @memcpy(item.label[half .. half + n], part[0..n]);
-                    item.label_len = @intCast(half + n);
-                } else if (m.part == shared.menus.part_shortcut and item.used) {
-                    const sn = @min(part.len, shared.menus.shortcut_bytes);
-                    @memcpy(item.shortcut[0..sn], part[0..sn]);
-                    item.shortcut_len = @intCast(sn);
+                } else if (m.part == 1) {
+                    ok = item.used and item.label_len == half;
+                    if (ok) {
+                        @memcpy(item.label[half .. half + n], part[0..n]);
+                        item.label_len = @intCast(half + n);
+                    }
+                } else {
+                    ok = item.used;
+                    if (ok) {
+                        const sn = @min(part.len, shared.menus.shortcut_bytes);
+                        @memcpy(item.shortcut[0..sn], part[0..sn]);
+                        item.shortcut_len = @intCast(sn);
+                    }
                 }
-                if (menu_app == m.surface) menu_token += 1;
-                _ = usys.replyTypedTo(shared.GpuResp, chan_h, .ok, 0, token);
+                _ = usys.replyTypedTo(shared.GpuResp, chan_h, if (ok) .ok else .{ .gpu_err = .{ .code = 22 } }, 0, token);
             },
             .menu_slot => |q| {
                 const sl = shared.menus.unpackSlot(q.meta);
+                if (badge != control_badge) {
+                    _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 25 } }, 0, token);
+                    continue;
+                }
                 if (menuTarget(sl.id)) |sf| if (sl.slot < shared.menus.max_menus) {
                     const words = shared.strToWords(sf.menu_titles[sl.slot][0..sf.menu_title_len[sl.slot]]);
                     _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .menu_title = .{ .a = words[0], .b = words[1] } }, 0, token);
@@ -1589,7 +1613,11 @@ fn serveSurfaces(chan_h: u64) noreturn {
             },
             .menu_item => |q| {
                 const m = shared.menus.unpackItemMeta(q.meta);
-                const target: u64 = q.meta & 0xffff_ffff; // the token travels in the surface field
+                const target: u64 = q.meta & shared.menus.token_bits; // the token travels in the surface field
+                if (badge != control_badge or m.part == shared.menus.part_truncate) {
+                    _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 25 } }, 0, token);
+                    continue;
+                }
                 if (menuTarget(target)) |sf| if (m.index < shared.menus.max_app_items) {
                     const item = sf.menu_items[m.index];
                     const half = shared.menus.label_bytes / 2;
@@ -1647,11 +1675,18 @@ fn serveSurfaces(chan_h: u64) noreturn {
                 _ = usys.replyTypedTo(shared.GpuResp, chan_h, if (ok) .ok else .{ .gpu_err = .{ .code = 22 } }, 0, token);
             },
             .menu_info => {
-                syncMenuApp();
+                if (badge != control_badge) {
+                    _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 25 } }, 0, token);
+                    continue;
+                }
                 const sf = menuTarget(menu_token);
                 _ = usys.replyTypedTo(shared.GpuResp, chan_h, if (sf) |app| .{ .menu = .{ .token = menu_token, .profile = @intFromEnum(app.menu_profile), .enabled = app.menu_enabled } } else .{ .menu = .{ .token = 0, .profile = 0, .enabled = 0 } }, 0, token);
             },
             .menu_title => |q| {
+                if (badge != control_badge) {
+                    _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 25 } }, 0, token);
+                    continue;
+                }
                 if (menuTarget(q.token)) |sf| {
                     const words = shared.strToWords(sf.title[0..sf.title_len]);
                     _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .menu_title = .{ .a = words[0], .b = words[1] } }, 0, token);
@@ -1669,6 +1704,12 @@ fn serveSurfaces(chan_h: u64) noreturn {
                     if (req == .menu_invoke) {
                         const key = req.menu_invoke.key;
                         ok = key <= 255 and app.menu_key == 0 and shared.menus.allows(app.menu_profile, app.menu_enabled, @intCast(key));
+                        // An application key routes only to an item the app
+                        // published under that index: the mask says "enabled",
+                        // the schema says "exists".
+                        if (ok) if (shared.menus.appItemIndex(@intCast(key))) |idx| {
+                            ok = app.menu_items[idx].used and app.menu_items[idx].key == @as(u8, @intCast(key));
+                        };
                         if (ok) app.menu_key = @intCast(key);
                     }
                     if (ok) {

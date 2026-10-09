@@ -35,12 +35,20 @@ pub fn appItemIndex(key: u8) ?usize {
 /// slot it sits in, its key (0 for a separator or a submenu header) and
 /// the slot it opens (`sub`, 1-based, 0 for none).
 pub const ItemMeta = struct { surface: u32 = 0, index: u8, part: u2 = 0, menu: u8, key: u8, sub: u8 };
+/// Bit layout of the packed word: surface 0..31, index 32..39, part
+/// 40..41, menu 42..45 (four bits: `max_menus` is 8), key 48..55, sub
+/// 56..63; bits 46..47 are unused. A `menu` past 15 is a caller bug.
 pub const part_shortcut: u2 = 2;
 /// `set_menu_item` with this part: every item from `index` on is unused
 /// (a republished schema that shrank).
 pub const part_truncate: u2 = 3;
+/// Tokens are compared in their low 32 bits everywhere (`menu_item`
+/// carries that much in its surface field); 2^32 bumps away from a
+/// false match.
+pub const token_bits: u64 = 0xffff_ffff;
 pub const shortcut_bytes: usize = 16;
 pub fn packItemMeta(m: ItemMeta) u64 {
+    std.debug.assert(m.menu < 16);
     return @as(u64, m.surface) | (@as(u64, m.index) << 32) | (@as(u64, m.part) << 40) | (@as(u64, m.menu & 0xf) << 42) | (@as(u64, m.key) << 48) | (@as(u64, m.sub) << 56);
 }
 pub fn unpackItemMeta(w: u64) ItemMeta {

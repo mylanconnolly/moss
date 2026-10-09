@@ -24,6 +24,11 @@ pub const control = struct {
     pub const field_x = 12;
     pub const field_y = 8;
     pub const radius = 6;
+    /// A tighter corner: a selection band, a checkbox, a scrollbar thumb.
+    pub const radius_small = 4;
+    /// A control row's padding above and below its text line (a button,
+    /// a menu row, a breadcrumb): the button's vertical padding, twice.
+    pub const row_pad = 2 * button_y;
 };
 
 test "contains is half-open on both axes" {

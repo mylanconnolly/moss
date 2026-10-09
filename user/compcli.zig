@@ -81,13 +81,19 @@ fn title(surface: u64, text: []const u8) void {
     const words = shared.strToWords(text);
     demand(call(disp, .{ .set_title = .{ .surface = surface, .a = words[0], .b = words[1] } }) == .ok);
 }
+/// The control endpoint, once `menuProbe` has it: the menu reads are the
+/// chrome's, not a window's.
+var control_chan: u64 = 0;
 fn snapshot() u64 {
-    const reply = call(disp, .menu_info);
+    const reply = call(control_chan, .menu_info);
     demand(reply == .menu and reply.menu.token != 0);
     return reply.menu.token;
 }
 /// Real IPC authorization/lifecycle checks, before the pixel-compositing scene.
 fn menuProbe(control: u64, log_h: u64) void {
+    control_chan = control;
+    // A window cannot read the focused window's menus: control only.
+    demand(call(disp, .menu_info) == .gpu_err);
     demand(control != 0);
     // The control endpoint is call/reply only: no surface, no parked read.
     demand(call(control, .{ .create_surface = .{ .xy = shared.packPair(10, 10), .wh = shared.packPair(64, 64) } }) == .gpu_err);
@@ -98,13 +104,7 @@ fn menuProbe(control: u64, log_h: u64) void {
     demand(call(disp, .{ .set_menu = .{ .surface = a, .profile = 999, .enabled = 0 } }) == .gpu_err);
     demand(call(disp, .{ .set_menu = .{ .surface = a, .profile = @intFromEnum(shared.menus.Profile.editor), .enabled = shared.menus.bit(close_key) } }) == .ok);
     const first = snapshot();
-    const other = switch (usys.callTypedCap(shared.GpuReq, shared.GpuResp, disp, .register, 0)) {
-        .ok => |rep| rep,
-        .err => usys.exit(193),
-    };
-    demand(other.rep == .registered and other.cap != 0);
-    demand(call(other.cap, .{ .set_menu = .{ .surface = a, .profile = @intFromEnum(shared.menus.Profile.editor), .enabled = 0 } }) == .gpu_err);
-    _ = usys.capDrop(other.cap);
+    demand(call(other_disp(), .{ .set_menu = .{ .surface = a, .profile = @intFromEnum(shared.menus.Profile.editor), .enabled = 0 } }) == .gpu_err);
     demand(call(disp, .{ .menu_invoke = .{ .token = first, .key = close_key } }) == .gpu_err);
     demand(call(disp, .{ .menu_restore = .{ .token = first } }) == .gpu_err);
     demand(call(control, .{ .menu_invoke = .{ .token = first, .key = shared.keyboard.save_document } }) == .gpu_err);
@@ -121,6 +121,12 @@ fn menuProbe(control: u64, log_h: u64) void {
     demand(call(other_disp(), .{ .set_menu_title = .{ .meta = shared.menus.packSlot(a, 0), .a = title_words[0], .b = title_words[1] } }) == .gpu_err); // not the owner
     demand(call(disp, .{ .set_menu_title = .{ .meta = shared.menus.packSlot(a, 0), .a = title_words[0], .b = title_words[1] } }) == .ok);
     demand(call(disp, .{ .set_menu_title = .{ .meta = shared.menus.packSlot(a, 9), .a = title_words[0], .b = title_words[1] } }) == .gpu_err); // no such slot
+    demand(call(other_disp(), .{ .set_menu_item = .{ .meta = shared.menus.packItemMeta(.{ .surface = @intCast(a), .index = 0, .part = 0, .menu = 0, .key = shared.menus.appItemKey(0), .sub = 0 }), .a = 0, .b = 0 } }) == .gpu_err); // not the owner
+    demand(call(other_disp(), .{ .set_menu_item = .{ .meta = shared.menus.packItemMeta(.{ .surface = @intCast(a), .index = 0, .part = shared.menus.part_truncate, .menu = 0, .key = 0, .sub = 0 }), .a = 0, .b = 0 } }) == .gpu_err);
+    demand(call(disp, .{ .set_menu_item = .{ .meta = shared.menus.packItemMeta(.{ .surface = @intCast(a), .index = 32, .part = 0, .menu = 0, .key = 0, .sub = 0 }), .a = 0, .b = 0 } }) == .gpu_err); // no such item
+    demand(call(disp, .{ .set_menu_item = .{ .meta = shared.menus.packItemMeta(.{ .surface = @intCast(a), .index = 0, .part = 0, .menu = 8, .key = 0, .sub = 0 }), .a = 0, .b = 0 } }) == .gpu_err); // no such menu
+    demand(call(disp, .{ .set_menu_item = .{ .meta = shared.menus.packItemMeta(.{ .surface = @intCast(a), .index = 0, .part = 0, .menu = 0, .key = shared.menus.appItemKey(3), .sub = 0 }), .a = 0, .b = 0 } }) == .gpu_err); // a key that is not the index's
+    demand(call(disp, .{ .set_menu_item = .{ .meta = shared.menus.packItemMeta(.{ .surface = @intCast(a), .index = 0, .part = 1, .menu = 0, .key = 0, .sub = 0 }), .a = 0, .b = 0 } }) == .gpu_err); // a second half before a first
     // A label longer than 16 bytes travels in two parts, split at 16.
     const l0 = shared.strToWords("Increment count ");
     const l1 = shared.strToWords("by one, now");
@@ -133,6 +139,8 @@ fn menuProbe(control: u64, log_h: u64) void {
     demand(call(disp, .{ .set_menu = .{ .surface = a, .profile = custom, .enabled = ~shared.menus.bit(shared.menus.appItemKey(1)) } }) == .ok);
     const custom_token = snapshot();
     demand(custom_token != 0);
+    demand(call(other_disp(), .{ .menu_slot = .{ .meta = shared.menus.packSlot(custom_token, 0) } }) == .gpu_err); // reads are the chrome's
+    demand(call(control, .{ .menu_slot = .{ .meta = shared.menus.packSlot(custom_token + 7, 0) } }) == .gpu_err); // a stale token
     switch (call(control, .{ .menu_slot = .{ .meta = shared.menus.packSlot(custom_token, 0) } })) {
         .menu_title => |t| {
             var tb: [24]u8 = undefined;
@@ -161,19 +169,37 @@ fn menuProbe(control: u64, log_h: u64) void {
         },
         else => usys.exit(197),
     }
-    // A schema that shrinks: truncating at 1 leaves item 1 unused.
+    // An application key routes only to a published item: index 5 is enabled by
+    // the mask but was never published.
+    demand(call(control, .{ .menu_invoke = .{ .token = custom_token, .key = shared.menus.appItemKey(5) } }) == .gpu_err);
+    // (A published, enabled key routes as a key event to the owner's
+    // reader: the guishellro drill sees that end to end. This profile has
+    // no input devices, so no reader can park here to drain it, and a
+    // routed key left pending would taint the invoke checks below.)
+    // A schema that shrinks: truncating at 1 leaves item 1 unused and item 0 as it was;
+    // the commit is the `set_menu` that follows a publication.
     demand(call(disp, .{ .set_menu_item = .{ .meta = shared.menus.packItemMeta(.{ .surface = @intCast(a), .index = 1, .part = shared.menus.part_truncate, .menu = 0, .key = 0, .sub = 0 }), .a = 0, .b = 0 } }) == .ok);
+    demand(call(disp, .{ .set_menu = .{ .surface = a, .profile = custom, .enabled = ~shared.menus.bit(shared.menus.appItemKey(1)) } }) == .ok);
     const after_truncate = snapshot();
+    demand(after_truncate != custom_token); // the commit bumped the token
     switch (call(control, .{ .menu_item = .{ .meta = shared.menus.packItemMeta(.{ .surface = @intCast(after_truncate), .index = 1, .part = 0, .menu = 0, .key = 0, .sub = 0 }) } })) {
         .menu_item => |it| demand(shared.menus.unpackItemMeta(it.meta).surface == 0),
         else => usys.exit(198),
     }
-    demand(call(control, .{ .menu_invoke = .{ .token = after_truncate, .key = shared.menus.appItemKey(1) } }) == .gpu_err); // disabled in the mask
+    switch (call(control, .{ .menu_item = .{ .meta = shared.menus.packItemMeta(.{ .surface = @intCast(after_truncate), .index = 0, .part = 0, .menu = 0, .key = 0, .sub = 0 }) } })) {
+        .menu_item => |it| demand(shared.menus.unpackItemMeta(it.meta).surface == 1),
+        else => usys.exit(198),
+    }
+    demand(call(control, .{ .menu_invoke = .{ .token = after_truncate, .key = shared.menus.appItemKey(1) } }) == .gpu_err); // unused now
     demand(call(control, .{ .menu_invoke = .{ .token = after_truncate, .key = shared.keyboard.save_document } }) == .gpu_err); // not the custom profile's
     // Back to a catalog profile: the schema is gone with it.
     demand(call(disp, .{ .set_menu = .{ .surface = a, .profile = @intFromEnum(shared.menus.Profile.editor), .enabled = shared.menus.bit(close_key) } }) == .ok);
     switch (call(control, .{ .menu_slot = .{ .meta = shared.menus.packSlot(snapshot(), 0) } })) {
         .menu_title => |t| demand(t.a == 0 and t.b == 0),
+        else => usys.exit(196),
+    }
+    switch (call(control, .{ .menu_item = .{ .meta = shared.menus.packItemMeta(.{ .surface = @intCast(snapshot()), .index = 0, .part = 0, .menu = 0, .key = 0, .sub = 0 }) } })) {
+        .menu_item => |it| demand(shared.menus.unpackItemMeta(it.meta).surface == 0), // the items went with the titles
         else => usys.exit(196),
     }
     // The ground is chrome authority too: a window cannot repaint the desktop.

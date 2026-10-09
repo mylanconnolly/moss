@@ -4548,8 +4548,7 @@ shortcut at the right), the palette carries a `desktop` token — the
 slate the desktop always wore in the dark theme, a lighter grey in the
 light one, the extreme at high contrast — and the bar declares it to
 the compositor (`set_ground`, control-badge only, probed by the comp
-drill beside `set_strut`) with its strut and again whenever the
-appearance changes. The appearance tick that already woke every
+drill) with its strut and again whenever the appearance changes. The appearance tick that already woke every
 parked reader now makes each of them ask fontsvc for the palette
 (`refreshAppearance` says whether it changed): the bar repaints and
 re-declares the ground, the dock repaints, and every open window

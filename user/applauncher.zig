@@ -72,6 +72,7 @@ fn render() void {
     _ = wf.commitSurface();
 }
 pub fn run(control: u64, log: u64) bool {
+    menuctl.control_chan = control;
     const focus = menuctl.activeMenu().token;
     query = .{};
     message = if (catalog.refresh()) "" else "Applications are unavailable.";

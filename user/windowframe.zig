@@ -663,6 +663,7 @@ pub fn openSurface(cascade: bool) bool {
 
 pub fn openSurfaceFocused(cascade: bool, activate: bool) bool {
     menu_surface = 0;
+    menu_items_surface = 0; // the new surface may reuse the old id: publish again
     surface_visible = true;
     const flags: u64 = (if (rounded and !maximized) shared.gpu_rounded else @as(u64, 0)) | (if (cascade) shared.gpu_place_cascade else @as(u64, 0)) | (if (pointer_tracking) shared.gpu_pointer_tracking else @as(u64, 0)) | (if (activate) @as(u64, 0) else shared.gpu_no_activate) | (if (dialog) shared.gpu_dialog else @as(u64, 0));
     const cs = switch (usys.callTypedCap(shared.GpuReq, shared.GpuResp, chan, .{ .create_surface = .{ .xy = shared.packPair(@intCast(win_x), @intCast(win_y)), .wh = shared.packPair(@intCast(win_w), @intCast(win_h)), .flags = flags } }, 0)) {
@@ -808,34 +809,42 @@ var menu_items_surface: u64 = 0;
 pub fn republishMenu() void {
     menu_items_surface = 0;
 }
+/// Set when the compositor refused part of the last publication (a
+/// caller past the schema's bounds); the runtime names it in the log.
+pub var menu_publish_refused = false;
 pub fn publishMenu(titles: []const []const u8, items: []const MenuItemSpec) bool {
     if (surf == 0 or menu_items_surface == surf) return false;
     const half = shared.menus.label_bytes / 2;
+    menu_publish_refused = false;
     // Every slot, so a republished schema with fewer menus clears the rest.
     for (0..shared.menus.max_menus) |slot| {
         const t: []const u8 = if (slot < titles.len) titles[slot] else "";
         const w = shared.strToWords(t[0..@min(t.len, shared.menus.title_bytes)]);
-        _ = menuCall(chan, .{ .set_menu_title = .{ .meta = shared.menus.packSlot(surf, @intCast(slot)), .a = w[0], .b = w[1] } });
+        note(menuCall(chan, .{ .set_menu_title = .{ .meta = shared.menus.packSlot(surf, @intCast(slot)), .a = w[0], .b = w[1] } }));
     }
     for (items, 0..) |item, i| {
         const first = item.label[0..@min(item.label.len, half)];
         const w0 = shared.strToWords(first);
-        _ = menuCall(chan, .{ .set_menu_item = .{ .meta = shared.menus.packItemMeta(.{ .surface = @intCast(surf), .index = @intCast(i), .part = 0, .menu = item.menu, .key = item.key, .sub = item.sub }), .a = w0[0], .b = w0[1] } });
+        note(menuCall(chan, .{ .set_menu_item = .{ .meta = shared.menus.packItemMeta(.{ .surface = @intCast(surf), .index = @intCast(i), .part = 0, .menu = item.menu, .key = item.key, .sub = item.sub }), .a = w0[0], .b = w0[1] } }));
         if (item.label.len > half) {
             const rest = item.label[half..@min(item.label.len, shared.menus.label_bytes)];
             const w1 = shared.strToWords(rest);
-            _ = menuCall(chan, .{ .set_menu_item = .{ .meta = shared.menus.packItemMeta(.{ .surface = @intCast(surf), .index = @intCast(i), .part = 1, .menu = item.menu, .key = item.key, .sub = item.sub }), .a = w1[0], .b = w1[1] } });
+            note(menuCall(chan, .{ .set_menu_item = .{ .meta = shared.menus.packItemMeta(.{ .surface = @intCast(surf), .index = @intCast(i), .part = 1, .menu = item.menu, .key = item.key, .sub = item.sub }), .a = w1[0], .b = w1[1] } }));
         }
         if (item.shortcut.len > 0) {
             const w2 = shared.strToWords(item.shortcut[0..@min(item.shortcut.len, shared.menus.shortcut_bytes)]);
-            _ = menuCall(chan, .{ .set_menu_item = .{ .meta = shared.menus.packItemMeta(.{ .surface = @intCast(surf), .index = @intCast(i), .part = shared.menus.part_shortcut, .menu = item.menu, .key = item.key, .sub = item.sub }), .a = w2[0], .b = w2[1] } });
+            note(menuCall(chan, .{ .set_menu_item = .{ .meta = shared.menus.packItemMeta(.{ .surface = @intCast(surf), .index = @intCast(i), .part = shared.menus.part_shortcut, .menu = item.menu, .key = item.key, .sub = item.sub }), .a = w2[0], .b = w2[1] } }));
         }
     }
     if (items.len < shared.menus.max_app_items) {
-        _ = menuCall(chan, .{ .set_menu_item = .{ .meta = shared.menus.packItemMeta(.{ .surface = @intCast(surf), .index = @intCast(items.len), .part = shared.menus.part_truncate, .menu = 0, .key = 0, .sub = 0 }), .a = 0, .b = 0 } });
+        note(menuCall(chan, .{ .set_menu_item = .{ .meta = shared.menus.packItemMeta(.{ .surface = @intCast(surf), .index = @intCast(items.len), .part = shared.menus.part_truncate, .menu = 0, .key = 0, .sub = 0 }), .a = 0, .b = 0 } }));
     }
     menu_items_surface = surf;
+    menu_surface = 0; // the `set_menu` that follows is the publication's commit
     return true;
+}
+fn note(rep: ?shared.GpuResp) void {
+    if (rep == null or rep.? != .ok) menu_publish_refused = true;
 }
 /// Minimize (hide) or restore (show) this window's surface. The amber
 /// traffic-light hides it; the compositor drops focus to the window behind

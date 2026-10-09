@@ -885,6 +885,7 @@ fn publishCustomMenus() void {
     if (wf.publishMenu(titles[0..c.nslots], items[0..c.nitems])) {
         var lb: [80]u8 = undefined;
         _ = usys.log(log_h, std.fmt.bufPrint(&lb, "gui: menus published slots={d} items={d}", .{ c.nslots, c.nitems }) catch "gui: menus published");
+        if (wf.menu_publish_refused) warn("menu publication refused by the compositor", "custom menus");
     }
 }
 
@@ -2908,7 +2909,7 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
             // An application key from the bar: the custom menu item it names
             // fires its event id, like a button press.
             if (menu_profile == .custom) if (shared.menus.appItemIndex(ch)) |i| {
-                if (i < custom_menus.nitems and custom_menus.items[i].id_len > 0) {
+                if (i < custom_menus.nitems and custom_menus.items[i].id_len > 0 and (custom_menus.disabled & shared.menus.bit(ch)) == 0) {
                     fired = custom_menus.items[i].id[0..custom_menus.items[i].id_len];
                     var lb: [96]u8 = undefined;
                     _ = usys.log(log_h, std.fmt.bufPrint(&lb, "gui: menu item {s}", .{fired.?}) catch "gui: menu item");

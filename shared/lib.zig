@@ -992,11 +992,17 @@ pub const gpu_dialog: u64 = 16;
 /// must not read as the dropdown losing it (the pointer still reaches
 /// it). Implies `gpu_no_activate`.
 pub const gpu_no_focus: u64 = 32;
+/// A window title's bytes on the wire (`set_title`'s two words).
+pub const window_title_bytes: usize = 16;
 
 pub const GpuReq = union(enum(u64)) {
-    /// Owner publishes a fixed menu profile and current action availability.
+    /// Owner publishes a menu profile and current action availability
+    /// (a `custom` profile's items are published with `set_menu_item`
+    /// first; this is the commit, and bumps the bar's token).
     set_menu: struct { surface: u64, profile: u64, enabled: u64 },
-    /// Focused application's menu snapshot; titleless desktop chrome is ignored.
+    /// Focused application's menu snapshot; titleless desktop chrome is
+    /// ignored. Control capability only, like every read of another
+    /// window's menus: a window cannot learn what the focused one shows.
     menu_info: void,
     /// Control capability registers the resident titleless bar for F10.
     menu_bar: struct { surface: u64 },
@@ -1020,7 +1026,9 @@ pub const GpuReq = union(enum(u64)) {
     /// reply's `xy` (movable app windows set it; menus/exact placements
     /// leave it 0). `gpu_pointer_tracking` opts into scanout pointer coordinates, hover, and capture.
     /// `gpu_rounded` opts into rounded composition and matching pointer hit testing.
-    /// Other bits reserved, pass 0.
+    /// `gpu_no_activate` opens it behind the focus, `gpu_no_focus` keeps it
+    /// unfocusable even by a press, `gpu_dialog` makes it a panel of the
+    /// window focused as it opens. Other bits reserved, pass 0.
     create_surface: struct { xy: u64, wh: u64, flags: u64 = 0 },
     /// A surface's damage rect changed (`xy`/`wh` in surface-local
     /// coordinates); the compositor recomposites the scanout and flushes.
@@ -1114,10 +1122,14 @@ pub const GpuReq = union(enum(u64)) {
     /// An application's own menus (the `custom` profile, shared/menus.zig):
     /// the owner publishes each menu slot's title (`meta` = packSlot(surface,
     /// slot), `a`/`b` 16 bytes; empty clears the slot) and each item
-    /// (`meta` = packItemMeta with the surface, `a`/`b` 16 bytes of the
-    /// label, part 0 or 1), then `set_menu` with the custom profile. The
-    /// bar reads them back by token: `menu_slot` -> `menu_title`,
-    /// `menu_item` (meta = packItemMeta with index + part) -> `menu_item`.
+    /// (`meta` = packItemMeta with the surface; part 0 and 1 the label's
+    /// 16-byte halves — part 1 only after a full part 0 — part 2 the
+    /// shortcut hint, part 3 "every item from `index` on is unused"; the
+    /// key must be 0 or the index's application key), then `set_menu`
+    /// with the custom profile as the commit. The bar reads them back by
+    /// token, control capability only: `menu_slot` (meta = packSlot(token,
+    /// slot)) -> `menu_title`; `menu_item` (meta = packItemMeta with the
+    /// token's low 32 bits in `surface`, index, part 0..2) -> `menu_item`.
     set_menu_title: struct { meta: u64, a: u64, b: u64 },
     set_menu_item: struct { meta: u64, a: u64, b: u64 },
     menu_slot: struct { meta: u64 },
@@ -1126,8 +1138,9 @@ pub const GpuReq = union(enum(u64)) {
 pub const GpuResp = union(enum(u64)) {
     menu: struct { token: u64, profile: u64, enabled: u64 },
     menu_title: struct { a: u64, b: u64 },
-    /// A custom menu item: `meta` = packItemMeta (menu, key, sub; surface 0,
-    /// index as asked, part as asked), the label part in `a`/`b`.
+    /// A custom menu item: `meta` = packItemMeta (menu, key, sub; `surface`
+    /// 1 when the item is in use and 0 when not, index and part as asked),
+    /// the text part in `a`/`b` (empty for an unused item).
     menu_item: struct { meta: u64, a: u64, b: u64 },
     output: struct { wh: u64, preferred: u64, seconds: u64 },
     mode: struct { wh: u64 },

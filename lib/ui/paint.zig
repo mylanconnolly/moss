@@ -16,6 +16,7 @@ const icons = @import("icons.zig");
 const text = @import("text.zig");
 const tabs = @import("tabs.zig");
 const flow = @import("flow.zig");
+const palette = @import("palette.zig");
 
 pub const Brush = struct {
     canvas: *const Canvas,
@@ -38,7 +39,14 @@ pub const Brush = struct {
 
 /// A control row's height: the taller of a text line and an icon, padded.
 pub fn controlHeight(b: Brush) usize {
-    return @max(b.line(), b.icon_px) + 16;
+    return @max(b.line(), b.icon_px) + control.row_pad;
+}
+/// A button's natural size for its label and icon: the painter's own
+/// insets (the icon, its gap, the horizontal padding), so a layout never
+/// re-derives them.
+pub fn buttonSize(b: Brush, label: []const u8, icon: ?icons.Icon) geometry.Size {
+    const inset: usize = if (icon != null) b.icon_px + (if (label.len > 0) @as(usize, 8) else 0) else 0;
+    return .{ .w = b.width(label) + inset + 2 * control.button_x, .h = controlHeight(b) };
 }
 
 pub const ButtonStyle = struct {
@@ -193,7 +201,7 @@ pub fn toggle(b: Brush, r: Rect, label: []const u8, style: ToggleStyle) void {
     if (style.hovered and !style.disabled) fill = palette.shade(fill, 9, 8);
     const mark_ink = if (style.disabled) p.text_muted else if (style.on) p.primary_ink else p.text;
     if (style.check) {
-        b.canvas.panel(cx, cy, c.w, c.h, @max(2, control.radius - 2), fill, ring, ring_w);
+        b.canvas.panel(cx, cy, c.w, c.h, control.radius_small, fill, ring, ring_w);
         if (style.on) checkMark(b.canvas, cx, cy, c.w, mark_ink);
     } else {
         b.canvas.panel(cx, cy, c.w, c.h, c.h / 2, fill, ring, ring_w);
@@ -239,7 +247,14 @@ pub const MenuItemStyle = struct {
 /// A menu row's height: a text line with the item padding; a separator
 /// is a third of a line.
 pub fn menuRowHeight(b: Brush) usize {
-    return b.line() + 16;
+    return b.line() + control.row_pad;
+}
+/// The width a row wants for its label and its shortcut or caret, with
+/// the painter's own insets — the popup's width comes from this, not from
+/// a second reading of the painter.
+pub fn menuItemWidth(b: Brush, label: []const u8, shortcut: []const u8, submenu: bool) usize {
+    const extra: usize = if (submenu) @max(8, b.line() * 3 / 5) + 24 else if (shortcut.len > 0) b.width(shortcut) + 24 else 0;
+    return b.width(label) + extra + 24;
 }
 pub fn menuSeparatorHeight(b: Brush) usize {
     return @max(9, b.line() / 3);
@@ -257,7 +272,7 @@ pub fn menuItem(b: Brush, r: Rect, label: []const u8, shortcut: []const u8, styl
     const selected = style.selected and style.enabled;
     const bg = if (selected) p.primary else p.surface;
     const ink = if (!style.enabled) p.text_muted else if (selected) p.primary_ink else p.text;
-    if (selected) b.canvas.fillRoundRect(r.x + 4, r.y, r.w -| 8, r.h, 4, bg);
+    if (selected) b.canvas.fillRoundRect(r.x + 4, r.y, r.w -| 8, r.h, control.radius_small, bg);
     const ty = r.y + (r.h -| b.line()) / 2;
     const caret = if (style.submenu) @max(8, b.line() * 3 / 5) else 0;
     const sw = if (style.submenu) caret else b.width(shortcut);
@@ -297,6 +312,7 @@ pub fn columnWidths(cols: []const Column, fit: bool, tracks_w: usize, out: []usi
 /// mark after it, over a rule. `r` is the header band across the list's
 /// inner width; `widths` from `columnWidths`.
 pub fn listHeader(b: Brush, r: Rect, cols: []const Column, widths: []const usize, sort: ?usize, ground: u32) void {
+    std.debug.assert(widths.len >= cols.len);
     const p = b.pal;
     var hx = r.x + list_cell_pad;
     for (cols, 0..) |c, i| {
@@ -331,6 +347,7 @@ pub const ListRowStyle = struct {
 /// a sparkline cell as bars on the row's ground). With no columns the
 /// first cell spans the row.
 pub fn listRow(b: Brush, r: Rect, cols: []const Column, widths: []const usize, cells: []const Cell, style: ListRowStyle) void {
+    std.debug.assert(widths.len >= cols.len);
     const p = b.pal;
     const bg = if (style.selected) (if (style.focused) p.primary else p.surface_hi) else style.ground;
     if (style.selected) b.canvas.fillRect(r.x, r.y, r.w, r.h, bg);
@@ -356,7 +373,8 @@ pub fn listRow(b: Brush, r: Rect, cols: []const Column, widths: []const usize, c
                 const sh = b.line() -| 2;
                 if (n > 0 and sw >= 8) {
                     const bw = @max(sw / @max(n, 30), 1);
-                    for (samples, 0..) |v, si| {
+                    for (samples, 0..) |sample, si| {
+                        const v: usize = @min(sample, 1000); // the permille contract, kept here too
                         const bar = @max(sh * v / 1000, if (v > 0) @as(usize, 1) else 0);
                         if (bar == 0) continue;
                         const bx = cx + 4 + sw -| (n - si) * bw;
@@ -385,11 +403,25 @@ pub fn listScrollbar(b: Brush, r: Rect, visible: usize, total: usize, first: usi
     const thumb_y = r.y + (if (max_first > 0) span * first / max_first else 0);
     b.canvas.fillRect(r.x + 1, thumb_y, r.w -| 2, thumb_h, p.text_muted);
 }
+/// A viewport's scrollbar, in pixels rather than rows: a rounded track
+/// on the surface and a thumb proportional to the visible share, at
+/// `offset` of `limit` (the farthest offset). The strip a viewport
+/// reserves for it is `scrollbar_w`.
+pub const scrollbar_w: usize = 14;
+pub fn scrollbar(b: Brush, r: Rect, visible_h: usize, content_h: usize, offset: usize, limit: usize) void {
+    const p = b.pal;
+    const w: usize = @min(r.w, 6);
+    const x = (r.x + r.w) -| (w + 2);
+    b.canvas.fillRoundRect(x, r.y, w, r.h, w / 2, p.surface);
+    const thumb = @min(r.h, @max(20, r.h * visible_h / @max(1, content_h)));
+    const at = (r.h -| thumb) * offset / @max(1, limit);
+    b.canvas.fillRoundRect(x, r.y + at, w, thumb, w / 2, p.text_muted);
+}
 
 // ---------------------------------------------------------- breadcrumbs
 
 pub fn crumbHeight(b: Brush) usize {
-    return b.line() + 16;
+    return b.line() + control.row_pad;
 }
 pub fn crumbWidth(b: Brush, label: []const u8, last: bool, width: usize) usize {
     return @min(width, b.width(label) + 20 + (if (last) @as(usize, 0) else 24));
@@ -417,7 +449,7 @@ pub fn breadcrumbs(b: Brush, r: Rect, labels: []const []const u8, focused: ?usiz
         const last = i + 1 == labels.len;
         const place = line.put(.{ .w = crumbWidth(b, label, last, r.w), .h = h });
         const label_w = place.w -| (if (last) @as(usize, 0) else 24);
-        if (focused == i and !last) b.canvas.panel(r.x + place.x, r.y + place.y, label_w, h, 4, p.surface_hi, p.focus, p.focus_w);
+        if (focused == i and !last) b.canvas.panel(r.x + place.x, r.y + place.y, label_w, h, control.radius_small, p.surface_hi, p.focus, p.focus_w);
         b.face.drawTrunc(b.canvas, r.x + place.x + 10, r.y + place.y + 8, .ui, label, label_w -| 20, if (last) p.text else p.focus, ground);
         if (!last and place.w >= 24) b.face.draw(b.canvas, r.x + place.x + place.w - 19, r.y + place.y + 8, .ui, "›", p.text_muted, ground);
     }
@@ -606,8 +638,6 @@ pub fn tabStrip(b: Brush, r: Rect, items: []const TabItem, selected: usize, stat
     state.selection_visible = selected >= state.first and selected < end;
 }
 
-/// What a press at (x, y) on the strip means, using the same layout the
-/// strip was painted with.
 /// Where tab `index` sits in the strip (its body span, strip-relative),
 /// or null when it is scrolled out of view — so a host driving the
 /// pointer can be told each tab's centre.
@@ -621,6 +651,8 @@ pub fn tabSpan(b: Brush, r: Rect, items: []const TabItem, state: tabs.State, ind
     return null;
 }
 
+/// What a press at (x, y) on the strip means, using the same layout the
+/// strip was painted with.
 pub fn tabStripHit(b: Brush, r: Rect, items: []const TabItem, state: tabs.State, x: usize, y: usize) tabs.Hit {
     if (x < r.x or y < r.y or x - r.x >= r.w or y - r.y >= r.h) return .none;
     const local = x - r.x;
@@ -639,8 +671,6 @@ pub fn tabStripHit(b: Brush, r: Rect, items: []const TabItem, state: tabs.State,
 }
 
 // ------------------------------------------------------------------ tests
-
-const palette = @import("palette.zig");
 
 const Bench = struct {
     buf: [200 * 60]u32 = @splat(0x010101),
@@ -958,4 +988,21 @@ test "meters fill to their reading, turn to danger past 80%, and caption the per
     try std.testing.expect(countColor(&bench.canvas, cr, p.danger) > 0); // the 90% sample
     // Bars sit at the right edge: the left half of the plot has none.
     try std.testing.expectEqual(@as(usize, 0), countColor(&bench.canvas, .{ .x = 10, .y = 30, .w = 80, .h = 20 }, p.primary));
+}
+
+test "a button's size is the painter's own insets and a menu row's width its own" {
+    var bench: Bench = .{};
+    const b = bench.brush();
+    const plain = buttonSize(b, "Open", null);
+    try std.testing.expectEqual(controlHeight(b), plain.h);
+    try std.testing.expectEqual(b.width("Open") + 2 * control.button_x, plain.w);
+    try std.testing.expectEqual(plain.w + b.icon_px + 8, buttonSize(b, "Open", .up).w);
+    try std.testing.expectEqual(b.icon_px + 2 * control.button_x, buttonSize(b, "", .up).w); // icon only: no gap
+    try std.testing.expect(menuItemWidth(b, "Save", "Cmd S", false) > menuItemWidth(b, "Save", "", false));
+    try std.testing.expect(menuItemWidth(b, "More", "", true) > menuItemWidth(b, "More", "", false));
+    // A viewport scrollbar: track on the surface, thumb at the top for offset 0.
+    bench.canvas.fillAll(0x010101);
+    scrollbar(b, .{ .x = 180, .y = 0, .w = scrollbar_w, .h = 60 }, 30, 120, 0, 90);
+    try std.testing.expectEqual(b.pal.text_muted, bench.canvas.at(189, 5));
+    try std.testing.expectEqual(b.pal.surface, bench.canvas.at(189, 50));
 }

@@ -9,6 +9,11 @@ const shared = @import("shared");
 const usys = @import("usys.zig");
 const wf = @import("windowframe.zig");
 
+/// The seat's output-control endpoint: every read of another window's
+/// menus goes through it (the compositor serves them to nothing else),
+/// set by the chrome that holds it before its first read.
+pub var control_chan: u64 = 0;
+
 pub const ActiveMenu = struct {
     token: u64 = 0,
     profile: shared.menus.Profile = .generic,
@@ -27,7 +32,7 @@ fn call(channel: u64, req: shared.GpuReq) ?shared.GpuResp {
 /// and enabled mask. Zero token: no application menu (trusted focus,
 /// a titleless surface, nothing focused).
 pub fn activeMenu() ActiveMenu {
-    const rep = call(wf.chan, .menu_info) orelse return .{};
+    const rep = call(control_chan, .menu_info) orelse return .{};
     return switch (rep) {
         .menu => |m| .{ .token = m.token, .profile = shared.menus.profileFromInt(m.profile) orelse .generic, .enabled = m.enabled },
         else => .{},
@@ -35,9 +40,9 @@ pub fn activeMenu() ActiveMenu {
 }
 
 /// The application's title for the bar's app-name slot (NUL-padded).
-pub fn menuTitle(token: u64) [16]u8 {
-    var result: [16]u8 = @splat(0);
-    const rep = call(wf.chan, .{ .menu_title = .{ .token = token } }) orelse return result;
+pub fn menuTitle(token: u64) [shared.window_title_bytes]u8 {
+    var result: [shared.window_title_bytes]u8 = @splat(0);
+    const rep = call(control_chan, .{ .menu_title = .{ .token = token } }) orelse return result;
     switch (rep) {
         .menu_title => |t| {
             var buf: [24]u8 = undefined;
@@ -53,7 +58,7 @@ pub fn menuTitle(token: u64) [16]u8 {
 /// A custom menu's slot title (NUL-padded; empty for an unused slot).
 pub fn menuSlot(token: u64, slot: u8) [shared.menus.title_bytes]u8 {
     var result: [shared.menus.title_bytes]u8 = @splat(0);
-    const rep = call(wf.chan, .{ .menu_slot = .{ .meta = shared.menus.packSlot(token, slot) } }) orelse return result;
+    const rep = call(control_chan, .{ .menu_slot = .{ .meta = shared.menus.packSlot(token, slot) } }) orelse return result;
     switch (rep) {
         .menu_title => |t| {
             var buf: [24]u8 = undefined;
@@ -71,7 +76,7 @@ pub const CustomItem = struct {
     key: u8 = 0,
     sub: u8 = 0,
     label: [shared.menus.label_bytes]u8 = @splat(0),
-    len: u8 = 0,
+    label_len: u8 = 0,
     shortcut: [shared.menus.shortcut_bytes]u8 = @splat(0),
     shortcut_len: u8 = 0,
 };
@@ -80,7 +85,7 @@ pub const CustomItem = struct {
 pub fn menuItem(token: u64, index: u8) CustomItem {
     var item: CustomItem = .{};
     if (menuItemParts(token, index, &item)) {
-        const rep = call(wf.chan, .{ .menu_item = .{ .meta = shared.menus.packItemMeta(.{ .surface = @intCast(token & 0xffff_ffff), .index = index, .part = shared.menus.part_shortcut, .menu = 0, .key = 0, .sub = 0 }) } }) orelse return item;
+        const rep = call(control_chan, .{ .menu_item = .{ .meta = shared.menus.packItemMeta(.{ .surface = @intCast(token & shared.menus.token_bits), .index = index, .part = shared.menus.part_shortcut, .menu = 0, .key = 0, .sub = 0 }) } }) orelse return item;
         if (rep == .menu_item) {
             var buf: [24]u8 = undefined;
             const text = shared.wordsToStr(&buf, .{ rep.menu_item.a, rep.menu_item.b, 0 });
@@ -94,7 +99,7 @@ pub fn menuItem(token: u64, index: u8) CustomItem {
 /// The label parts; true when the item is in use.
 fn menuItemParts(token: u64, index: u8, item: *CustomItem) bool {
     for ([_]u2{ 0, 1 }) |part| {
-        const rep = call(wf.chan, .{ .menu_item = .{ .meta = shared.menus.packItemMeta(.{ .surface = @intCast(token & 0xffff_ffff), .index = index, .part = part, .menu = 0, .key = 0, .sub = 0 }) } }) orelse return item.used;
+        const rep = call(control_chan, .{ .menu_item = .{ .meta = shared.menus.packItemMeta(.{ .surface = @intCast(token & shared.menus.token_bits), .index = index, .part = part, .menu = 0, .key = 0, .sub = 0 }) } }) orelse return item.used;
         switch (rep) {
             .menu_item => |it| {
                 const meta = shared.menus.unpackItemMeta(it.meta);
@@ -105,9 +110,9 @@ fn menuItemParts(token: u64, index: u8, item: *CustomItem) bool {
                 item.sub = meta.sub;
                 var buf: [24]u8 = undefined;
                 const text = shared.wordsToStr(&buf, .{ it.a, it.b, 0 });
-                const n = @min(text.len, item.label.len - item.len);
-                @memcpy(item.label[item.len .. item.len + n], text[0..n]);
-                item.len += @intCast(n);
+                const n = @min(text.len, item.label.len - item.label_len);
+                @memcpy(item.label[item.label_len .. item.label_len + n], text[0..n]);
+                item.label_len += @intCast(n);
                 if (text.len < shared.menus.label_bytes / 2) return true; // no second part
             },
             else => return item.used,

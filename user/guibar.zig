@@ -64,7 +64,7 @@ const MenuHit = struct {
 var bar_menus: [12]MenuHit = undefined;
 var bar_nmenus: usize = 0;
 var bar_app: menuctl.ActiveMenu = .{};
-var bar_app_name: [16]u8 = @splat(0);
+var bar_app_name: [shared.window_title_bytes]u8 = @splat(0);
 
 /// The focused application's custom menus, read from the compositor when
 /// its token changes and owned here (a popup never borrows wire data).
@@ -426,7 +426,7 @@ fn fillFromSlot(p: *Popup, slot: u8) void {
     for (&bar_custom.items) |*item| {
         if (!item.used or item.menu != slot or p.count == p.entries.len) continue;
         var entry: PopupItem = .{ .key = item.key, .sub = item.sub };
-        setEntryLabel(&entry, item.label[0..item.len]);
+        setEntryLabel(&entry, item.label[0..item.label_len]);
         entry.shortcut = item.shortcut[0..item.shortcut_len]; // the owned cache outlives the popup
         entry.separator = item.key == 0 and item.sub == 0;
         entry.enabled = item.sub != 0 or (item.key != 0 and shared.menus.allows(.custom, bar_app.enabled, item.key));
@@ -611,6 +611,7 @@ pub fn runBar(it: *mshl.Interp, view: Value, update: Value, init_state: Value) m
     wf.fontReady();
     _ = wf.refreshAppearance();
     wf.useOrdinaryChannel();
+    menuctl.control_chan = core.output_control; // the menus are read through the seat's control endpoint
     wf.pointer_tracking = true;
     wf.tick_ms = 100; // focus/menu state follows the compositor promptly
     wf.win_x = 0;
