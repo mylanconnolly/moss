@@ -59,7 +59,7 @@ pub var stat_waits: u64 = 0;
 pub var stat_wfi: u64 = 0;
 pub var stat_unmasks: u64 = 0;
 pub var stat_spi_delivered: u64 = 0;
-const vtimer_ppi: u32 = 27;
+pub const vtimer_ppi: u32 = 27;
 
 pub const Exit = struct {
     kind: shared.VmExit = .none,
@@ -193,7 +193,7 @@ pub fn create(owner: *anyopaque, kobj: *kalloc.Account, user_mem: *kalloc.Accoun
     }
     vms_lock.unlockRestore(daif);
     const vm = slot orelse return Error.NoVms;
-    errdefer vm.* = .{};
+    errdefer releaseSlot(vm);
 
     const pa = pmem.allocContiguous(@intCast(pages)) orelse return Error.OutOfFrames;
     errdefer pmem.freeContiguous(pa, @intCast(pages));
@@ -379,7 +379,17 @@ pub fn destroy(vm: *Vm) void {
     freeTables(vm);
     pmem.freeContiguous(vm.ram_pa, @intCast(vm.ram_pages));
     vm.user_mem.?.credit(vm.ram_pages * mem.page_size);
+    releaseSlot(vm);
+}
+
+/// A slot goes back under the same lock `create` claims it under, so the
+/// zeroing and the next owner's writes are ordered by the lock (zeroed
+/// outside it, `active = false` could land first and a straggling zero
+/// after the new owner's fields — the thread start record's bug).
+fn releaseSlot(vm: *Vm) void {
+    const daif = vms_lock.lockIrqSave();
     vm.* = .{};
+    vms_lock.unlockRestore(daif);
 }
 
 pub fn byIndex(idx: u64) ?*Vm {

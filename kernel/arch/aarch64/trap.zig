@@ -2,7 +2,7 @@
 //!
 //! The vector table has 16 slots of 128 bytes. We run with SPSel=1, so our
 //! own exceptions arrive via the "current EL with SPx" slots (4..7); the
-//! lower-EL slots matter from Phase 3. Each stub saves x0/x1, loads its slot
+//! lower-EL slots are user mode's and the guest's. Each stub saves x0/x1, loads its slot
 //! index, and branches to a common path that captures the rest of the frame
 //! and calls trapHandler.
 
@@ -197,7 +197,7 @@ pub fn handleIrq() void {
     if (intid == gic.spurious_intid) return;
     if (intid == timer.intid) {
         ktimer.handleIrq();
-    } else if (intid == 27) {
+    } else if (intid == vm.vtimer_ppi) {
         vm.onVirtualTimer(); // a guest's virtual timer, fired at the host
     } else if (intid == gic.resched_sgi) {
         // just here for the preempt below
@@ -210,8 +210,9 @@ pub fn handleIrq() void {
     sched.preemptIfNeeded();
 }
 
-/// Synchronous exception from EL0: a syscall, or a fault that kills the
-/// domain (fault-as-message to a supervisor arrives with IPC in Phase 4).
+/// Synchronous exception from EL0: a syscall, or a fault — reported to
+/// the domain's supervisor as a message when it has one, else the domain
+/// is killed here.
 fn handleUserSync(frame: *TrapFrame) void {
     const esr = asm volatile ("mrs %[v], esr_el1"
         : [v] "=r" (-> u64),

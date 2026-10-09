@@ -269,6 +269,45 @@ What a later pass might add: a per-domain kill for the System tab (a
 session's own init could offer `stop` by domain id for the domains it
 supervises), and memory history per unit beside the CPU one.
 
+**Follow-ons from the review pass (2026-10-09).** Four read-only audits
+(the GUI toolkit split, the menu wire, the kernel's cross-core records,
+the drills) landed as four commits; what they found and this pass did
+not fix, each verified by reading:
+
+- **Kernel.** `vm.destroy` waits only for `running == 0`, which is also
+  0 between two guest entries of a VMM thread still inside `vm_run`;
+  a teardown can free the VM under a thread looping back into
+  `enterOnce` — pin the VM for the run (a run counter `destroy` waits
+  on) or defer the release to `finishTeardown`. The guest timer fields
+  (`cntv_ctl`, `host_masked`, `masked_cval`, `timer_pending`) are
+  read-modify-written by the timekeeper's tick, the VMM's core before
+  `running` is raised, and the core that last ran the guest, with no
+  lock — a lost update masks the guest timer for good; a small
+  per-vCPU lock or raising `running` first. `cpu.last_vcpu` outlives
+  the VM. A notification collected by the timer tick or IRQ delivery
+  can be freed and its slot reused before it is signalled (a
+  generation would catch it); `Channel.server` compares a raw domain
+  pointer. `finishSwitch` reaps under the run-queue lock, taking
+  pmem's and the thread table's locks below it — safe, undocumented.
+  `cpus` relies on an `undefined` global being zero; the VM `stat_*`
+  counters race; `create`'s error path leaks the vCPU notifications
+  it made before the one that failed; `ram_ipa` and `max_vcpus` are
+  defined in three places.
+- **Drills.** The QMP booleans that still `return false` without a
+  message (some seventy sites across the GUI drivers); dock pills are
+  addressed by index (log the title with the pill); the desktop drill's
+  titlebar grab points assume 1280×1024 at scale 1; the display
+  drill's logout works only because the last pass restores the boot
+  mode.
+- **Scripts.** `explorer.msh` keeps two copies of its row logic; the
+  explorer's `files: sent to editor` line and Settings' `settings: theme`
+  line are logged and checked by no drill.
+- **GUI.** The bar's title cells, its popup scroll strips and the
+  dock's running dot are the last chrome pixels painted outside the
+  toolkit; `Focus` carries five `is_*` booleans where a tagged kind
+  would do; the frame's boot-size literals (1280×1024) remain as
+  defaults.
+
 **Follow-ons from the project assessment (2026-09-12)**
 
 - **Document workflow follow-through.** The native editor and capability-scoped

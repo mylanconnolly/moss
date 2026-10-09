@@ -1,12 +1,12 @@
 //! Kernel threads and the per-core scheduler.
 //!
 //! Structurally SMP-honest: every core owns a run queue and an idle thread,
-//! reachable through TPIDR_EL1, and nothing assumes a single core. The
-//! *locking* is still a big kernel lock over all scheduler state — fine at
-//! this scale, revisited when it shows up in measurements.
+//! reachable through TPIDR_EL1, and nothing assumes a single core; the
+//! locking is fine-grained (below).
 //!
-//! Preemption: the timer tick sets need_resched; the trap handler calls
-//! preempt() after EOI. Context switches happen inside the IRQ handler on
+//! Preemption: the timer tick and every enqueue set `need_resched`; the
+//! trap handler calls `preemptIfNeeded` after EOI (and the syscall return
+//! path does). Context switches happen inside the IRQ handler on
 //! the interrupted thread's kernel stack, so its trap frame simply waits on
 //! that stack until the thread is next scheduled and the handler unwinds.
 //!
@@ -92,8 +92,8 @@ pub const Thread = struct {
     park: Park = .none,
     stack_pa: u64 = 0,
     stack_account: *kalloc.Account = &kalloc.kernel_account,
-    /// CPU budget accounting stub: consumed timer ticks. Domains attach
-    /// real budgets here in Phase 3+.
+    /// Timer ticks this thread was current for — a debug count the dump
+    /// shows; the real CPU budgets are the domain's (`cpu_charge`).
     cpu_ticks: u64 = 0,
     wake_tick: u64 = 0,
     /// User address space, or 0 for kernel-only threads.
@@ -202,8 +202,9 @@ var next_thread_id: u32 = 1;
 var balance_next: u32 = 0;
 var global_ticks: u64 = 0;
 
-/// Invoked (under the big lock — keep it lock-light) when a thread owned by
-/// a user context has been fully reaped.
+/// Invoked when a thread owned by a user context has been fully reaped —
+/// under this core's run-queue lock from `finishSwitch`, under no
+/// scheduler lock from `destroyOne` and the tick; keep it lock-light.
 pub var user_thread_reaped: ?*const fn (*anyopaque) void = null;
 
 /// The per-core pointer lives in the port's per-core register
@@ -228,7 +229,7 @@ pub fn registerCpu(cpu_id: u32) void {
 }
 
 pub fn uptimeTicks() u64 {
-    return global_ticks;
+    return globalTicks();
 }
 
 pub fn onlineCount() u32 {
@@ -648,7 +649,7 @@ pub fn onTick(is_timekeeper: bool) void {
 /// every parked thread goes back on its core's queue.
 fn periodReset() void {
     if (cpu_period_reset) |f| f();
-    for (&cpus, 0..) |cpu, i| {
+    for (&cpus, 0..) |*cpu, i| {
         if (!cpu.online) continue;
         const rq = &cpus[i];
         rq.lock.lock();
@@ -747,12 +748,24 @@ pub fn ticksOfCurrent() u64 {
 fn allocThreadSlotLocked() Error!*Thread {
     for (&threads) |*t| {
         if (t.state == .unused) {
-            t.* = .{ .id = next_thread_id, .state = .ready, .lock = t.lock };
+            resetThread(t);
+            t.id = next_thread_id;
+            t.state = .ready;
             next_thread_id += 1;
             return t;
         }
     }
     return Error.NoThreadSlots;
+}
+/// Every field to its default except the lock word — a peer (teardown's
+/// peek, a bound notification's interrupt) may hold or be spinning on it,
+/// and `t.* = .{ .lock = t.lock }` read and rewrote it unlocked — and
+/// `state` last, as the one release store that publishes the slot free.
+fn resetThread(t: *Thread) void {
+    inline for (std.meta.fields(Thread)) |f| {
+        if (comptime !std.mem.eql(u8, f.name, "lock") and !std.mem.eql(u8, f.name, "state")) @field(t, f.name) = f.defaultValue().?;
+    }
+    @atomicStore(State, &t.state, .unused, .release);
 }
 
 /// Put a thread (its lock held, on no queue) onto a run queue: its pinned
@@ -798,7 +811,12 @@ fn placeable(t: *Thread, c: u32) bool {
 /// placed there from now on (threads already there drain at their next
 /// switch). Core 0 (the timekeeper, the kernel's own threads) cannot be
 /// reserved; a core already reserved cannot be reserved again.
+/// Reservations are checked and taken under one lock: two spawns with
+/// overlapping partitions on two cores cannot both succeed.
+var reserve_lock: lock.SpinLock = .{};
 pub fn reserveCores(mask: u64, who: *anyopaque) bool {
+    const irqs = reserve_lock.lockIrqSave();
+    defer reserve_lock.unlockRestore(irqs);
     var c: u32 = 0;
     while (c < max_cpus) : (c += 1) {
         if ((mask >> @intCast(c)) & 1 == 0) continue;
@@ -812,6 +830,8 @@ pub fn reserveCores(mask: u64, who: *anyopaque) bool {
 }
 
 pub fn releaseCores(who: *anyopaque) void {
+    const irqs = reserve_lock.lockIrqSave();
+    defer reserve_lock.unlockRestore(irqs);
     for (&cpus) |*cpu| {
         if (cpu.reserved_by == who) cpu.reserved_by = null;
     }
@@ -955,7 +975,7 @@ fn freeThread(t: *Thread) void {
     pmem.freeContiguous(t.stack_pa, stack_pages);
     t.stack_account.credit(stack_pages * mem.page_size);
     threads_lock.lock();
-    t.* = .{ .lock = t.lock };
+    resetThread(t);
     threads_lock.unlock();
 }
 

@@ -15,8 +15,9 @@
 //! lock, which sched.block releases only once the thread is safely on its
 //! way out; a thread remembers that lock (block_lock) so teardown and
 //! bound-notification interrupts can unlink it in the same order:
-//! notification → channel → thread → run queue. Slot allocation for all
-//! three tables is under objs_lock; timers and IRQ bindings have theirs,
+//! notification → channel → thread → run queue. Channel and notification
+//! slots are allocated under objs_lock, shared buffers under shm_lock,
+//! badges under badges_lock; timers and IRQ bindings have theirs,
 //! taken inside a notification's — which is why the tick and IRQ delivery
 //! collect their targets first and signal after letting go.
 
@@ -347,10 +348,6 @@ fn restoreIrqs(irqs: arch.cpu.IrqState) void {
 }
 
 /// Reply to the oldest pending caller (the one-at-a-time server's reply).
-pub fn reply(ch: *Channel, msg: Msg) shared.Errno {
-    return replyTo(ch, msg, 0);
-}
-
 /// Reply to the caller named by `token` (0 = whichever pending caller
 /// was delivered first). A stale or unknown token is bad_state; a client
 /// that died mid-call reports peer_dead when its side is gone.
@@ -786,8 +783,8 @@ pub fn dumpShms() void {
 
 pub fn createShmBy(npages: u32, creator: []const u8) ?*Shm {
     if (npages == 0 or npages > shm_max_pages) return null;
+    // The refusals below log — after the lock is let go, never under it.
     const irqs = shm_lock.lockIrqSave();
-    defer shm_lock.unlockRestore(irqs);
     for (&shms) |*s| {
         if (!s.active) {
             s.* = .{ .active = true, .refs = 1, .npages = npages };
@@ -798,22 +795,27 @@ pub fn createShmBy(npages: u32, creator: []const u8) ?*Shm {
                 const page = kalloc.allocPage(&shm_account) catch {
                     for (0..i) |j| kalloc.freePage(&shm_account, mem.physToPtr([*]u8, s.pages[j]));
                     s.* = .{};
+                    const used = shm_account.balance() / 1024;
+                    const limit = shm_account.limit / 1024;
+                    shm_lock.unlockRestore(irqs);
                     // Say so, with the ledger: a refused buffer surfaces far
                     // away (a document that will not open) with no other trace.
-                    log.info("shm: refused {d} pages for {s}: account {d}/{d} KB", .{ npages, creator, shm_account.balance() / 1024, shm_account.limit / 1024 });
+                    log.info("shm: refused {d} pages for {s}: account {d}/{d} KB", .{ npages, creator, used, limit });
                     return null;
                 };
                 s.pages[i] = mem.virtToPhys(@intFromPtr(page));
             }
+            shm_lock.unlockRestore(irqs);
             return s;
         }
     }
-    // No free object: say so, and once, who holds them all.
+    // No free object: say so, and once, who holds them all (the dump is a
+    // diagnostic peek without the lock, like the leak bar's).
+    const dump = !shm_full_dumped;
+    shm_full_dumped = true;
+    shm_lock.unlockRestore(irqs);
     log.info("shm: refused {d} pages for {s}: all {d} objects in use", .{ npages, creator, max_shms });
-    if (!shm_full_dumped) {
-        shm_full_dumped = true;
-        dumpShms();
-    }
+    if (dump) dumpShms();
     return null;
 }
 

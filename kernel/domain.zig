@@ -90,8 +90,10 @@ pub const Manifest = struct {
     arg: u64 = 0,
     /// Grant spawn authority (root and init hold this; services never do).
     grant_spawner: bool = false,
-    /// Handle slots follow the fixed insert order (log, channel, spawner,
-    /// entropy, introspect, devices).
+    /// Handle slots follow the fixed insert order the grants are applied
+    /// in (see `applyManifest`): log, channel, spawner, entropy,
+    /// introspect, clock, the two platform windows, hypervisor, then the
+    /// devices — user programs name their slots by this order.
     /// The platform windows (ECAM, MMIO) — root's boot grant; it hands
     /// them to the enumerator and forwards the devices that registers.
     grant_windows: bool = false,
@@ -188,6 +190,13 @@ const ThreadStart = struct {
 /// `entry` with x0/x1 on a user-supplied stack. Counted in threads_alive
 /// like the first thread, so teardown drains it the same way.
 pub fn createThread(d: *Domain, entry: u64, sp: u64, x0: u64, x1: u64) Error!void {
+    // Published under the slots lock, as `spawn` publishes a domain: a
+    // teardown that has walked this domain's threads must not find a new
+    // one created after its pass (it would never be marked, and the
+    // domain would never drain).
+    const publish_irqs = slots_lock.lockIrqSave();
+    defer slots_lock.unlockRestore(publish_irqs);
+    if (@atomicLoad(State, &d.state, .acquire) != .alive) return Error.NoThreadSlots;
     // Claim a start record with one atomic exchange: two threads of the
     // domain creating threads at once cannot take the same slot, and the
     // acquire orders this core's writes below after the loads of whoever
@@ -780,6 +789,9 @@ pub fn finishTeardown(d: *Domain) void {
             d.name, kobj_left, user_left,
         });
     }
+    // A partition's cores go back with the domain: a reservation held by a
+    // dead slot kept a core idle (or handed it to the slot's next owner).
+    if (d.cores != 0) sched.releaseCores(@ptrCast(d));
     d.state = .dead;
     // Only domains governed by ctl caps recycle their slot; a domain the
     // kernel's own drivers spawned and tore down stays dead, so its
@@ -977,7 +989,12 @@ pub fn mapMmio(d: *Domain, base_pa: u64, pages: u64) !u64 {
 /// doorbell; that write is DMA through the domain's tables, so the
 /// doorbell page is mapped at its own address, privileged-only.
 pub fn ensureMsiDoorbell(d: *Domain) void {
-    if (d.msi_doorbell_mapped or !arch.msi.isActive()) return;
+    if (!arch.msi.isActive()) return;
+    // Check and map under the windows lock: two threads attaching devices
+    // at once would otherwise map the page twice.
+    const irqs = d.windows_lock.lockIrqSave();
+    defer d.windows_lock.unlockRestore(irqs);
+    if (d.msi_doorbell_mapped) return;
     const pa = arch.msi.doorbellPage();
     arch.mmu.mapUserPageTagged(d.user_root_pa, pa, pa, .msi_doorbell, &d.kobj, false) catch return;
     arch.mmu.publishTables();
