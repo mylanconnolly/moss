@@ -159,6 +159,7 @@ fn drillLoop(log_h: u64) noreturn {
         while (used_seen == usedIdx()) {
             _ = usys.notifyWait(irq_notif);
             _ = dev.isrRead();
+            _ = usys.irqAck(dev_h, 0); // re-enable a level line (INTx, no ITS); nothing under MSI-X
         }
         while (used_seen != usedIdx()) {
             const e = nextEvent();
@@ -210,6 +211,7 @@ fn serveLoop(chan_h: u64) noreturn {
         if (r.err == .interrupted) {
             _ = usys.notifyWait(irq_notif);
             _ = dev.isrRead();
+            _ = usys.irqAck(dev_h, 0); // re-enable a level line (INTx, no ITS); nothing under MSI-X
             drainEvents();
             continue;
         }
@@ -238,6 +240,7 @@ fn serveLoop(chan_h: u64) noreturn {
                 while (fifo_head == fifo_tail) {
                     _ = usys.notifyWait(irq_notif);
                     _ = dev.isrRead();
+                    _ = usys.irqAck(dev_h, 0); // re-enable a level line (INTx, no ITS); nothing under MSI-X
                     drainEvents();
                 }
                 if (shm_va == 0) {
@@ -351,6 +354,7 @@ fn drillPointer(log_h: u64) noreturn {
         while (!frameReady()) {
             _ = usys.notifyWait(irq_notif);
             _ = dev.isrRead();
+            _ = usys.irqAck(dev_h, 0); // re-enable a level line (INTx, no ITS); nothing under MSI-X
             drainPointer();
         }
         const f = popFrame();
@@ -376,6 +380,7 @@ fn servePointer(chan_h: u64) noreturn {
             // device, or the still-set notification re-fires recv forever.
             _ = usys.notifyWait(irq_notif);
             _ = dev.isrRead();
+            _ = usys.irqAck(dev_h, 0); // re-enable a level line (INTx, no ITS); nothing under MSI-X
             drainPointer();
             continue;
         }
@@ -392,6 +397,7 @@ fn servePointer(chan_h: u64) noreturn {
                 while (!frameReady()) {
                     _ = usys.notifyWait(irq_notif);
                     _ = dev.isrRead();
+                    _ = usys.irqAck(dev_h, 0); // re-enable a level line (INTx, no ITS); nothing under MSI-X
                     drainPointer();
                 }
                 const f = popFrame();

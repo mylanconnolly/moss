@@ -789,6 +789,15 @@ fn runPageScripts(doc: *dom.Document, ua: *const web.style.Sheet, env: web.style
     page.setViewport(@intCast(vw), @intCast(vh));
     const href = try page_base.href(gpa);
     try page.setUrl(href);
+    if (std.c.getenv("WEBSHOT_PROBE") != null) {
+        var k: usize = 0;
+        while (k < 5) : (k += 1) {
+            const a0 = std.Io.Clock.awake.now(io);
+            page.runSource("var __p = 1;", "probe");
+            const a1 = std.Io.Clock.awake.now(io);
+            std.debug.print("webshot: probe compile+run {d} us\n", .{@divTrunc(a0.durationTo(a1).nanoseconds, 1000)});
+        }
+    }
     const t0 = std.Io.Clock.awake.now(io);
     page.runScripts();
     const t_run = std.Io.Clock.awake.now(io);

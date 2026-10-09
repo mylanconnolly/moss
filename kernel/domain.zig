@@ -993,6 +993,10 @@ pub fn claimExit(d: *Domain, code: u64) void {
 /// The .bss pages never touched go back to the budget (teardown freed
 /// and credited the touched ones frame by frame).
 fn creditUntouched(d: *Domain) void {
+    const total = (d.lazy_end -| d.lazy_base) / mem.page_size;
+    // A census for the big images (the page domain's 114 MB of arenas):
+    // how much of what spawn no longer zeroes was faulted in after all.
+    if (total >= 256) log.info("domain {s}: touched {d} of {d} lazy pages ({d} KB)", .{ d.name, total - d.lazy_left, total, (total - d.lazy_left) * mem.page_size / 1024 });
     if (d.lazy_left != 0) d.user_mem.credit(d.lazy_left * mem.page_size);
     d.lazy_left = 0;
     d.lazy_base = 0;

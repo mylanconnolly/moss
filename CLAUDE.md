@@ -15,6 +15,9 @@ frontier — every unstarted arc and every residual, kept current; the
   on PATH. Run before every commit. Failure logs: `zig-out/check/*.log`.
   `-Donly=a,b+rs` for a subset, `-Dsoak=N` to repeat (flaky hunts),
   `-Djobs=1` to take contention out of a hang before reading its dump.
+  `-Dhvf` runs it under Hypervisor.framework (10-20x faster; skips the
+  four EL2 drills) — not the gate, but the speed a user sees; `run-gui
+  -Dhvf` likewise.
 - `zig build test` — host unit tests only (shared ABI, dt parser, rings,
   lib/ lz4+xts+fabcert+mshl+usercred+settings+the ui toolkit, the full
   mossfs suite incl. crash sweeps).

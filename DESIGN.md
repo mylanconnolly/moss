@@ -2488,9 +2488,11 @@ brings the engine up; the twenty places that already asked
 loads in 42 ms with 2 in "scripts" (633 and 162 before, on the same
 drill), and the gate is 187 s (202). A page with scripts pays as
 before — Acid3's setup line under TCG reads 107 ms: interfaces 29,
-window natives 3, storage proxies 24, prelude 49 — and the next lever
-is in those numbers: two tiny sources cost 24 ms, so most of that is a
-compile's fixed cost, paid three times per page.
+window natives 3, storage proxies 24, prelude 49 — all of it real work
+at TCG's ratio (a probe compile of `var x = 1` is 4 µs on the host,
+so there is no fixed cost to shave): the levers left are doing less of
+it per page (a snapshot of the set-up realm) or running the machine
+faster.
 
 **The tick's other tenant.** The compositor converted a window's tick
 request to kernel ticks with its own `/ 100` — missed by the 10 ms
@@ -2508,6 +2510,27 @@ failure now comes with every vCPU's registers over QMP
 (`info registers -a`, `zig-out/check/<drill>-vcpus.txt`), the one view
 into a guest that went quiet — a spin with interrupts masked is a PC
 that never moves.
+
+**The machine itself, ten times faster (2026-10-09).** The setup
+numbers' 25× host-to-device ratio was TCG's, and TCG is what the gate
+and `run-gui` both ran — the only HVF boot was `run-hvf`, with no disk,
+and an old note said the filesystem service went silent under it. The
+runner takes `--hvf` now (`zig build -Dhvf check`, `run-gui -Dhvf`):
+`-cpu host`, and QEMU's emulated GIC with an ITS
+(`kernel-irqchip=off,its=on`), because the hardware vGIC has no ITS and
+puts every device on four shared INTx lines — which found the real
+"silent" bug: the GPU and input services never acknowledged their
+interrupt line, having only ever run with MSI-X, where an LPI needs no
+ack; under a level line the kernel masks it until the driver's
+`irq_ack`, so the first interrupt was the last (they ack now, like the
+block and network drivers). The kernel binds one notification per
+line, so with the hardware vGIC a profile with more than four devices
+still loses one to `Busy`; shared lines are a residual (ROADMAP). Under
+HVF 78 of 83 drills pass and five are skipped by name — four need EL2,
+and `pan`, where HVF reports PAN and then lets the access through. The
+graphical seat drill runs in 0.6 s (4.4 under TCG), fs 1.0 (3.0), the
+browser 6.4 (18.0), the page drill 10.9 (26.8). TCG stays the gate:
+deterministic, and the one with a hypervisor.
 
 The ABI is IPv6-native: addresses are always 128 bits (two words), IPv4
 rides v4-mapped, and there is no v4-only path to fossilize. Local

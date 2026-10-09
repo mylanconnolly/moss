@@ -43,6 +43,16 @@ done without rediscovering the sharp edges.
   rdi rsi rdx r10 r8 r9 r12 r13 the argument and result slots (rcx and
   r11 are the instruction's); the kernel's `frame.arg(i)`/`set(i)` and
   `syscallNumber()` are the same on both ports.
+- `zig build -Dhvf check` (and `run-gui -Dhvf`): the aarch64 drills under
+  Hypervisor.framework instead of TCG — `-cpu host`, QEMU's emulated GIC
+  with an ITS (`kernel-irqchip=off,its=on`; the hardware vGIC has no ITS
+  and puts every device on four shared INTx lines, which the kernel binds
+  one device each), no EL2, so the runner skips vm/guest/vmnode/nodevm,
+  and `pan` (HVF reports PAN and lets the access through).
+  Ten to twenty times the speed: the graphical seat drill 0.6 s (4.4 under
+  TCG), fs 1.0 (3.0). TCG stays the gate — deterministic, and the one with
+  a hypervisor; HVF is how a drill is seen at the speed a user would run
+  it, and how run-gui should be driven by hand.
 - Interactive boots: `run` (TCG), `run-hvf` (Apple Silicon acceleration),
   `run-blk` (adds a scratch virtio disk), `run-net` (slirp + a guestfwd
   echo at 10.0.2.100:9000), `run-cluster` (two nodes on a socket segment),

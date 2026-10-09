@@ -51,6 +51,11 @@ var limine_dir: []const u8 = "/usr/share/limine";
 /// the x86_64 drills on a CPU model the host's KVM does not offer (PCIDs
 /// on a host kernel that hid them, say).
 var force_tcg: bool = false;
+/// `--hvf` (aarch64): Hypervisor.framework instead of TCG — `-cpu host`,
+/// no EL2 for the guest (HVF has no nested virtualization), so the
+/// hypervisor drills are not for this mode. Ten times the speed of TCG;
+/// the way to see what a drill does at the speed a user would run it.
+var force_hvf: bool = false;
 var ovmf_code: []const u8 = "/usr/share/qemu/edk2-x86_64-code.fd";
 var ovmf_vars: []const u8 = "/usr/share/qemu/edk2-i386-vars.fd";
 
@@ -269,6 +274,10 @@ pub fn main(init: std.process.Init) !u8 {
             force_tcg = true;
             i += 1;
             continue;
+        } else if (std.mem.eql(u8, argv[i], "--hvf")) {
+            force_hvf = true;
+            i += 1;
+            continue;
         } else if (std.mem.eql(u8, argv[i], "--limine")) {
             limine_dir = argv[i + 1];
         } else if (std.mem.eql(u8, argv[i], "--ovmf")) {
@@ -385,6 +394,20 @@ const Pool = struct {
 
 fn runJob(j: *Job) void {
     const label = j.spec.name;
+    // HVF has no nested virtualization: the hypervisor drills are not
+    // for this mode, and say so rather than fail at EL1.
+    if (force_hvf) for ([_][]const u8{ "vm", "guest", "vmnode", "nodevm" }) |el2| if (std.mem.eql(u8, label, el2)) {
+        std.debug.print("[skip] {s:<10} needs EL2 (no nested virtualization under HVF)\n", .{label});
+        j.ok = true;
+        return;
+    };
+    if (force_hvf and std.mem.eql(u8, label, "pan")) {
+        // HVF reports PAN in the ID registers and then lets the access
+        // through (2026-10-09); the drill's verdict is about the CPU, not us.
+        std.debug.print("[skip] {s:<10} PAN is not enforced under HVF\n", .{label});
+        j.ok = true;
+        return;
+    }
     const guest_dialed = j.spec.kind == .net or j.spec.kind == .localeupd;
     if (guest_dialed) guest_ports_lock.lockUncancelable(io);
     defer if (guest_dialed) guest_ports_lock.unlock(io);
@@ -6184,9 +6207,9 @@ fn appendBase(args: *std.ArrayList([]const u8), log_path: []const u8, bin: []con
     try args.appendSlice(gpa, &.{
         "qemu-system-aarch64",
         "-machine",
-        "virt,gic-version=3,iommu=smmuv3,virtualization=on",
+        if (force_hvf) "virt,gic-version=3,iommu=smmuv3,accel=hvf,kernel-irqchip=off,its=on" else "virt,gic-version=3,iommu=smmuv3,virtualization=on",
         "-cpu",
-        "cortex-a76",
+        if (force_hvf) "host" else "cortex-a76",
         "-smp",
         "4",
         "-m",

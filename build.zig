@@ -17,6 +17,7 @@ pub fn build(b: *std.Build) void {
     const jobs = b.option(u16, "jobs", "check: run this many OS tests at once (default cores/4, at most 4; 1 = sequential)") orelse 0;
     const only = b.option([]const u8, "only", "check: run only these OS tests (comma-separated; `name+rs` = ReleaseSafe pass)");
     const force_tcg = b.option(bool, "tcg", "check (x86_64): software emulation even where KVM exists — QEMU's full `max` CPU (PCIDs) instead of the host's") orelse false;
+    const force_hvf = b.option(bool, "hvf", "check (aarch64): Hypervisor.framework instead of TCG (-cpu host, no EL2: skip the hypervisor drills with -Donly)") orelse false;
     const user_optimize = b.option(
         std.builtin.OptimizeMode,
         "user-optimize",
@@ -1184,7 +1185,7 @@ pub fn build(b: *std.Build) void {
             \\test -f zig-out/gui-disk.img || dd if=/dev/zero of=zig-out/gui-disk.img bs=1048576 count=64 2>/dev/null
             \\echo ">> moss GUI ({s}) in a native window; drive with Tab/Enter/typing/mouse."
             \\echo ">> quit the app, close the window, or press Ctrl-C here to stop."
-            \\exec qemu-system-aarch64 -machine virt,gic-version=3,iommu=smmuv3,virtualization=on -cpu cortex-a76 \
+            \\exec qemu-system-aarch64 -machine virt,gic-version=3,iommu=smmuv3,{s} -cpu {s} \
             \\  -smp 4 -m 512M -nic none \
             \\  -device virtio-rng-pci,disable-legacy=on,iommu_platform=on \
             \\  -netdev hubport,id=h1,hubid=0 \
@@ -1203,7 +1204,7 @@ pub fn build(b: *std.Build) void {
             \\  -serial file:zig-out/gui-run-kernel.log \
             \\  -append "profile={s} interactive" \
             \\  -kernel zig-out/bin/moss-kernel.bin
-        , .{ gui_profile, gpu_dev, gui_profile });
+        , .{ gui_profile, if (force_hvf) "accel=hvf,kernel-irqchip=off,its=on" else "virtualization=on", if (force_hvf) "host" else "cortex-a76", gpu_dev, gui_profile });
         const run_gui = b.addSystemCommand(&.{ "sh", "-c", script });
         run_gui.step.dependOn(b.getInstallStep());
         const run_gui_step = b.step("run-gui", "Boot a GUI profile in a native cocoa window and drive it by hand (-Dgui-profile=gui|guilogin|gtrust|gsession|gisession|gboom|guishell|editor; kernel log: zig-out/gui-run-kernel.log).");
@@ -1620,6 +1621,7 @@ pub fn build(b: *std.Build) void {
         run_check.addArgs(&.{ "--arch", "x86_64", "--limine", limine_dir, "--ovmf", ovmf_code, "--ovmf-vars", ovmf_vars });
         if (force_tcg) run_check.addArg("--tcg");
     }
+    if (arch == .aarch64 and force_hvf) run_check.addArg("--hvf");
     for (variants) |vn| {
         const vbin = Variant.add(b, run_check, vn, vn, optimize, kernel_target, shared_mod, user_blobs_src, &all_test_opts, linker_script, arch);
         if (arch != .aarch64) continue;

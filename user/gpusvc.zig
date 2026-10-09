@@ -341,7 +341,8 @@ fn submitCmd(cmd_len: usize, resp_cap: usize) u32 {
     const used_idx: *volatile u16 = @ptrFromInt(vq_va + 1024 + 2);
     while (used_seen == used_idx.*) {
         _ = usys.notifyWait(irq_notif);
-        _ = dev.isrRead(); // deassert INTx (harmless under MSI-X)
+        _ = dev.isrRead();
+        _ = usys.irqAck(dev_h, 0); // re-enable a level line (INTx, no ITS); nothing under MSI-X
     }
     used_seen +%= 1;
     usys.barrier();

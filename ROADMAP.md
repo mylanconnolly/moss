@@ -877,19 +877,18 @@ not fix, each verified by reading:
       the hover hit test one pass and the glyph cache a table; a scroll
       band is under 40 ms now. Not done: the host holds its lock through
       a TLS handshake, so the GUI thread's sends wait on the network —
-      open the lock around the socket calls; and the desktop under
-      HVF — ten times
-      the speed — where the filesystem service never speaks after start
-      (disk I/O under Hypervisor.framework; `run-hvf` boots no disk).
+      open the lock around the socket calls; and ✅ the desktop under HVF
+      (2026-10-09: `run-gui -Dhvf`, `-Dhvf check` — the "silent" service
+      was the GPU and input drivers never acking a level interrupt line;
+      DESIGN "The machine itself, ten times faster").
       Then (2026-10-08/09, DESIGN "Performance round") the network's
       two seconds, the tick, the zeroing and the lazy .bss: the first
       page 2663 → 158 ms, the navigation gap 393 → 44, and a page with
       no script never brings the engine up (the fixture's front page
       633 → 42 ms). Still paid, by a page with scripts, under TCG: a
       107 ms setup — interfaces 29, storage proxies 24, prelude 49 —
-      where two tiny sources costing 24 says a compile's fixed cost
-      is paid three times per page; a snapshot of the set-up realm, or
-      one compile of the three sources, is the lever.
+      real work at TCG's ratio (a probe compile is 4 µs on the host);
+      a snapshot of the set-up realm is the lever, or HVF.
     - ✅ *Polish (asked for and landed 2026-09-18):* the Web app's chrome
       buttons are Phosphor glyphs — carets back and forward, a refresh
       arrow, the accent arrow for Go, plus and X for tabs, the bookmark
@@ -2652,6 +2651,12 @@ not fix, each verified by reading:
   had ticked ten times too often). Each core now watches the others'
   tick counts (`timer.watchCores`) and a QMP-driven drill's failure
   dumps every vCPU's registers, so the next one carries evidence.
+- One notification per interrupt line (`irq.bind` answers Busy to a
+  second): fine with an ITS, where every device has its own LPIs, but
+  on four shared INTx lines (HVF's hardware vGIC, a board without an
+  ITS) a fifth device loses its line. Shared level lines — deliver to
+  every binding, re-enable when any acks — are the fix; the HVF mode
+  uses QEMU's emulated GIC with an ITS meanwhile.
 
 - Every pool is static and small: 16 domains, 64 threads, 64 channels,
   64 notifications, 64 shared buffers, 256 client badges, 16 devices,
