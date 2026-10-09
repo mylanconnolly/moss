@@ -4628,6 +4628,39 @@ grid, bars at the right edge). With this, nothing a `gui` window
 paints is painted in guicmds any more: every leaf is a toolkit painter
 and the runtime is state, extraction and binding.
 
+**Menus that follow the state, and nest as deep as they need
+(2026-10-08).** The custom schema was the spec's and so fixed for the
+window's life; now a view's root may carry `menus: {…}` of the same
+shape, the menus for *that* render — labels, enabled items and whole
+menus follow the state ("High contrast ✓" once it is on). The runtime
+builds the table from the view each render and compares it with what
+it published; a change publishes again (every slot, so a schema with
+fewer menus clears the rest, and a `part_truncate` message marks the
+items from an index on unused, so one that shrank leaves no stale
+rows) and the compositor bumps the bar's token, which re-reads.
+Nothing is published when nothing changed, so the compare is what a
+hover costs. A view with menus makes the window a custom-menu one
+even when its spec declared none. Nesting goes three deep (a header's
+slot, its header's slot, eight slots in all) and the bar holds four
+popup levels: a row with a submenu opens the next level beside its
+own at any depth, Right/Enter open, Left/Escape close the deepest,
+a click on a row deeper closes what was beyond it first. Settings'
+view carries its menus with a Text size menu inside Appearance; the
+guishellro drill sees the marked label after the flip and picks
+Larger, then Smaller, three levels down.
+
+Found by the first run: a press on a submenu row that does not close
+the menus (it opens the next level) gave that popup the focus — the
+compositor focuses what is pressed — and the dropdown read its loss
+as a click elsewhere. The two-level flow had passed only because its
+submenu presses always selected, closing everything before the focus
+event was read. A submenu is a surface that never takes the focus,
+not even on a press: `gpu_no_focus` on creation (the compositor skips
+the click-to-focus for it, still raises it), and the dropdown keeps
+the keyboard at every depth. *Lesson:* a popup's "lost focus means
+dismiss" rule holds only if nothing of your own can take the focus;
+say so to the compositor instead of guessing from event order.
+
 ### GUIs in mshl
 
 The console arc gave the substrate — surfaces, a compositor, keyboard

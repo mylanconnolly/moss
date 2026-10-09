@@ -232,8 +232,8 @@ starting more than one guest (the second NIC is the one guest's).
 profiles"): an application's own menus as the `custom` profile over
 application keys the compositor still validates, nested one level,
 popups that scroll past the room; shortcut hints (real for the
-registry's chords) the same day. Left for a later pass: deeper
-nesting, items that change while a window is open.
+registry's chords), nesting three deep and menus carried by the view
+(labels and enabled items that follow the state) the same day. Done.
 
 **Network settings (2026-09-17, in progress).** A Network tab in
 Settings — every NIC, DHCP or static addresses, gateway, resolvers —

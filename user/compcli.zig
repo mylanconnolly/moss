@@ -161,8 +161,15 @@ fn menuProbe(control: u64, log_h: u64) void {
         },
         else => usys.exit(197),
     }
-    demand(call(control, .{ .menu_invoke = .{ .token = custom_token, .key = shared.menus.appItemKey(1) } }) == .gpu_err); // disabled in the mask
-    demand(call(control, .{ .menu_invoke = .{ .token = custom_token, .key = shared.keyboard.save_document } }) == .gpu_err); // not the custom profile's
+    // A schema that shrinks: truncating at 1 leaves item 1 unused.
+    demand(call(disp, .{ .set_menu_item = .{ .meta = shared.menus.packItemMeta(.{ .surface = @intCast(a), .index = 1, .part = shared.menus.part_truncate, .menu = 0, .key = 0, .sub = 0 }), .a = 0, .b = 0 } }) == .ok);
+    const after_truncate = snapshot();
+    switch (call(control, .{ .menu_item = .{ .meta = shared.menus.packItemMeta(.{ .surface = @intCast(after_truncate), .index = 1, .part = 0, .menu = 0, .key = 0, .sub = 0 }) } })) {
+        .menu_item => |it| demand(shared.menus.unpackItemMeta(it.meta).surface == 0),
+        else => usys.exit(198),
+    }
+    demand(call(control, .{ .menu_invoke = .{ .token = after_truncate, .key = shared.menus.appItemKey(1) } }) == .gpu_err); // disabled in the mask
+    demand(call(control, .{ .menu_invoke = .{ .token = after_truncate, .key = shared.keyboard.save_document } }) == .gpu_err); // not the custom profile's
     // Back to a catalog profile: the schema is gone with it.
     demand(call(disp, .{ .set_menu = .{ .surface = a, .profile = @intFromEnum(shared.menus.Profile.editor), .enabled = shared.menus.bit(close_key) } }) == .ok);
     switch (call(control, .{ .menu_slot = .{ .meta = shared.menus.packSlot(snapshot(), 0) } })) {

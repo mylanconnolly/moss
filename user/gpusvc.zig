@@ -140,6 +140,7 @@ const Surface = struct {
     trusted: bool = false, // the login surface: wears the secure indicator
     rounded: bool = false,
     dialog: bool = false, // a panel for `dialog_for` (gpu_dialog)
+    no_focus: bool = false, // never focused, not even by a press (gpu_no_focus)
     dialog_for: u64 = 0, // the surface focused when the dialog was created
     hidden: bool = false, // minimized: retained but not composited, not focusable
     /// A restore (3) or a dock hide (5) the owner has not heard yet: it
@@ -1379,7 +1380,7 @@ fn dispatchPointer(chan_h: u64) void {
         // do it now even if the client is busy — the window still comes to
         // the front and takes the keyboard.
         if (press) {
-            focusSurface(id);
+            if (!sf.no_focus) focusSurface(id);
             raiseSurface(id);
         }
         const lx: u64 = if (sf.pointer_tracking) cursor_x else cursor_x - sf.x;
@@ -1549,6 +1550,12 @@ fn serveSurfaces(chan_h: u64) noreturn {
                 const sf = findSurface(m.surface);
                 if (sf == null or sf.?.owner != badge or m.index >= shared.menus.max_app_items or m.menu >= shared.menus.max_menus or m.sub > shared.menus.max_menus) {
                     _ = usys.replyTypedTo(shared.GpuResp, chan_h, .{ .gpu_err = .{ .code = 22 } }, 0, token);
+                    continue;
+                }
+                if (m.part == shared.menus.part_truncate) {
+                    for (sf.?.menu_items[m.index..]) |*rest| rest.* = .{};
+                    if (menu_app == m.surface) menu_token += 1;
+                    _ = usys.replyTypedTo(shared.GpuResp, chan_h, .ok, 0, token);
                     continue;
                 }
                 const item = &sf.?.menu_items[m.index];
@@ -1722,8 +1729,9 @@ fn serveSurfaces(chan_h: u64) noreturn {
                 }
                 const cascade = q.flags & shared.gpu_place_cascade != 0 and !full;
                 const prior_focus = focused; // a dialog serves the window focused as it opens
-                if (createSurface(badge, px_x, px_y, w, h, cascade, q.flags & shared.gpu_no_activate == 0)) |cs| {
+                if (createSurface(badge, px_x, px_y, w, h, cascade, q.flags & (shared.gpu_no_activate | shared.gpu_no_focus) == 0)) |cs| {
                     findSurface(cs.id).?.pointer_tracking = q.flags & shared.gpu_pointer_tracking != 0;
+                    findSurface(cs.id).?.no_focus = q.flags & shared.gpu_no_focus != 0;
                     findSurface(cs.id).?.rounded = q.flags & shared.gpu_rounded != 0;
                     if (q.flags & shared.gpu_dialog != 0) {
                         findSurface(cs.id).?.dialog = true;

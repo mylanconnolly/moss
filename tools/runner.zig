@@ -3791,7 +3791,33 @@ fn guishellroDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
         if (!clickScanout(&q, row[0], row[1])) return sfail(spec, log_path, "pick High contrast");
         if (!try waitLogN(log_path, "gui: menu item contrast", fired_before + 1, "the submenu item did not reach Settings", spec, polls)) return false;
         if (!try waitLogN(log_path, "accepted=true", 1, "the compositor refused the application key", spec, polls)) return false;
-        sleepMs(200);
+        sleepMs(300);
+        // The view carries the menus, so the item now reads with a mark;
+        // and Text size nests a level deeper: Larger, then Smaller (two
+        // trips, a selection closes the menus), leaving the scale as it was.
+        const trips = [_]struct { leaf: []const u8, id: []const u8 }{ .{ .leaf = "Larger", .id = "larger" }, .{ .leaf = "Smaller", .id = "smaller" } };
+        for (trips, 0..) |trip, ti| {
+            const popups_now = countOccurrences(readLog(log_path), "topbar: popup at");
+            const menu_again = topbarMenu(readLog(log_path), "Settings") orelse return sfail(spec, log_path, "the Settings menu after the change");
+            if (!clickScanout(&q, menu_again[0], menu_again[1])) return sfail(spec, log_path, "reopen the Settings menu");
+            if (!try waitLogN(log_path, "topbar: popup at", popups_now + 1, "the Settings menu did not reopen", spec, polls)) return false;
+            const appearance_again = popupItem(readLog(log_path), "Appearance") orelse return sfail(spec, log_path, "find the Appearance row again");
+            if (!clickScanout(&q, appearance_again[0], appearance_again[1])) return sfail(spec, log_path, "reopen the Appearance submenu");
+            if (!try waitLogN(log_path, "topbar: popup at", popups_now + 2, "the Appearance submenu did not reopen", spec, polls)) return false;
+            if (ti == 0 and !try waitLogN(log_path, "High contrast \xe2\x9c\x93", 1, "the live menu label did not follow the state", spec, polls)) return false;
+            const size_row = popupItem(readLog(log_path), "Text size") orelse return sfail(spec, log_path, "find the Text size row");
+            if (!clickScanout(&q, size_row[0], size_row[1])) return sfail(spec, log_path, "open the Text size submenu");
+            if (!try waitLogN(log_path, "topbar: popup at", popups_now + 3, "the Text size submenu (three deep) did not open", spec, polls)) return false;
+            sleepMs(200);
+            if (ti == 0) _ = q.screendump(check_dir ++ "/settings-submenu-deep.ppm");
+            const leaf = popupItem(readLog(log_path), trip.leaf) orelse return sfail(spec, log_path, "find the size row");
+            var fb: [48]u8 = undefined;
+            const fired_line = std.fmt.bufPrint(&fb, "gui: menu item {s}", .{trip.id}) catch return false;
+            const fired_now = countOccurrences(readLog(log_path), fired_line);
+            if (!clickScanout(&q, leaf[0], leaf[1])) return sfail(spec, log_path, "pick a size");
+            if (!try waitLogN(log_path, fired_line, fired_now + 1, "the three-deep item did not reach Settings", spec, polls)) return false;
+            sleepMs(300);
+        }
         // Flip the switch back by hand, then Cmd S: the chord the "Apply
         // changes" item names as its shortcut fires it (a no-op apply here).
         const contrast = widgetCenter(readLog(log_path), "contrast") orelse return sfail(spec, log_path, "contrast switch geometry");

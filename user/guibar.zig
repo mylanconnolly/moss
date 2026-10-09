@@ -111,9 +111,9 @@ const PopupItem = struct {
     /// The custom menu slot this row opens (1-based), 0 for none.
     sub: u8 = 0,
 };
-/// One popup surface: the dropdown (level 0) or the submenu beside it
-/// (level 1). Rows beyond the room scroll: `first` is the top row shown,
-/// with arrow strips above and below when there is more.
+/// One popup surface: the dropdown (level 0) or a submenu beside its
+/// parent (levels 1 and up). Rows beyond the room scroll: `first` is the
+/// top row shown, with arrow strips above and below when there is more.
 /// Rows a popup can hold: a custom menu's 32 items, or a declarative
 /// menu's (the long ones scroll).
 const max_rows = 64;
@@ -135,8 +135,10 @@ const Popup = struct {
     /// The row of the level-0 popup this submenu hangs off.
     parent: usize = 0,
 };
-var pops: [2]Popup = .{ .{}, .{} };
-/// Which popup the keyboard drives: the submenu while it is open.
+/// The dropdown and up to three nested submenus beside it.
+const max_levels = 4;
+var pops: [max_levels]Popup = @splat(.{});
+/// Which popup the keyboard drives: the deepest open submenu.
 var active_level: usize = 0;
 var pop_app_token: u64 = 0;
 var pop_focus_token: u64 = 0;
@@ -455,7 +457,7 @@ fn openPopupAt(p: *Popup, level: usize, x: usize, y_wanted: usize, avail_h: usiz
     // The submenu never takes the focus: the dropdown keeps the keyboard
     // (a focus loss on a popup is how a click elsewhere dismisses them, so
     // a focused submenu would dismiss its own parent).
-    const flags: u64 = shared.gpu_pointer_tracking | (if (level == 1) shared.gpu_no_activate else @as(u64, 0));
+    const flags: u64 = shared.gpu_pointer_tracking | (if (level > 0) shared.gpu_no_focus else @as(u64, 0));
     const cs = switch (usys.callTypedCap(shared.GpuReq, shared.GpuResp, wf.chan, .{ .create_surface = .{ .xy = shared.packPair(@intCast(p.x), @intCast(p.y)), .wh = shared.packPair(@intCast(p.w), @intCast(p.h)), .flags = flags } }, 0)) {
         .ok => |ok| ok,
         .err => return,
@@ -497,8 +499,7 @@ fn logPopup(p: *const Popup, level: usize) void {
 
 /// Open a bar menu's dropdown under its title.
 fn openPopup(m: MenuHit) void {
-    if (pops[1].open) closePopup(&pops[1]);
-    if (pops[0].open) closePopup(&pops[0]);
+    closeLevelsFrom(0);
     const p = &pops[0];
     pop_item_h = ui.paint.menuRowHeight(wf.brush());
     fillFromMenu(p, m);
@@ -509,12 +510,23 @@ fn openPopup(m: MenuHit) void {
     const y = wf.win_y + wf.win_h;
     openPopupAt(p, 0, wf.win_x + m.bx, y, wf.scanout_h -| y);
 }
-/// Open the submenu a level-0 row names, beside the dropdown at that row.
-fn openSubmenu(row: usize) void {
-    const parent = &pops[0];
+/// Close every popup from `level` up (a deeper one first).
+fn closeLevelsFrom(level: usize) void {
+    var l: usize = max_levels;
+    while (l > level) {
+        l -= 1;
+        if (pops[l].open) closePopup(&pops[l]);
+    }
+    if (active_level >= level) active_level = level -| 1;
+}
+/// Open the submenu a row of `level` names, beside that popup at the row;
+/// anything deeper closes first.
+fn openSubmenu(level: usize, row: usize) void {
+    if (level + 1 >= max_levels) return;
+    const parent = &pops[level];
     if (!parent.open or row >= parent.count or parent.entries[row].sub == 0) return;
-    if (pops[1].open) closePopup(&pops[1]);
-    const p = &pops[1];
+    closeLevelsFrom(level + 1);
+    const p = &pops[level + 1];
     p.count = 0;
     p.selected = null;
     p.first = 0;
@@ -525,7 +537,7 @@ fn openSubmenu(row: usize) void {
     parent.selected = row;
     commitPopup(parent);
     const y = parent.y + popEntryY(parent, row);
-    openPopupAt(p, 1, parent.x + parent.w -| pop_margin, y, wf.scanout_h -| (wf.win_y + wf.win_h));
+    openPopupAt(p, level + 1, parent.x + parent.w -| pop_margin, y, wf.scanout_h -| (wf.win_y + wf.win_h));
 }
 
 fn closePopup(p: *Popup) void {
@@ -539,18 +551,17 @@ fn closePopup(p: *Popup) void {
     p.open = false;
     p.menu_id = "";
 }
-/// Close the submenu, the keyboard back on the dropdown.
+/// Close the deepest submenu, the keyboard back on its parent.
 fn closeSubmenu() void {
-    if (!pops[1].open) return;
-    closePopup(&pops[1]);
-    active_level = 0;
+    if (active_level == 0 or !pops[active_level].open) return;
+    closePopup(&pops[active_level]);
+    active_level -= 1;
     _ = usys.log(core.log_h, "topbar: submenu closed");
 }
 
 fn dismissPopup(restore: bool) void {
     const token = pop_focus_token;
-    closePopup(&pops[1]);
-    closePopup(&pops[0]);
+    closeLevelsFrom(0);
     active_level = 0;
     wf.ptr_down = false;
     if (restore and token != 0) _ = menuctl.restoreMenuFocus(core.output_control, token);
@@ -562,7 +573,8 @@ fn popupOf(surface: u64) ?*Popup {
     return null;
 }
 fn levelOf(p: *const Popup) usize {
-    return if (p == &pops[1]) 1 else 0;
+    for (&pops, 0..) |*q, i| if (q == p) return i;
+    return 0;
 }
 
 fn mkMenuEvent(it: *mshl.Interp, menu: []const u8, item: []const u8) mshl.Error!Value {
@@ -607,15 +619,14 @@ pub fn runBar(it: *mshl.Interp, view: Value, update: Value, init_state: Value) m
     wf.win_h = lineOf(R_UI) + 2 * bar_vpad + pal.border_w;
     wf.dragging = false;
     wf.ptr_down = false;
-    pops = .{ .{}, .{} };
+    pops = @splat(.{});
     bar_app = .{};
     if (!wf.openSurface(false)) return it.fail("gui: cannot open the bar surface", .{});
     _ = usys.callTyped(shared.GpuReq, shared.GpuResp, core.output_control, .{ .menu_bar = .{ .surface = wf.surf } }, 0);
     declareStrut(0, wf.win_h);
     declareGround();
     defer wf.closeSurface();
-    defer closePopup(&pops[0]);
-    defer closePopup(&pops[1]);
+    defer closeLevelsFrom(0);
 
     var state = init_state;
     var tree = try it.callValue(view, &.{state}, null, null);
@@ -722,8 +733,8 @@ pub fn runBar(it: *mshl.Interp, view: Value, update: Value, init_state: Value) m
                                 commitPopup(p);
                             }
                             if (press) {
-                                if (levelOf(p) == 0 and p.entries[idx].sub != 0) {
-                                    openSubmenu(idx);
+                                if (p.entries[idx].sub != 0) {
+                                    openSubmenu(levelOf(p), idx);
                                 } else {
                                     selected = .{ .level = levelOf(p), .idx = idx };
                                     break :input;
@@ -761,7 +772,7 @@ pub fn runBar(it: *mshl.Interp, view: Value, update: Value, init_state: Value) m
             const p = &pops[active_level];
             switch (ev.ch) {
                 27 => {
-                    if (active_level == 1) {
+                    if (active_level > 0) {
                         closeSubmenu();
                         continue;
                     }
@@ -781,12 +792,12 @@ pub fn runBar(it: *mshl.Interp, view: Value, update: Value, init_state: Value) m
                 },
                 shared.keyboard.right => {
                     // Right opens the selected row's submenu; otherwise the
-                    // next bar menu.
-                    if (active_level == 0) if (p.selected) |idx| if (p.entries[idx].sub != 0) {
-                        openSubmenu(idx);
+                    // next bar menu (from the dropdown only).
+                    if (p.selected) |idx| if (p.entries[idx].sub != 0) {
+                        openSubmenu(active_level, idx);
                         continue;
                     };
-                    if (active_level == 1) continue;
+                    if (active_level > 0) continue;
                     for (bar_menus[0..bar_nmenus], 0..) |m, idx| {
                         if (std.mem.eql(u8, m.id, pops[0].menu_id)) {
                             openPopup(bar_menus[(idx + 1) % bar_nmenus]);
@@ -797,7 +808,7 @@ pub fn runBar(it: *mshl.Interp, view: Value, update: Value, init_state: Value) m
                     break :input;
                 },
                 shared.keyboard.left => {
-                    if (active_level == 1) {
+                    if (active_level > 0) {
                         closeSubmenu();
                         continue;
                     }
@@ -812,8 +823,8 @@ pub fn runBar(it: *mshl.Interp, view: Value, update: Value, init_state: Value) m
                 },
                 '\n', '\r' => {
                     if (p.selected) |idx| {
-                        if (active_level == 0 and p.entries[idx].sub != 0) {
-                            openSubmenu(idx);
+                        if (p.entries[idx].sub != 0) {
+                            openSubmenu(active_level, idx);
                             continue;
                         }
                         selected = .{ .level = active_level, .idx = idx };

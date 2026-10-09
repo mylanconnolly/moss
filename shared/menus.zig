@@ -36,6 +36,9 @@ pub fn appItemIndex(key: u8) ?usize {
 /// the slot it opens (`sub`, 1-based, 0 for none).
 pub const ItemMeta = struct { surface: u32 = 0, index: u8, part: u2 = 0, menu: u8, key: u8, sub: u8 };
 pub const part_shortcut: u2 = 2;
+/// `set_menu_item` with this part: every item from `index` on is unused
+/// (a republished schema that shrank).
+pub const part_truncate: u2 = 3;
 pub const shortcut_bytes: usize = 16;
 pub fn packItemMeta(m: ItemMeta) u64 {
     return @as(u64, m.surface) | (@as(u64, m.index) << 32) | (@as(u64, m.part) << 40) | (@as(u64, m.menu & 0xf) << 42) | (@as(u64, m.key) << 48) | (@as(u64, m.sub) << 56);

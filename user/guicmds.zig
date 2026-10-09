@@ -785,8 +785,10 @@ const CustomMenus = struct {
     disabled: u64 = 0,
 };
 var custom_menus: CustomMenus = .{};
-fn customSlot(title: []const u8) ?u8 {
-    const c = &custom_menus;
+/// Nested menus go this deep (a header's slot, its header's slot…);
+/// eight slots bound it too.
+const max_menu_depth = 3;
+fn customSlot(c: *CustomMenus, title: []const u8) ?u8 {
     if (c.nslots == shared.menus.max_menus) {
         warn("custom menus (8); this one is dropped", title);
         return null;
@@ -797,8 +799,7 @@ fn customSlot(title: []const u8) ?u8 {
     c.nslots += 1;
     return @intCast(c.nslots - 1);
 }
-fn customItem(slot: u8, label: []const u8, key: u8, sub: u8, id: []const u8, shortcut: []const u8) void {
-    const c = &custom_menus;
+fn customItem(c: *CustomMenus, slot: u8, label: []const u8, key: u8, sub: u8, id: []const u8, shortcut: []const u8) void {
     if (c.nitems == shared.menus.max_app_items) {
         warn("custom menu items (32); this one is dropped", label);
         return;
@@ -814,42 +815,66 @@ fn customItem(slot: u8, label: []const u8, key: u8, sub: u8, id: []const u8, sho
     c.items[c.nitems] = item;
     c.nitems += 1;
 }
-fn customItems(slot: u8, list: []const Value, depth: usize) void {
+fn customItems(c: *CustomMenus, slot: u8, list: []const Value, depth: usize) void {
     for (list) |entry| switch (entry) {
-        .str => |s| if (std.mem.eql(u8, s, "-")) customItem(slot, "", 0, 0, "", ""),
+        .str => |str| if (std.mem.eql(u8, str, "-")) customItem(c, slot, "", 0, 0, "", ""),
         .record => |r| {
             const text = strField(r, "text");
             const nested = if (r.get("items")) |v| (if (v == .list) v.list else null) else null;
             if (nested) |sub_list| {
-                if (depth > 0) {
-                    warn("custom menus nest one level; this submenu is dropped", text);
+                if (depth + 1 >= max_menu_depth) {
+                    warn("custom menus nest three deep; this submenu is dropped", text);
                     continue;
                 }
-                const sub = customSlot(text) orelse continue;
-                customItem(slot, text, 0, sub + 1, "", "");
-                customItems(sub, sub_list, depth + 1);
+                const sub = customSlot(c, text) orelse continue;
+                customItem(c, slot, text, 0, sub + 1, "", "");
+                customItems(c, sub, sub_list, depth + 1);
                 continue;
             }
             // The item's key is its index in the table: the compositor
             // routes it back as that application key.
-            const key = shared.menus.appItemKey(custom_menus.nitems);
-            if (custom_menus.nitems < shared.menus.max_app_items and (if (r.get("disabled")) |d| d.asBool() else false)) custom_menus.disabled |= shared.menus.bit(key);
-            customItem(slot, text, key, 0, strField(r, "id"), strField(r, "shortcut"));
+            const key = shared.menus.appItemKey(c.nitems);
+            if (c.nitems < shared.menus.max_app_items and (if (r.get("disabled")) |d| d.asBool() else false)) c.disabled |= shared.menus.bit(key);
+            customItem(c, slot, text, key, 0, strField(r, "id"), strField(r, "shortcut"));
         },
         else => {},
     };
+}
+/// Build the table from a `menus` record (the spec's, or a view root's).
+fn buildMenusInto(c: *CustomMenus, menus: mshl.Record) void {
+    c.* = .{};
+    for (menus.keys, menus.vals) |title, items| {
+        if (items != .list) continue;
+        const slot = customSlot(c, title) orelse break;
+        customItems(c, slot, items.list, 0);
+    }
 }
 /// True when the spec declares its own menus (a record under `menus`).
 fn buildCustomMenus(spec: mshl.Record) bool {
     custom_menus = .{};
     const v = spec.get("menus") orelse return false;
     if (v != .record) return false;
-    for (v.record.keys, v.record.vals) |title, items| {
-        if (items != .list) continue;
-        const slot = customSlot(title) orelse break;
-        customItems(slot, items.list, 0);
-    }
+    buildMenusInto(&custom_menus, v.record);
     return custom_menus.nslots > 0;
+}
+/// A view root's `menus` record: the menus for this render, replacing
+/// the spec's — so labels, enabled items and whole menus follow the
+/// state (a "Show sidebar" that reads "Hide sidebar"). Compared with
+/// what is published; a change publishes again (the compositor bumps
+/// the bar's token, which re-reads).
+fn rootMenus(tree: Value) ?mshl.Record {
+    if (tree != .record) return null;
+    const v = tree.record.get("menus") orelse return null;
+    return if (v == .record) v.record else null;
+}
+var view_menus_scratch: CustomMenus = .{};
+fn followViewMenus(tree: Value) void {
+    const menus = rootMenus(tree) orelse return;
+    buildMenusInto(&view_menus_scratch, menus);
+    if (std.meta.eql(view_menus_scratch, custom_menus)) return;
+    custom_menus = view_menus_scratch;
+    wf.republishMenu();
+    _ = usys.log(log_h, "gui: menus changed");
 }
 fn publishCustomMenus() void {
     const c = &custom_menus;
@@ -2450,7 +2475,7 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
     // Name the surface so the dock can restore this window by its title
     // after the amber traffic-light minimizes it.
     if (title.len > 0) wf.setSurfaceTitle(title);
-    const menu_profile: shared.menus.Profile = if (buildCustomMenus(spec)) .custom else if (std.mem.eql(u8, strField(spec, "menus"), "files")) .files else .generic;
+    var menu_profile: shared.menus.Profile = if (buildCustomMenus(spec)) .custom else if (std.mem.eql(u8, strField(spec, "menus"), "files")) .files else .generic;
     loadBindings(spec);
 
     var focus: usize = 0;
@@ -2470,6 +2495,9 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
             return it.fail("gui: the remote app did not answer", .{})
     else
         try it.callValue(view, &.{state}, null, null);
+    // A view that carries its menus makes the window a custom-menu one
+    // even when the spec declared none.
+    if (menu_profile == .generic and rootMenus(tree) != null) menu_profile = .custom;
     // A checkpoint copies state and tree out of scratch and resets it — the
     // right thing after an evaluation, and pure waste after a hover or a
     // drag that evaluated nothing (peak 2x of the tree in a 512 KiB pool,
@@ -2521,6 +2549,7 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
                 if (list == null or list.?.nrows == 0) enabled &= ~shared.menus.bit(shared.keyboard.open_document);
             }
             if (menu_profile == .custom) {
+                followViewMenus(tree);
                 publishCustomMenus();
                 enabled &= ~custom_menus.disabled;
             }

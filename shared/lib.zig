@@ -987,6 +987,11 @@ pub const gpu_pointer_tracking: u64 = 2;
 /// app-modal, the way a panel serves one window. Dialogs run in their own
 /// process here (the chooser), so nothing else could tie them together.
 pub const gpu_dialog: u64 = 16;
+/// The surface never takes the focus — not on creation, not on a press:
+/// a submenu beside a dropdown that keeps the keyboard, where a click
+/// must not read as the dropdown losing it (the pointer still reaches
+/// it). Implies `gpu_no_activate`.
+pub const gpu_no_focus: u64 = 32;
 
 pub const GpuReq = union(enum(u64)) {
     /// Owner publishes a fixed menu profile and current action availability.

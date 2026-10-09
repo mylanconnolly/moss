@@ -803,10 +803,17 @@ pub fn setMenuProfile(profile: shared.menus.Profile, enabled: u64) void {
 /// parts, titles are 16 bytes.
 pub const MenuItemSpec = struct { menu: u8, key: u8, sub: u8, label: []const u8, shortcut: []const u8 = "" };
 var menu_items_surface: u64 = 0;
+/// The menus changed while the window is open: publish again at the
+/// next `publishMenu`.
+pub fn republishMenu() void {
+    menu_items_surface = 0;
+}
 pub fn publishMenu(titles: []const []const u8, items: []const MenuItemSpec) bool {
     if (surf == 0 or menu_items_surface == surf) return false;
     const half = shared.menus.label_bytes / 2;
-    for (titles, 0..) |t, slot| {
+    // Every slot, so a republished schema with fewer menus clears the rest.
+    for (0..shared.menus.max_menus) |slot| {
+        const t: []const u8 = if (slot < titles.len) titles[slot] else "";
         const w = shared.strToWords(t[0..@min(t.len, shared.menus.title_bytes)]);
         _ = menuCall(chan, .{ .set_menu_title = .{ .meta = shared.menus.packSlot(surf, @intCast(slot)), .a = w[0], .b = w[1] } });
     }
@@ -823,6 +830,9 @@ pub fn publishMenu(titles: []const []const u8, items: []const MenuItemSpec) bool
             const w2 = shared.strToWords(item.shortcut[0..@min(item.shortcut.len, shared.menus.shortcut_bytes)]);
             _ = menuCall(chan, .{ .set_menu_item = .{ .meta = shared.menus.packItemMeta(.{ .surface = @intCast(surf), .index = @intCast(i), .part = shared.menus.part_shortcut, .menu = item.menu, .key = item.key, .sub = item.sub }), .a = w2[0], .b = w2[1] } });
         }
+    }
+    if (items.len < shared.menus.max_app_items) {
+        _ = menuCall(chan, .{ .set_menu_item = .{ .meta = shared.menus.packItemMeta(.{ .surface = @intCast(surf), .index = @intCast(items.len), .part = shared.menus.part_truncate, .menu = 0, .key = 0, .sub = 0 }), .a = 0, .b = 0 } });
     }
     menu_items_surface = surf;
     return true;

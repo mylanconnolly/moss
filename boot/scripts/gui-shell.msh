@@ -40,6 +40,28 @@ def locked [k] {
 }
 def theme-locked [] { (locked "theme") }
 
+# The window's own menus, carried by the view so they follow the state:
+# the appearance switches show their state, and Text size nests a level
+# deeper. Items fire the same ids the switches and buttons do.
+def checked [label, on] { match $on { true => ($label + " ✓"); _ => $label } }
+def settings-menus [state] {
+  {
+    Settings: [
+      { text: "Apply changes", id: "apply", shortcut: "Cmd S" }
+      "-"
+      { text: "Appearance", items: [
+          { text: (checked "High contrast" ($state.contrast == "high")), id: "contrast" }
+          { text: (checked "Colourblind-safe colours" ($state.colors == "cb-safe")), id: "colors", disabled: (locked "colors") }
+          { text: "Text size", items: [
+              { text: "Smaller", id: "smaller" }
+              { text: "Larger", id: "larger" }
+            ] }
+        ] }
+      { text: "Nothing to undo", id: "undo", disabled: true }
+    ]
+  }
+}
+
 # An action ends the window (`done`); the loop below acts on it and may
 # reopen the window on the same tab.
 def act [state, name] {
@@ -243,22 +265,11 @@ while $running {
     _ => "en-US"
   }
   let r = (gui {
-      menus: {
-        Settings: [
-          { text: "Apply changes", id: "apply", shortcut: "Cmd S" }
-          "-"
-          { text: "Appearance", items: [
-              { text: "High contrast", id: "contrast" }
-              { text: "Colourblind-safe colours", id: "colors" }
-            ] }
-          { text: "Nothing to undo", id: "undo", disabled: true }
-        ]
-      }
       init:  { tab: $starttab, scale: ($cfg | get "scale"), theme: ($cfg | get "theme"), contrast: ($cfg | get "contrast"), colors: ($cfg | get "colors"), myloc: $myloc, sysloc: $sysloc, admin: $admin, choice: "", sel: "", mode: "dhcp", addr: "", gw: "", dns: "", note: $note, action: "", done: false }
       title: "Settings"
       width: 640
       view: (fn [state] {
-          { kind: "column", gap: 12, children: [
+          { kind: "column", gap: 12, menus: (settings-menus $state), children: [
               { kind: "tabs", id: "tabs", bar: true, items: ["Personal", "Displays", "Network"], selected: $state.tab }
               (match $state.tab {
                   1 => (displays-page $state)
