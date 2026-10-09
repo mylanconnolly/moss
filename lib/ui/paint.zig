@@ -98,15 +98,28 @@ pub fn button(b: Brush, r: Rect, label: []const u8, icon: ?icons.Icon, style: Bu
     b.face.drawTrunc(b.canvas, x, r.y + (r.h -| b.line()) / 2, .ui, label, r.w -| (inset + 16), ink, bg);
 }
 
+pub const FieldStyle = struct {
+    focused: bool = false,
+    /// A password: every character shows as a dot.
+    secret: bool = false,
+};
+/// Where a field's text starts inside its box, and the room it has: the
+/// hit test that places a caret from a click uses the same two numbers.
+pub const field_inset: usize = 8;
+pub fn fieldRoom(w: usize) usize {
+    return w -| (2 * field_inset + 4);
+}
 /// A single-line text field: an inset panel, the visible window of the
 /// editor's text scrolled so the caret stays in view (`ed.first` is
 /// advanced here and remembered), the selection as an inverted run, and
 /// a caret bar when focused.
-pub fn field(b: Brush, r: Rect, ed: *text.Editor, focused: bool) void {
+pub fn field(b: Brush, r: Rect, ed: *text.Editor, style: FieldStyle) void {
     const p = b.pal;
+    const focused = style.focused;
     b.canvas.panel(r.x, r.y, r.w, r.h, control.radius, p.field_bg, if (focused) p.focus else p.border, if (focused) p.focus_w else p.border_w);
-    const room = r.w -| 20;
-    const shown = ed.buf[0..ed.len];
+    const room = fieldRoom(r.w);
+    var dots: [text.Editor.capacity]u8 = @splat('*');
+    const shown: []const u8 = if (style.secret) dots[0..ed.len] else ed.buf[0..ed.len];
     ed.first = @min(ed.first, ed.cursor);
     while (ed.first < ed.cursor and b.width(shown[ed.first..ed.cursor]) > room) ed.first = ed.next(ed.first);
     var last = ed.first;
@@ -115,7 +128,7 @@ pub fn field(b: Brush, r: Rect, ed: *text.Editor, focused: bool) void {
         if (b.width(shown[ed.first..next]) > room) break;
         last = next;
     }
-    const x = r.x + 8;
+    const x = r.x + field_inset;
     const y = r.y + (r.h -| b.line()) / 2;
     const lo = @max(ed.first, ed.low());
     const hi = @min(last, ed.high());
@@ -535,6 +548,50 @@ pub fn chart(b: Brush, r: Rect, title: []const u8, caption: []const u8, samples:
     }
 }
 
+// ------------------------------------------------------------ wrapped text
+
+/// Break `text` into lines no wider than `width`: at newlines, else at
+/// the last space that fits, else inside a word on a UTF-8 boundary (a
+/// word longer than the line). Each line found is written to `out`;
+/// returns how many (capped at `out.len`). The search is a binary one
+/// over measured prefixes, so a long paragraph costs logarithmically
+/// many measurements per line — a measurement is a font-service round
+/// trip in the frame.
+pub fn wrapText(b: Brush, s: []const u8, width: usize, out: [][]const u8) usize {
+    var n: usize = 0;
+    var start: usize = 0;
+    while (start < s.len and n < out.len) {
+        const line_end = if (std.mem.indexOfScalarPos(u8, s, start, '\n')) |at| at else s.len;
+        var end = line_end;
+        if (b.width(s[start..end]) > width) {
+            var lo = start;
+            var hi = end;
+            while (lo < hi) {
+                var mid = lo + (hi - lo + 1) / 2;
+                while (mid < line_end and s[mid] & 0xc0 == 0x80) mid += 1;
+                if (b.width(s[start..mid]) <= width) lo = mid else {
+                    hi = mid - 1;
+                    while (hi > start and s[hi] & 0xc0 == 0x80) hi -= 1;
+                }
+            }
+            end = lo;
+            if (end == start) end = @min(line_end, start + (std.unicode.utf8ByteSequenceLength(s[start]) catch 1));
+            if (end < line_end) {
+                if (std.mem.lastIndexOfScalar(u8, s[start..end], ' ')) |at| if (at > 0) {
+                    end = start + at;
+                };
+            }
+        }
+        out[n] = s[start..end];
+        n += 1;
+        start = end;
+        if (start < s.len and s[start] == '\n') start += 1 else while (start < s.len and s[start] == ' ') {
+            start += 1;
+        }
+    }
+    return n;
+}
+
 // ------------------------------------------------------------ tab strip
 
 pub const TabItem = struct { label: []const u8, dirty: bool = false, closable: bool = true };
@@ -732,18 +789,27 @@ test "a field paints its text, its selection inverted, and a caret only when foc
     var ed: text.Editor = .{};
     ed.seed("hello");
     const r: Rect = .{ .x = 0, .y = 0, .w = 120, .h = 24 };
-    field(b, r, &ed, false);
+    field(b, r, &ed, .{});
     try std.testing.expectEqual(@as(usize, 0), countColor(&bench.canvas, r, b.pal.focus)); // no caret, no focus ring
     try std.testing.expect(countColor(&bench.canvas, r, b.pal.text) > 0);
     ed.apply(.select_all);
-    field(b, r, &ed, true);
+    field(b, r, &ed, .{ .focused = true });
     try std.testing.expect(countColor(&bench.canvas, r, b.pal.primary) > 0); // the selection band
     try std.testing.expect(countColor(&bench.canvas, r, b.pal.primary_ink) > 0); // inverted text
     try std.testing.expect(countColor(&bench.canvas, r, b.pal.focus) > 0); // caret + ring
     // A long text scrolls so the caret stays visible: `first` advances.
     ed.seed("0123456789012345678901234567890123456789");
-    field(b, r, &ed, true);
+    field(b, r, &ed, .{ .focused = true });
     try std.testing.expect(ed.first > 0);
+    // A secret field paints dots, never the text.
+    bench.canvas.fillAll(0x010101);
+    ed.seed("hunter2");
+    field(b, r, &ed, .{ .secret = true });
+    const dots_ink = countColor(&bench.canvas, r, b.pal.text);
+    bench.canvas.fillAll(0x010101);
+    ed.seed("*******");
+    field(b, r, &ed, .{});
+    try std.testing.expectEqual(dots_ink, countColor(&bench.canvas, r, b.pal.text));
 }
 
 test "the tab strip lifts and underlines the selected tab and hits its close target" {
@@ -1005,4 +1071,23 @@ test "a button's size is the painter's own insets and a menu row's width its own
     scrollbar(b, .{ .x = 180, .y = 0, .w = scrollbar_w, .h = 60 }, 30, 120, 0, 90);
     try std.testing.expectEqual(b.pal.text_muted, bench.canvas.at(189, 5));
     try std.testing.expectEqual(b.pal.surface, bench.canvas.at(189, 50));
+}
+
+test "wrapped text breaks at spaces, then inside long words on a UTF-8 boundary, and at newlines" {
+    var bench: Bench = .{};
+    const b = bench.brush(); // 8 px a glyph
+    var lines: [8][]const u8 = undefined;
+    var n = wrapText(b, "the quick brown fox", 80, &lines); // 10 glyphs a line
+    try std.testing.expectEqual(@as(usize, 2), n);
+    try std.testing.expectEqualStrings("the quick", lines[0]);
+    try std.testing.expectEqualStrings("brown fox", lines[1]);
+    n = wrapText(b, "abcdefghijklmnop", 64, &lines); // 8 glyphs: no space to break at
+    try std.testing.expectEqual(@as(usize, 2), n);
+    try std.testing.expectEqualStrings("abcdefgh", lines[0]);
+    n = wrapText(b, "a\nb", 800, &lines);
+    try std.testing.expectEqual(@as(usize, 2), n);
+    n = wrapText(b, "ééééé", 24, &lines); // 3 glyphs a line; é is two bytes
+    try std.testing.expectEqualStrings("ééé", lines[0]);
+    try std.testing.expectEqual(@as(usize, 2), n);
+    try std.testing.expectEqual(@as(usize, 1), wrapText(b, "x", 8, lines[0..1]));
 }

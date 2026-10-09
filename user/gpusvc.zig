@@ -1633,9 +1633,9 @@ fn serveSurfaces(chan_h: u64) noreturn {
             },
             .set_strut => |q| {
                 const sf = findSurface(q.surface);
-                const ok = badge == control_badge and sf != null and !sf.?.trusted and sf.?.title_len == 0 and q.edge <= 1 and q.size <= fb_h;
+                const ok = badge == control_badge and sf != null and !sf.?.trusted and sf.?.title_len == 0 and q.edge <= shared.strut_bottom and q.size <= fb_h;
                 if (ok) {
-                    const strut = if (q.edge == 0) &strut_top else &strut_bottom;
+                    const strut = if (q.edge == shared.strut_top) &strut_top else &strut_bottom;
                     strut.* = .{ .surface = if (q.size == 0) 0 else q.surface, .size = @intCast(q.size) };
                     // Chrome never keeps the keyboard: a dock that came up
                     // with the focus (a restart) hands it back to the window

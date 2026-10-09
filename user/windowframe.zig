@@ -91,7 +91,6 @@ pub var scanout_w: usize = 1280;
 pub var scanout_h: usize = 1024;
 pub const win_h_min = 220;
 pub var win_h_max: usize = 976; // leave a margin top+bottom
-pub const pad = ui.space.inset; // window inset for content
 
 pub var win_w: usize = win_w_default;
 pub var win_x: usize = (1280 - win_w_default) / 2;
@@ -158,6 +157,23 @@ pub var measuring = false;
 pub const Palette = ui.Palette;
 pub const shade = ui.palette.shade;
 /// The wire's appearance enums (fontsvc's flags) to the toolkit's, by value.
+/// The wire's appearance enums and the toolkit's are two types that must
+/// agree value for value (the toolkit cannot import the wire): this is
+/// the sanctioned boundary, and it checks them at compile time.
+fn sameEnum(comptime A: type, comptime B: type) void {
+    const a = @typeInfo(A).@"enum".fields;
+    const b = @typeInfo(B).@"enum".fields;
+    if (a.len != b.len) @compileError(@typeName(A) ++ " and " ++ @typeName(B) ++ " differ");
+    for (a, b) |fa, fb| {
+        if (!std.mem.eql(u8, fa.name, fb.name) or fa.value != fb.value) @compileError(@typeName(A) ++ " and " ++ @typeName(B) ++ " differ at " ++ fa.name);
+    }
+}
+comptime {
+    sameEnum(shared.Theme, ui.palette.Theme);
+    sameEnum(shared.Contrast, ui.palette.Contrast);
+    sameEnum(shared.ColorMode, ui.palette.ColorMode);
+    sameEnum(shared.FontRole, ui.typeface.Role);
+}
 pub fn resolveTheme(theme: shared.Theme, contrast: shared.Contrast, cmode: shared.ColorMode) Palette {
     return ui.palette.resolve(@enumFromInt(@intFromEnum(theme)), @enumFromInt(@intFromEnum(contrast)), @enumFromInt(@intFromEnum(cmode)));
 }
@@ -229,10 +245,19 @@ pub fn restoreTarget(t: Target) void {
 }
 /// Everything a toolkit painter needs from this frame: the canvas, the
 /// font service as a typeface, the live palette and the icon cache.
-/// Valid until the next `brush()` (the canvas snapshot is shared).
+/// Valid until the next `brush()`: the canvas snapshot is one static, so
+/// a painter that keeps a brush across a nested `brush()` sees the
+/// later clip. Take one per paint, after the clip is set.
 pub fn brush() ui.Brush {
     brush_canvas = cv();
     return .{ .canvas = &brush_canvas, .face = face(), .pal = &pal, .icons = &icon_cache, .icon_px = iconSize() };
+}
+/// A brush whose `.ui` role is `role` (the title role for a wrapped
+/// heading): the toolkit's text helpers measure in `.ui`.
+pub fn brushFor(role: u64) ui.Brush {
+    var b = brush();
+    if (role == R_TITLE) b.face = titleFace();
+    return b;
 }
 
 pub fn fillAll(word: u32) void {
@@ -245,9 +270,6 @@ pub fn fillRect(x: usize, y: usize, w: usize, h: usize, word: u32) void {
     cv().fillRect(x, y, w, h, word);
 }
 /// A `thick`-pixel outline around the rect (x, y, w, h).
-pub fn strokeRect(x: usize, y: usize, w: usize, h: usize, word: u32, thick: usize) void {
-    cv().strokeRect(x, y, w, h, word, thick);
-}
 /// A filled rectangle with rounded, anti-aliased corners.
 pub fn fillRoundRect(x: usize, y: usize, w: usize, h: usize, r_in: usize, word: u32) void {
     cv().fillRoundRect(x, y, w, h, r_in, word);
@@ -503,14 +525,22 @@ pub fn drawStrTrunc(x: usize, y: usize, role: u64, s: []const u8, maxw: usize, f
 fn roleOf(role: u64) ui.typeface.Role {
     return @enumFromInt(@as(u8, @intCast(role)));
 }
-fn faceMeasure(_: *anyopaque, role: ui.typeface.Role, s: []const u8) usize {
-    return strW(@intFromEnum(role), s);
+/// A face's context says which frame role its `.ui` is: the ordinary
+/// face maps roles one to one; the title face (`brushFor(R_TITLE)`)
+/// measures and draws `.ui` in the title role, so a toolkit text helper
+/// that works in `.ui` serves a heading too.
+fn frameRole(ctx: *anyopaque, role: ui.typeface.Role) u64 {
+    const base: *const u8 = @ptrCast(ctx);
+    return if (role == .ui) base.* else @intFromEnum(role);
 }
-fn faceMetrics(_: *anyopaque, role: ui.typeface.Role) ui.typeface.Metrics {
-    const r: u64 = @intFromEnum(role);
+fn faceMeasure(ctx: *anyopaque, role: ui.typeface.Role, s: []const u8) usize {
+    return strW(frameRole(ctx, role), s);
+}
+fn faceMetrics(ctx: *anyopaque, role: ui.typeface.Role) ui.typeface.Metrics {
+    const r: u64 = frameRole(ctx, role);
     return .{ .line = lineOf(r), .ascent = if (font_ok) role_asc[r] else gh * 3 / 4 };
 }
-fn faceDraw(_: *anyopaque, canvas: *const ui.Canvas, x: usize, y_top: usize, role: ui.typeface.Role, s: []const u8, fg: u32, bg: u32) void {
+fn faceDraw(ctx: *anyopaque, canvas: *const ui.Canvas, x: usize, y_top: usize, role: ui.typeface.Role, s: []const u8, fg: u32, bg: u32) void {
     // Paint into the painter's canvas: swap it in as the frame's target
     // state for the duration, since glyph blits go through blendPx.
     const saved = .{ px, win_w, win_h, draw_offset_y, clip_x0, clip_y0, clip_x1, clip_y1, measuring };
@@ -534,12 +564,16 @@ fn faceDraw(_: *anyopaque, canvas: *const ui.Canvas, x: usize, y_top: usize, rol
         clip_y1 = saved[7];
         measuring = saved[8];
     }
-    drawStr(x, y_top, @intFromEnum(role), s, fg, bg);
+    drawStr(x, y_top, frameRole(ctx, role), s, fg, bg);
 }
 const face_vtable: ui.Typeface.VTable = .{ .measure = faceMeasure, .metrics = faceMetrics, .draw = faceDraw };
-var face_ctx: u8 = 0;
+var face_ctx: u8 = R_UI;
+var title_face_ctx: u8 = R_TITLE;
 pub fn face() ui.Typeface {
     return .{ .ctx = @ptrCast(&face_ctx), .vtable = &face_vtable };
+}
+fn titleFace() ui.Typeface {
+    return .{ .ctx = @ptrCast(&title_face_ctx), .vtable = &face_vtable };
 }
 
 // ------------------------------------------------------------ the chrome
@@ -902,9 +936,6 @@ pub fn nextInput() ?Event {
 
 // ------------------------------------------------------------ snapping
 
-/// The dock's height at the current scale — the same expression `runDock`
-/// uses (same font service, same palette, so it matches the real dock), so
-/// a maximized window can stop just above it.
 /// The desktop work area a maximized window fills: between the struts the
 /// top bar and the dock declared to the compositor (`work_area`), one
 /// published fact rather than a guess rebuilt here from this process's

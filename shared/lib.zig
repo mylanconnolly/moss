@@ -994,6 +994,9 @@ pub const gpu_dialog: u64 = 16;
 pub const gpu_no_focus: u64 = 32;
 /// A window title's bytes on the wire (`set_title`'s two words).
 pub const window_title_bytes: usize = 16;
+/// `set_strut`'s edges: the top (a bar) and the bottom (a dock).
+pub const strut_top: u64 = 0;
+pub const strut_bottom: u64 = 1;
 
 pub const GpuReq = union(enum(u64)) {
     /// Owner publishes a menu profile and current action availability

@@ -18,7 +18,7 @@ pub const Button = struct {
     }
 };
 pub fn input(r: Rect, ed: *ui.text.Editor, focused: bool) void {
-    ui.paint.field(wf.brush(), r, ed, focused);
+    ui.paint.field(wf.brush(), r, ed, .{ .focused = focused });
 }
 
 /// The wire's key byte as a text command: the private seat keys

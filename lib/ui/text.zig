@@ -39,7 +39,9 @@ pub const Command = union(enum) {
 };
 
 pub const Editor = struct {
-    buf: [64]u8 = undefined,
+    /// The most text a single-line field holds.
+    pub const capacity = 64;
+    buf: [capacity]u8 = undefined,
     len: usize = 0,
     cursor: usize = 0,
     anchor: usize = 0,

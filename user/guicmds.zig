@@ -43,8 +43,10 @@ const guipage = @import("guipage.zig");
 // The window frame — the chrome, the compositor surface, the drawing
 // primitives and the system font — lives in windowframe.zig, shared with
 // the terminal so both wear the same window. This module is the mshl GUI
-// *content*: the widget tree, the resident top bar and dock, and the run
-// loops that route input through the frame. These aliases let the widget
+// *content*: the window loop, the tree adapter over the toolkit's layout,
+// the leaves' runtime state and their bindings to the toolkit painters,
+// and the input loop; the resident top bar and dock are guibar.zig and
+// guidock.zig. These aliases let the widget
 // code read as it did before the split (the frame owns the module state
 // behind them, so a redraw of the popup surface, say, is `wf.px = ...`).
 pub const pal = &wf.pal;
@@ -53,7 +55,6 @@ pub const fillRect = wf.fillRect;
 pub const fillRoundRect = wf.fillRoundRect;
 pub const fillDot = wf.fillDot;
 pub const panel = wf.panel;
-const shade = wf.shade;
 pub const drawStr = wf.drawStr;
 pub const drawStrTrunc = wf.drawStrTrunc;
 pub const strW = wf.strW;
@@ -63,18 +64,13 @@ pub const R_UI = wf.R_UI;
 const R_TITLE = wf.R_TITLE;
 const win_w_default = wf.win_w_default;
 const win_h_min = wf.win_h_min;
-pub const item_vpad = 8; // a dock/menu item's vertical padding
-pub const dock_vpad = 8; // the dock's outer vertical padding
-pub fn dockHeight() usize {
-    return lineOf(R_UI) + 2 * item_vpad + 2 * dock_vpad + pal.border_w;
-}
 /// The work area once the desktop chrome has caught up with a scale
 /// change. The bar and the dock re-declare their struts a tick after
 /// their metrics change; a window opening in that gap would centre
 /// against the old ones. They are this same runtime, so their heights
 /// are known here: wait briefly for the compositor's answer to match.
 fn settledWorkArea() wf.Geom {
-    const bar_h = lineOf(R_UI) + 2 * guibar.bar_vpad + pal.border_w;
+    const bar_h = guibar.barHeight();
     var wa = wf.workArea();
     var tries: usize = 0;
     // The chrome is woken to re-declare the moment the appearance changes
@@ -83,7 +79,7 @@ fn settledWorkArea() wf.Geom {
     // compositor has (the guishellro drill once caught it 8 px off).
     while (tries < 12) : (tries += 1) {
         const top_ok = wa.y == 0 or wa.y == bar_h;
-        const bottom_ok = wa.y + wa.h == wf.scanout_h or wa.y + wa.h + dockHeight() == wf.scanout_h;
+        const bottom_ok = wa.y + wa.h == wf.scanout_h or wa.y + wa.h + guidock.dockHeight() == wf.scanout_h;
         if (top_ok and bottom_ok) break;
         usys.sleepMs(50);
         wa = wf.workArea();
@@ -157,7 +153,7 @@ pub fn setStorageView(view_chan: u64, view_buf: [*]u8) void {
     guipage.setStorageDir(view_chan, view_buf, "state/browser/storage");
 }
 
-fn boolField(rec: mshl.Record, key: []const u8, dflt: bool) bool {
+pub fn boolField(rec: mshl.Record, key: []const u8, dflt: bool) bool {
     const v = rec.get(key) orelse return dflt;
     return switch (v) {
         .bool => |b| b,
@@ -292,9 +288,15 @@ fn limitHit(what: []const u8, id: []const u8) void {
     layout_overflow = true;
     warn(what, id);
 }
+/// A capacity the view exceeded (named with its size); what was past it
+/// is dropped, the window survives.
+pub fn warnLimit(what: []const u8, cap: usize, id: []const u8) void {
+    var wb: [96]u8 = undefined;
+    warn(std.fmt.bufPrint(&wb, "{s} ({d}); past it is dropped", .{ what, cap }) catch what, id);
+}
 /// The same line for a limit the window survives (a shared slot, a tab
 /// strip that cannot be clicked): named, not fatal.
-fn warn(what: []const u8, id: []const u8) void {
+pub fn warn(what: []const u8, id: []const u8) void {
     var lb: [128]u8 = undefined;
     _ = usys.log(log_h, std.fmt.bufPrint(&lb, "gui: limit: {s} ({s})", .{ what, id }) catch "gui: limit");
 }
@@ -340,7 +342,11 @@ fn scrollFor(id: []const u8) usize {
     limitHit("scroll viewports", id);
     return 0;
 }
+/// While a dialog is up the body's widgets are not focusable or clickable:
+/// they are simply not recorded (their paint sees no focus, hover or press).
+var focus_suppressed = false;
 fn recordFocus(f: Focus) void {
+    if (focus_suppressed) return;
     if (nfoc == focusables.len) {
         limitHit("focusable widgets", f.id);
         return;
@@ -418,7 +424,7 @@ fn paintViewport(node: Value, x: usize, y: usize, width: usize, height: usize, o
     // content that does not is measured natural and may scroll.
     var size = layoutNode(node, 0, 0, width, height, false);
     const overflow = size.h > height;
-    const content_w = width -| (if (overflow) @as(usize, 14) else 0);
+    const content_w = width -| (if (overflow) ui.paint.scrollbar_w else 0);
     if (overflow) size = layoutNode(node, 0, 0, content_w, height, false);
     st.state.fit(size.h, height);
     scroll_owner = owner;
@@ -426,11 +432,8 @@ fn paintViewport(node: Value, x: usize, y: usize, width: usize, height: usize, o
     _ = drawNode(node, x, y, content_w, height);
     wf.draw_offset_y = old_offset;
     scroll_owner = old_owner;
-    if (overflow and height > 0 and width >= 8) {
-        const thumb = @min(height, @max(20, height * height / @max(1, size.h)));
-        const at = (height - thumb) * st.state.offset / @max(1, st.state.limit());
-        fillRoundRect(x + width - 8, y, 6, height, 3, pal.surface);
-        fillRoundRect(x + width - 8, y + at, 6, thumb, 3, pal.text_muted);
+    if (overflow and height > 0 and width >= ui.paint.scrollbar_w) {
+        ui.paint.scrollbar(wf.brush(), .{ .x = x + width - ui.paint.scrollbar_w, .y = y, .w = ui.paint.scrollbar_w, .h = height }, height, size.h, st.state.offset, st.state.limit());
     }
     wf.clip_y0 = old_y0;
     wf.clip_y1 = old_y1;
@@ -484,8 +487,12 @@ fn listFor(id: []const u8, key: []const u8) *ListState {
             logEvict("list", e.id[0..e.id_len], id);
             slot = e;
         } else {
+            // Every list is in the view: the newcomer shares the first slot
+            // as it is (like a field), rather than the two evicting each
+            // other every render.
             warn("lists; the newcomer shares the first slot", id);
-            slot = &list_states[0];
+            list_states[0].last_seen = render_serial;
+            return &list_states[0];
         };
         slot.?.* = .{ .used = true };
         slot.?.id_len = @min(id.len, slot.?.id.len);
@@ -574,8 +581,8 @@ fn fieldClick(focus: Focus, x: usize, select: bool) void {
     const ed = &f.edit;
     var dots: [64]u8 = @splat('*');
     const shown = if (f.secret) dots[0..ed.len] else ed.buf[0..ed.len];
-    const local = x -| (focus.bx + fpx);
-    const room = focus.bw -| (2 * fpx + 3);
+    const local = x -| (focus.bx + ui.paint.field_inset);
+    const room = ui.paint.fieldRoom(focus.bw);
     var pos = ed.first;
     while (pos < ed.len) {
         const next = ed.next(pos);
@@ -591,29 +598,19 @@ fn fieldClick(focus: Focus, x: usize, select: bool) void {
 // focused scrollable list uses them to move its selection.
 const key_up: u8 = shared.keyboard.up;
 const key_down: u8 = shared.keyboard.down;
-const key_left: u8 = shared.keyboard.left;
-const key_right: u8 = shared.keyboard.right;
 
-/// Render one view tree. Fills the window, draws the title and each child
-/// of the (single, column) layout, highlighting the focused button, and
-/// returns the focusable widgets' ids in order (into `ids_buf`).
+/// A record's string field, or "" when absent or not a string.
 pub fn strField(rec: mshl.Record, key: []const u8) []const u8 {
     return if (rec.get(key)) |v| (if (v == .str) v.str else "") else "";
 }
 
-/// Render one view tree into `focusables`, highlight the focused widget,
-/// and return the number of focusable widgets.
 const Size = ui.Size;
 var content_bg: u32 = 0;
 var hovered: ?usize = null;
 var pressed: ?usize = null;
 
 const gap = ui.space.medium; // vertical/horizontal space between siblings
-const bpx = ui.control.button_x; // button horizontal padding
-const bpy = ui.control.button_y; // button vertical padding
-const fpx = ui.control.field_x; // field horizontal padding
 const fpy = ui.control.field_y; // field vertical padding
-const r_btn = ui.control.radius; // button corner radius
 const r_field = ui.control.radius; // field corner radius
 
 // Focus recording during a layout pass (draw order over the tree).
@@ -654,9 +651,28 @@ fn renderTree(tree: Value, title: []const u8, focus: usize) usize {
     guipage.beginRender();
     scroll_owner = 0;
     layout_overflow = false;
+    const dialog_up = dialogOf(tree) != null;
+    const saved_sel = sel_focus;
+    const saved_hover = hovered;
+    const saved_press = pressed;
+    if (dialog_up) {
+        focus_suppressed = true;
+        sel_focus = std.math.maxInt(usize);
+        hovered = null;
+        pressed = null;
+    }
     _ = paintViewport(body, pad, top + pad, wf.win_w -| (2 * pad), wf.win_h -| (top + 2 * pad), 0);
+    focus_suppressed = false;
+    sel_focus = saved_sel;
+    hovered = saved_hover;
+    pressed = saved_press;
     paintDialog(tree, top);
     return nfoc;
+}
+fn dialogOf(tree: Value) ?mshl.Record {
+    if (tree != .record) return null;
+    const d = tree.record.get("dialog") orelse return null;
+    return if (d == .record) d.record else null;
 }
 
 /// `view` may return its root with `dialog: { id, title, cancel, w,
@@ -672,17 +688,15 @@ var dialog_cancel_len: usize = 0;
 var dialog_shown: bool = false;
 fn paintDialog(tree: Value, top: usize) void {
     dialog_cancel_len = 0;
-    const d = if (tree == .record) tree.record.get("dialog") orelse Value.nothing else Value.nothing;
-    if (d != .record) {
+    const rec = dialogOf(tree) orelse {
         if (dialog_shown and !wf.measuring) _ = usys.log(log_h, "gui: dialog closed");
         dialog_shown = false;
         return;
-    }
-    const rec = d.record;
+    };
+    const d = Value{ .record = rec };
     const cancel = strField(rec, "cancel");
     dialog_cancel_len = @min(cancel.len, dialog_cancel.len);
     @memcpy(dialog_cancel[0..dialog_cancel_len], cancel[0..dialog_cancel_len]);
-    const body_focus = nfoc;
     const inset = ui.paint.sheet_inset;
     const area_h = wf.win_h -| top;
     const w = @min(@as(usize, @intCast(std.math.clamp(intField(rec, "w", 420), 160, 4096))), wf.win_w -| 2 * pad);
@@ -699,20 +713,6 @@ fn paintDialog(tree: Value, top: usize) void {
     const saved_bg = content_bg;
     content_bg = pal.surface;
     defer content_bg = saved_bg;
-    // The dialog's widgets are recorded after the body's and moved to the
-    // front below, so the focus, hover and press indices (which name the
-    // front list) are shifted while they paint, or none would ever match.
-    const saved_sel = sel_focus;
-    const saved_hover = hovered;
-    const saved_press = pressed;
-    sel_focus += body_focus;
-    if (hovered) |hi| hovered = hi + body_focus;
-    if (pressed) |pi| pressed = pi + body_focus;
-    defer {
-        sel_focus = saved_sel;
-        hovered = saved_hover;
-        pressed = saved_press;
-    }
     if (title.len > 0) drawStrTrunc(sx + inset, sy + inset, R_TITLE, title, inner, pal.title, content_bg);
     // The sheet clips its content, so a dialog taller than the window
     // still ends inside its outline.
@@ -726,11 +726,8 @@ fn paintDialog(tree: Value, top: usize) void {
     wf.clip_y0 = old[1];
     wf.clip_x1 = old[2];
     wf.clip_y1 = old[3];
-    // Modal: the body's widgets are not there to Tab to or click while
-    // the sheet is up — only the dialog's own, moved to the front.
-    const n = nfoc - body_focus;
-    std.mem.copyForwards(Focus, focusables[0..n], focusables[body_focus..nfoc]);
-    nfoc = n;
+    // Modal: the body's widgets were not recorded (renderTree suppressed
+    // them), so the focus list is the dialog's own, from index 0.
     if (!dialog_shown and !wf.measuring) {
         var lb: [96]u8 = undefined;
         _ = usys.log(log_h, std.fmt.bufPrint(&lb, "gui: dialog {s} open", .{strField(rec, "id")}) catch "gui: dialog open");
@@ -790,7 +787,7 @@ var custom_menus: CustomMenus = .{};
 const max_menu_depth = 3;
 fn customSlot(c: *CustomMenus, title: []const u8) ?u8 {
     if (c.nslots == shared.menus.max_menus) {
-        warn("custom menus (8); this one is dropped", title);
+        warnLimit("custom menus", shared.menus.max_menus, title);
         return null;
     }
     const n = @min(title.len, shared.menus.title_bytes);
@@ -801,7 +798,7 @@ fn customSlot(c: *CustomMenus, title: []const u8) ?u8 {
 }
 fn customItem(c: *CustomMenus, slot: u8, label: []const u8, key: u8, sub: u8, id: []const u8, shortcut: []const u8) void {
     if (c.nitems == shared.menus.max_app_items) {
-        warn("custom menu items (32); this one is dropped", label);
+        warnLimit("custom menu items", shared.menus.max_app_items, label);
         return;
     }
     var item: CustomItem = .{ .menu = slot, .key = key, .sub = sub };
@@ -903,7 +900,7 @@ var page_it: ?*mshl.Interp = null;
 /// window's, whatever the page paints.
 fn layoutPage(rec: mshl.Record, x: usize, y: usize, avail_w: usize, avail_h: usize, paint: bool) Size {
     const id = strField(rec, "id");
-    const visible = if (rec.get("visible")) |v| v.asBool() else true;
+    const visible = boolField(rec, "visible", true);
     const url = strField(rec, "url");
     const nav: i64 = if (rec.get("nav")) |n| (if (n == .int) n.int else 0) else 0;
     const node: u64 = @intCast(std.math.clamp(intField(rec, "node", 0), 0, 0xffff));
@@ -1028,8 +1025,12 @@ fn topBar(tree: Value) ?mshl.Record {
     if (children.len == 0 or children[0] != .record) return null;
     const first = children[0].record;
     if (!std.mem.eql(u8, strField(first, "kind"), "tabs")) return null;
-    const bar = if (first.get("bar")) |v| v.asBool() else false;
-    if (!bar or tree.record.keys.len > body_keys.len) return null;
+    const bar = boolField(first, "bar", false);
+    if (!bar) return null;
+    if (tree.record.keys.len > body_keys.len) {
+        warnLimit("root record keys beside a tab bar", body_keys.len, strField(first, "id"));
+        return null;
+    }
     return first;
 }
 
@@ -1062,7 +1063,7 @@ fn sizeToContent(it: *mshl.Interp, view: Value, state: Value, title: []const u8)
     wf.drawChrome(title);
     tabbar_h = 0;
     const body = if (topBar(tree)) |bar| paintTopBar(tree.record, bar) else tree;
-    content_h = wf.title_h + tabbar_h + 2 * pad + layoutNode(body, 0, 0, wf.win_w - 2 * pad, 0, false).h;
+    content_h = wf.title_h + tabbar_h + 2 * pad + layoutNode(body, 0, 0, wf.win_w -| (2 * pad), 0, false).h;
     wf.measuring = false;
     // Centre inside the desktop work area the compositor publishes (between
     // the bar and the dock). Using the whole scanout placed tall windows
@@ -1158,12 +1159,14 @@ const MshlTree = struct {
         const v = n.record.get("cols") orelse return buf[0..0];
         switch (v) {
             .int => |count| {
+                if (count > ui.layout.max_tracks) warnLimit("grid tracks", ui.layout.max_tracks, "cols");
                 const c: usize = @intCast(std.math.clamp(count, 1, @as(i64, ui.layout.max_tracks)));
                 @memset(buf[0..c], 1);
                 return buf[0..c];
             },
             .list => |items| {
                 var c: usize = 0;
+                if (items.len > buf.len) warnLimit("grid tracks", ui.layout.max_tracks, "cols");
                 for (items) |item| {
                     if (c == buf.len) break;
                     buf[c] = if (item == .int) @intCast(std.math.clamp(item.int, 0, 64)) else 0;
@@ -1249,7 +1252,8 @@ fn leafLayout(rec: mshl.Record, x: usize, y: usize, avail_w: usize, avail_h: usi
     }
     if (std.mem.eql(u8, kind, "button")) {
         if (paint) return drawButton(rec, x, y, avail_w);
-        return .{ .w = @min(avail_w, iconLabelWidth(rec, "label") + 2 * bpx), .h = @max(lineOf(R_UI), wf.iconSize()) + 2 * bpy };
+        const size = ui.paint.buttonSize(wf.brush(), if (iconOnly(rec)) "" else strField(rec, "label"), ui.icons.parse(strField(rec, "icon")));
+        return .{ .w = @min(avail_w, size.w), .h = size.h };
     }
     if (std.mem.eql(u8, kind, "toggle") or std.mem.eql(u8, kind, "checkbox")) return layoutToggle(rec, x, y, avail_w, paint);
     if (std.mem.eql(u8, kind, "field")) {
@@ -1387,49 +1391,28 @@ fn flexWeight(node: Value) usize {
 }
 fn layoutLabel(rec: mshl.Record, x: usize, y: usize, avail_w: usize, paint: bool) Size {
     const text = strField(rec, "text");
-    const muted = rec.get("muted") != null and (rec.get("muted").?).asBool();
+    const muted = boolField(rec, "muted", false);
     const strong = std.mem.eql(u8, strField(rec, "role"), "title");
     const role: u64 = if (strong) R_TITLE else R_UI;
     const ink = if (strong) pal.title else if (muted) pal.text_muted else pal.text;
-    if (!(if (rec.get("wrap")) |v| v.asBool() else false) or avail_w == 0) {
+    if (!boolField(rec, "wrap", false) or avail_w == 0) {
         if (paint) drawStrTrunc(x, y, role, text, avail_w, ink, content_bg);
         return .{ .w = @min(avail_w, strW(role, text)), .h = lineOf(role) };
     }
-    var start: usize = 0;
-    var lines: usize = 0;
+    // Wrapped: the toolkit breaks the lines (`paint.wrapText`, host-tested);
+    // the title role is measured and drawn through a brush of that role.
+    var lines: [max_label_lines][]const u8 = undefined;
+    const n = ui.paint.wrapText(wf.brushFor(role), text, avail_w, &lines);
+    if (n == max_label_lines) warnLimit("wrapped label lines", max_label_lines, text[0..@min(text.len, 24)]);
     var width: usize = 0;
-    while (start < text.len) {
-        const line_end = if (std.mem.indexOfScalarPos(u8, text, start, '\n')) |at| at else text.len;
-        var end = line_end;
-        if (strW(role, text[start..end]) > avail_w) {
-            var lo = start;
-            var hi = end;
-            while (lo < hi) {
-                var mid = lo + (hi - lo + 1) / 2;
-                while (mid < line_end and text[mid] & 0xc0 == 0x80) mid += 1;
-                if (strW(role, text[start..mid]) <= avail_w) lo = mid else {
-                    hi = mid - 1;
-                    while (hi > start and text[hi] & 0xc0 == 0x80) hi -= 1;
-                }
-            }
-            end = lo;
-            if (end == start) end = @min(line_end, start + (std.unicode.utf8ByteSequenceLength(text[start]) catch 1));
-            if (end < line_end) {
-                if (std.mem.lastIndexOfScalar(u8, text[start..end], ' ')) |at| if (at > 0) {
-                    end = start + at;
-                };
-            }
-        }
-        if (paint) drawStr(x, y + lines * lineOf(role), role, text[start..end], ink, content_bg);
-        width = @max(width, @min(avail_w, strW(role, text[start..end])));
-        lines += 1;
-        start = end;
-        if (start < text.len and text[start] == '\n') start += 1 else while (start < text.len and text[start] == ' ') {
-            start += 1;
-        }
+    for (lines[0..n], 0..) |line, i| {
+        if (paint) drawStr(x, y + i * lineOf(role), role, line, ink, content_bg);
+        width = @max(width, @min(avail_w, strW(role, line)));
     }
-    return .{ .w = width, .h = @max(1, lines) * lineOf(role) };
+    return .{ .w = width, .h = @max(1, n) * lineOf(role) };
 }
+/// Lines a wrapped label can run to (a paragraph, not a document).
+const max_label_lines = 64;
 
 /// A button's icon: `icon: "name"` from the catalog, `icon_only: true`
 /// to drop the label (the label still names the button for a drill).
@@ -1437,7 +1420,7 @@ fn hasIcon(rec: mshl.Record) bool {
     return ui.icons.parse(strField(rec, "icon")) != null;
 }
 fn iconOnly(rec: mshl.Record) bool {
-    return hasIcon(rec) and (if (rec.get("icon_only")) |v| v.asBool() else false);
+    return hasIcon(rec) and (boolField(rec, "icon_only", false));
 }
 pub fn iconLabelWidth(rec: mshl.Record, field: []const u8) usize {
     const text = if (iconOnly(rec)) "" else strField(rec, field);
@@ -1539,15 +1522,16 @@ fn layoutBreadcrumb(rec: mshl.Record, x: usize, y: usize, width: usize, paint: b
         limitHit("breadcrumbs", strField(rec, "id"));
         return .{};
     }
-    if (state) |c| {
-        c.root = root;
-        c.can_lock = if (rec.get("can_lock")) |v| v.asBool() else false;
-        c.can_leave = if (rec.get("can_leave")) |v| v.asBool() else false;
-        c.selected = @min(c.selected, model.count -| 2);
-        if (files_bindings.location.is(strField(rec, "id"))) file_crumb = c;
-    }
     var buf: [max_crumb_parts][]const u8 = undefined;
     const labels = crumbLabels(model, root, &buf);
+    if (model.count > max_crumb_parts) warnLimit("breadcrumb parts", max_crumb_parts, path[0..@min(path.len, 24)]);
+    if (state) |c| {
+        c.root = root;
+        c.can_lock = boolField(rec, "can_lock", false);
+        c.can_leave = boolField(rec, "can_leave", false);
+        c.selected = @min(c.selected, labels.len -| 2); // only painted crumbs are links
+        if (files_bindings.location.is(strField(rec, "id"))) file_crumb = c;
+    }
     const b = wf.brush();
     // Measure by placing the last crumb (the painter and the hit test use
     // the same flow); paint through the toolkit when asked.
@@ -1573,13 +1557,16 @@ fn crumbHit(f: Focus, x: usize, y: usize) ?usize {
 
 fn drawButton(rec: mshl.Record, x: usize, y: usize, avail_w: usize) Size {
     const variant = strField(rec, "variant");
-    const disabled = if (rec.get("disabled")) |v| v.asBool() else false;
+    const disabled = boolField(rec, "disabled", false);
     const focused = !disabled and wf.win_focused and nfoc == sel_focus;
-    const w = @min(avail_w, iconLabelWidth(rec, "label") + 2 * bpx);
-    const h = @max(lineOf(R_UI), wf.iconSize()) + 2 * bpy;
+    const label = if (iconOnly(rec)) "" else strField(rec, "label");
+    const icon = ui.icons.parse(strField(rec, "icon"));
+    const size = ui.paint.buttonSize(wf.brush(), label, icon);
+    const w = @min(avail_w, size.w);
+    const h = size.h;
     // The toolkit paints it (lib/ui/paint.zig); this is the binding: the
     // record's fields and the runtime's focus/hover/press state as a style.
-    ui.paint.button(wf.brush(), .{ .x = x, .y = y, .w = w, .h = h }, if (iconOnly(rec)) "" else strField(rec, "label"), ui.icons.parse(strField(rec, "icon")), .{
+    ui.paint.button(wf.brush(), .{ .x = x, .y = y, .w = w, .h = h }, label, icon, .{
         .focused = focused,
         .primary = std.mem.eql(u8, variant, "primary"),
         .danger = std.mem.eql(u8, variant, "danger"),
@@ -1604,8 +1591,8 @@ fn layoutToggle(rec: mshl.Record, x: usize, y: usize, avail_w: usize, paint: boo
     const size = ui.paint.toggleSize(wf.brush(), label, check);
     const w = @min(avail_w, size.w);
     if (!paint) return .{ .w = w, .h = size.h };
-    const disabled = if (rec.get("disabled")) |v| v.asBool() else false;
-    const is_on = if (rec.get("on")) |v| v.asBool() else false;
+    const disabled = boolField(rec, "disabled", false);
+    const is_on = boolField(rec, "on", false);
     const focused = !disabled and wf.win_focused and nfoc == sel_focus;
     ui.paint.toggle(wf.brush(), .{ .x = x, .y = y, .w = w, .h = size.h }, label, .{
         .on = is_on,
@@ -1619,8 +1606,10 @@ fn layoutToggle(rec: mshl.Record, x: usize, y: usize, avail_w: usize, paint: boo
     return .{ .w = w, .h = size.h };
 }
 
-/// A text field: a muted label over an inset value box (a darker fill with
-/// a bright caret when focused). A `secret` field shows dots.
+/// A text field: a muted label over the toolkit's field (`paint.field`),
+/// which scrolls the live text so the caret stays in view and paints the
+/// selection and the caret; `secret: true` shows dots. The edit buffer is
+/// the runtime's, keyed by id (`fieldFor`).
 fn drawField(rec: mshl.Record, x: usize, y: usize, avail_w: usize) Size {
     const label = strField(rec, "label");
     const id = strField(rec, "id");
@@ -1632,40 +1621,8 @@ fn drawField(rec: mshl.Record, x: usize, y: usize, avail_w: usize) Size {
         yy += lineOf(R_UI) + 6;
     }
     const bh = lineOf(R_UI) + 2 * fpy;
-    const ring = if (focused) pal.focus else pal.border;
-    const ring_w = if (focused) pal.focus_w else pal.border_w;
-    panel(x, yy, avail_w, bh, r_field, pal.field_bg, ring, ring_w);
-    const tx = x + fpx;
-    const ty = yy + fpy;
-    const secret = rec.get("secret") != null and (rec.get("secret").?).asBool();
-    fb.secret = secret;
-    var dots: [64]u8 = undefined;
-    const shown: []const u8 = if (secret) blk: {
-        const mlen = @min(fb.edit.len, dots.len);
-        for (0..mlen) |i| dots[i] = '*';
-        break :blk dots[0..mlen];
-    } else fb.edit.buf[0..fb.edit.len];
-    const ed = &fb.edit;
-    const room = avail_w -| (2 * fpx + 3);
-    ed.first = @min(ed.first, ed.cursor);
-    while (ed.first < ed.cursor and strW(R_UI, shown[ed.first..ed.cursor]) > room) ed.first = ed.next(ed.first);
-    var last = ed.first;
-    while (last < ed.len) {
-        const next = ed.next(last);
-        if (strW(R_UI, shown[ed.first..next]) > room) break;
-        last = next;
-    }
-    const lo = @max(ed.first, ed.low());
-    const hi = @min(last, ed.high());
-    if (focused and hi > lo) {
-        const sx = tx + strW(R_UI, shown[ed.first..lo]);
-        const sw = strW(R_UI, shown[lo..hi]);
-        fillRect(sx, ty, sw, lineOf(R_UI), pal.focus);
-        drawStr(tx, ty, R_UI, shown[ed.first..lo], pal.text, pal.field_bg);
-        drawStr(sx, ty, R_UI, shown[lo..hi], pal.bg, pal.focus);
-        drawStr(sx + sw, ty, R_UI, shown[hi..last], pal.text, pal.field_bg);
-    } else drawStr(tx, ty, R_UI, shown[ed.first..last], pal.text, pal.field_bg);
-    if (focused) fillRect(tx + strW(R_UI, shown[ed.first..ed.cursor]), ty, 2, lineOf(R_UI), pal.focus);
+    fb.secret = boolField(rec, "secret", false);
+    ui.paint.field(wf.brush(), .{ .x = x, .y = yy, .w = avail_w, .h = bh }, &fb.edit, .{ .focused = focused, .secret = fb.secret });
     if (nfoc < focusables.len) {
         // `submit: "go"`: Enter in the field presses that button.
         recordFocus(.{ .id = id, .is_field = true, .submit = strField(rec, "submit"), .bx = x, .by = yy, .bw = avail_w, .bh = bh });
@@ -1750,7 +1707,7 @@ fn cellAt(cellsv: Value, ci: usize) []const u8 {
 /// is drawn.
 fn listBoxHeight(rec: mshl.Record, avail_h: usize) usize {
     const h_field: usize = @intCast(@max(intField(rec, "h", 240), 40));
-    const auto = if (rec.get("auto")) |v| v.asBool() else false;
+    const auto = boolField(rec, "auto", false);
     if (!auto) return @max(h_field, avail_h);
     const line = lineOf(R_UI);
     const row_h = line + 2 * list_row_vpad;
@@ -1773,15 +1730,15 @@ fn drawList(rec: mshl.Record, x: usize, y: usize, avail_w: usize, avail_h: usize
     const box_h = listBoxHeight(rec, avail_h);
 
     const focused = wf.win_focused and nfoc == sel_focus;
-    const active = if (rec.get("active")) |v| v.asBool() else true;
-    const fit = if (rec.get("fit")) |v| v.asBool() else false;
+    const active = boolField(rec, "active", true);
+    const fit = boolField(rec, "fit", false);
     // The columns as the toolkit sees them: title, weight, alignment —
     // and their pixel widths, which the header click needs as edges.
     var cols: [max_list_cols]ui.paint.Column = undefined;
     var ncols: usize = 0;
     for (colsv) |cv| {
         if (cv != .record or ncols == max_list_cols) continue;
-        cols[ncols] = .{ .title = strField(cv.record, "title"), .weight = @intCast(std.math.clamp(intField(cv.record, "w", 80), 1, 4096)), .right = if (cv.record.get("right")) |v| v.asBool() else false };
+        cols[ncols] = .{ .title = strField(cv.record, "title"), .weight = @intCast(std.math.clamp(intField(cv.record, "w", 80), 1, 4096)), .right = boolField(cv.record, "right", false) };
         ncols += 1;
     }
     var widths: [max_list_cols]usize = undefined;
@@ -1829,7 +1786,7 @@ fn drawList(rec: mshl.Record, x: usize, y: usize, avail_w: usize, avail_h: usize
     const max_scroll = if (nrows > vis) nrows - vis else 0;
     // `tail: true`: a list that follows its end — a log — scrolls to the
     // newest row whenever rows arrive; between arrivals it scrolls freely.
-    const tail = if (rec.get("tail")) |v| v.asBool() else false;
+    const tail = boolField(rec, "tail", false);
     if (tail and nrows != rows_before) st.scroll = max_scroll;
     if (st.scroll > max_scroll) st.scroll = max_scroll;
 
@@ -1882,6 +1839,7 @@ fn drawList(rec: mshl.Record, x: usize, y: usize, avail_w: usize, avail_h: usize
     // Scrollbar: a track and a proportional thumb on the right edge.
     if (has_sb) ui.paint.listScrollbar(wf.brush(), .{ .x = x + w - sb_w - pal.border_w, .y = rows_top, .w = sb_w, .h = inner_h }, vis, nrows, st.scroll, pal.field_bg);
 
+    if (nlisthit == list_hits.len) warn("lists on screen; this one cannot be clicked", id);
     if (nlisthit < list_hits.len) {
         const sb_x = if (has_sb) x + w - sb_w / 2 - pal.border_w else 0;
         list_hits[nlisthit] = .{ .id = id, .x = x, .rows_top = rows_top, .offset_y = wf.draw_offset_y, .rows_w = rows_w, .row_h = row_h, .sb_x = sb_x, .header_h = header_h, .col_edge = col_edge, .ncols = ncols, .st = st };
@@ -2007,9 +1965,6 @@ fn mkEvent(it: *mshl.Interp, id: []const u8) mshl.Error!Value {
     return .{ .record = .{ .keys = keys, .vals = vals } };
 }
 
-/// The event a list fires: `{ id: <listId>, row: <rowId>, activated: bool }`
-/// — `activated` true for Enter or a reclick (open), false for a plain
-/// selection (the app updates a preview). The app maps `row` to its data.
 /// The event for a list: `{ id, row, activated, col }` — `row` the
 /// selected row's id and `activated` whether it was opened (Enter, a
 /// reclick); or, for a column-header click, `row` empty and `col` the
@@ -2347,8 +2302,8 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
     if (view != .func or update != .func) return it.fail("gui: `view` and `update` must be functions", .{});
     var state = spec.get("init") orelse Value.nothing;
     const title = if (spec.get("title")) |t| (if (t == .str) t.str else "") else "";
-    const want_trusted = spec.get("trusted") != null and (spec.get("trusted").?).asBool();
-    const want_isolate = spec.get("isolate") != null and (spec.get("isolate").?).asBool();
+    const want_trusted = boolField(spec, "trusted", false);
+    const want_isolate = boolField(spec, "isolate", false);
     // `tick: <ms>` (or `tick: true` → 1s) asks the loop to re-render on a
     // timer so a `view` that reads the clock updates on its own.
     wf.tick_ms = if (spec.get("tick")) |t| switch (t) {
@@ -2362,13 +2317,13 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
     defer guipage.reapAll();
     // `bar: true` is the resident top menu bar — a distinct render/loop
     // (pinned, chrome-less, with dropdown menus), not a window.
-    if (spec.get("bar") != null and (spec.get("bar").?).asBool()) {
+    if (boolField(spec, "bar", false)) {
         return try guibar.runBar(it, view, update, state);
     }
     // `dock: true` is the resident bottom dock — a bar of app buttons that
     // launch their units on a click, pinned full-width, not a window.
-    if (spec.get("dock") != null and (spec.get("dock").?).asBool()) {
-        return try guidock.runDock(it, view, update, state, if (spec.get("dismissible")) |v| v.asBool() else false);
+    if (boolField(spec, "dock", false)) {
+        return try guidock.runDock(it, view, update, state, boolField(spec, "dismissible", false));
     }
 
     // `node: N` runs the whole app on node N over the fabric — the runtime

@@ -13,17 +13,24 @@ const core = @import("guicmds.zig");
 const R_UI = core.R_UI;
 const Value = core.Value;
 const declareStrut = core.declareStrut;
-const dockHeight = core.dockHeight;
-const dock_vpad = core.dock_vpad;
 const fillAll = core.fillAll;
 const fillDot = core.fillDot;
 const fillRect = core.fillRect;
 const iconLabelWidth = core.iconLabelWidth;
 const isDone = core.isDone;
-const item_vpad = core.item_vpad;
-const lineOf = core.lineOf;
 const pal = core.pal;
 const strField = core.strField;
+
+/// The dock's geometry, the one place it is derived: a pill is a toolkit
+/// button (`controlHeight`), the dock pads it top and bottom and wears a
+/// rule against the desktop. `settledWorkArea` asks here.
+pub const dock_vpad = 8;
+pub fn pillHeight() usize {
+    return ui.paint.controlHeight(wf.brush());
+}
+pub fn dockHeight() usize {
+    return pillHeight() + 2 * dock_vpad + pal.border_w;
+}
 
 // ----------------------------------------------------------- the dock
 
@@ -58,7 +65,7 @@ fn renderDock(tree: Value) void {
     const fitted = @min(natural_width, available);
     total = fitted + gaps;
     var before: usize = 0;
-    const pill_h = lineOf(R_UI) + 2 * item_vpad;
+    const pill_h = pillHeight();
     const py = if (wf.win_h > pill_h) (wf.win_h - pill_h) / 2 else 0;
     var x: usize = if (wf.win_w > total) (wf.win_w - total) / 2 else dock_gap;
     for (items) |item| {
@@ -66,7 +73,7 @@ fn renderDock(tree: Value) void {
         const r = item.record;
         const title = strField(r, "title");
         const unit = strField(r, "unit");
-        const running = r.get("running") != null and (r.get("running").?).asBool();
+        const running = core.boolField(r, "running", false);
         const natural = iconLabelWidth(r, "title") + 2 * dock_hpad;
         const w = ui.flow.trackWidth(fitted, natural_width, before, natural);
         before += natural;
@@ -75,6 +82,7 @@ fn renderDock(tree: Value) void {
         // the windows do; a running app's pill takes the primary fill.
         ui.paint.button(wf.brush(), .{ .x = x, .y = py, .w = w, .h = pill_h }, strField(r, "title"), ui.icons.parse(strField(r, "icon")), .{ .primary = running, .pill = true });
         if (running and wf.win_h > 4) fillDot(x + w / 2, wf.win_h - 4, 2, pal.primary);
+        if (dock_nitems == dock_items.len) core.warnLimit("dock pills", dock_items.len, unit);
         if (dock_nitems < dock_items.len) {
             // Log a pill's running state only when it flips (never the
             // first render's baseline), so a launch lights the dot and an
@@ -132,15 +140,14 @@ pub fn runDock(it: *mshl.Interp, view: Value, update: Value, init_state: Value, 
     wf.fontReady();
     _ = wf.refreshAppearance();
     wf.useOrdinaryChannel();
-    const pill_h = lineOf(R_UI) + 2 * item_vpad;
     wf.win_w = wf.scanout_w;
-    wf.win_h = pill_h + 2 * dock_vpad + pal.border_w;
+    wf.win_h = dockHeight();
     wf.win_x = 0;
     wf.win_y = if (wf.scanout_h > wf.win_h) wf.scanout_h - wf.win_h else 0;
     wf.dragging = false;
     wf.ptr_down = false;
     if (!wf.openSurface(false)) return it.fail("gui: cannot open the dock surface", .{});
-    declareStrut(1, wf.win_h);
+    declareStrut(shared.strut_bottom, wf.win_h);
     defer wf.closeSurface();
 
     var state = init_state;
@@ -164,7 +171,7 @@ pub fn runDock(it: *mshl.Interp, view: Value, update: Value, init_state: Value, 
             wf.win_h = dockHeight();
             wf.win_y = wf.scanout_h - wf.win_h;
             if (!wf.openSurfaceFocused(false, false)) return it.fail("gui: cannot resize desktop chrome", .{});
-            declareStrut(1, wf.win_h);
+            declareStrut(shared.strut_bottom, wf.win_h);
             announced = false; // hit boxes moved with the new scale
         }
         renderDock(tree);

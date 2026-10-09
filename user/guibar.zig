@@ -51,6 +51,12 @@ const strW = core.strW;
 
 pub const bar_vpad = 8;
 const menu_hpad = 12;
+/// The popup panel's corner: a sheet's, not a control's.
+const pop_radius = 8;
+/// The bar's height, the one place it is derived (`settledWorkArea` asks).
+pub fn barHeight() usize {
+    return lineOf(R_UI) + 2 * bar_vpad + pal.border_w;
+}
 
 const MenuHit = struct {
     id: []const u8,
@@ -171,9 +177,9 @@ fn drawBarItem(item: Value, x: usize, cy: usize) usize {
             const items: []const Value = if (rec.get("items")) |iv| (if (iv == .list) iv.list else &.{}) else &.{};
             bar_menus[bar_nmenus] = .{ .id = id, .bx = x, .bw = width, .items = items };
             bar_nmenus += 1;
-        }
+        } else core.warnLimit("bar menus", bar_menus.len, id);
     } else {
-        const muted = if (rec.get("muted")) |v| v.asBool() else false;
+        const muted = core.boolField(rec, "muted", false);
         drawStr(x + menu_hpad, cy, R_UI, strField(rec, "text"), if (muted) pal.text_muted else pal.text, pal.surface);
     }
     return width;
@@ -269,13 +275,16 @@ fn popEntryHeight(p: *const Popup, index: usize) usize {
 /// Rows from `first` that fit the popup's height (its surface is sized
 /// once; scrolling changes which rows show, not the surface).
 fn popVisible(p: *const Popup) usize {
-    var y: usize = pop_margin + (if (p.first > 0) arrowHeight() else 0);
+    return popVisibleFrom(p, p.first);
+}
+fn popVisibleFrom(p: *const Popup, first: usize) usize {
+    var y: usize = pop_margin + (if (first > 0) arrowHeight() else 0);
     var n: usize = 0;
-    while (p.first + n < p.count) : (n += 1) {
-        const more_after = p.first + n + 1 < p.count;
+    while (first + n < p.count) : (n += 1) {
+        const more_after = first + n + 1 < p.count;
         const tail = pop_margin + (if (more_after) arrowHeight() else 0);
-        if (y + popEntryHeight(p, p.first + n) + tail > p.h) break;
-        y += popEntryHeight(p, p.first + n);
+        if (y + popEntryHeight(p, first + n) + tail > p.h) break;
+        y += popEntryHeight(p, first + n);
     }
     return n;
 }
@@ -321,7 +330,7 @@ fn renderPopup(p: *Popup) void {
     // it through the bar's clip left every row below the bar's height black.)
     const saved = wf.retarget(p.px, p.w, p.h);
     defer wf.restoreTarget(saved);
-    panel(0, 0, p.w, p.h, 8, pal.surface, pal.border, pal.border_w);
+    panel(0, 0, p.w, p.h, pop_radius, pal.surface, pal.border, pal.border_w);
     // The rows are the toolkit's (`paint.menuItem`), so a popup here and
     // any other menu a program paints are the same rows.
     const b = wf.brush();
@@ -372,9 +381,7 @@ fn scrollPopup(p: *Popup, delta: isize) void {
     p.first = @intCast(std.math.clamp(next, 0, @as(isize, @intCast(max_first))));
     // Never scroll past the point where the last row shows.
     while (p.first > 0 and p.first + popVisible(p) >= p.count and popVisible(p) < p.count) {
-        var probe = p.*;
-        probe.first -= 1;
-        if (probe.first + popVisible(&probe) < p.count) break;
+        if (p.first - 1 + popVisibleFrom(p, p.first - 1) < p.count) break;
         p.first -= 1;
     }
     logScroll(p);
@@ -400,7 +407,9 @@ fn fillFromMenu(p: *Popup, m: MenuHit) void {
         fillFromSlot(p, slot);
         return;
     }
-    const n = @min(if (m.app_items.len > 0) m.app_items.len else m.items.len, p.entries.len);
+    const total = if (m.app_items.len > 0) m.app_items.len else m.items.len;
+    if (total > p.entries.len) core.warnLimit("menu rows", p.entries.len, m.id);
+    const n = @min(total, p.entries.len);
     for (0..n) |i| {
         var entry: PopupItem = .{};
         // A bar item is a string (an event for the script) or a record
@@ -444,11 +453,8 @@ fn openPopupAt(p: *Popup, level: usize, x: usize, y_wanted: usize, avail_h: usiz
         p.selected = i;
     };
     var maxw: usize = 80;
-    for (p.entries[0..p.count]) |entry| {
-        const extra: usize = if (entry.sub != 0) lineOf(R_UI) else if (entry.shortcut.len > 0) strW(R_UI, entry.shortcut) + 24 else 0;
-        maxw = @max(maxw, strW(R_UI, entry.label[0..entry.len]) + extra);
-    }
-    p.w = @min(maxw + 2 * menu_hpad, wf.scanout_w);
+    for (p.entries[0..p.count]) |entry| maxw = @max(maxw, ui.paint.menuItemWidth(wf.brush(), entry.label[0..entry.len], entry.shortcut, entry.sub != 0));
+    p.w = @min(maxw, wf.scanout_w);
     const natural = popNaturalHeight(p);
     p.h = @min(natural, @max(avail_h, 2 * pop_margin + 2 * arrowHeight() + pop_item_h));
     if (p.h < 2 * pop_margin + pop_item_h) return;
@@ -617,14 +623,14 @@ pub fn runBar(it: *mshl.Interp, view: Value, update: Value, init_state: Value) m
     wf.win_x = 0;
     wf.win_y = 0;
     wf.win_w = wf.scanout_w;
-    wf.win_h = lineOf(R_UI) + 2 * bar_vpad + pal.border_w;
+    wf.win_h = barHeight();
     wf.dragging = false;
     wf.ptr_down = false;
     pops = @splat(.{});
     bar_app = .{};
     if (!wf.openSurface(false)) return it.fail("gui: cannot open the bar surface", .{});
     _ = usys.callTyped(shared.GpuReq, shared.GpuResp, core.output_control, .{ .menu_bar = .{ .surface = wf.surf } }, 0);
-    declareStrut(0, wf.win_h);
+    declareStrut(shared.strut_top, wf.win_h);
     declareGround();
     defer wf.closeSurface();
     defer closeLevelsFrom(0);
@@ -642,10 +648,10 @@ pub fn runBar(it: *mshl.Interp, view: Value, update: Value, init_state: Value) m
             wf.closeSurface();
             wf.ptr_down = false; // the old surface's queue went with it
             wf.win_w = wf.scanout_w;
-            wf.win_h = lineOf(R_UI) + 2 * bar_vpad + pal.border_w;
+            wf.win_h = barHeight();
             if (!wf.openSurfaceFocused(false, false)) return it.fail("gui: cannot resize desktop chrome", .{});
             _ = usys.callTyped(shared.GpuReq, shared.GpuResp, core.output_control, .{ .menu_bar = .{ .surface = wf.surf } }, 0);
-            declareStrut(0, wf.win_h);
+            declareStrut(shared.strut_top, wf.win_h);
             announced = false;
             bar_dirty = true;
         }
