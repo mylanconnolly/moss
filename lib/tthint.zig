@@ -360,30 +360,114 @@ pub const Hinter = struct {
                     try self.push(a2);
                 },
                 // ---- arithmetic / logic ----
-                0x60 => { const b = try self.pop(); const a2 = try self.pop(); try self.push(a2 +% b); }, // ADD
-                0x61 => { const b = try self.pop(); const a2 = try self.pop(); try self.push(a2 -% b); }, // SUB
-                0x62 => { const b = try self.pop(); const a2 = try self.pop(); if (b == 0) return Error.Hint; try self.push(@intCast(mulDiv(a2, 64, b))); }, // DIV (26.6)
-                0x63 => { const b = try self.pop(); const a2 = try self.pop(); try self.push(@intCast(mulDiv(a2, b, 64))); }, // MUL (26.6)
-                0x64 => { const a2 = try self.pop(); try self.push(if (a2 < 0) -a2 else a2); }, // ABS
-                0x65 => { const a2 = try self.pop(); try self.push(-a2); }, // NEG
-                0x66 => { const a2 = try self.pop(); try self.push(a2 & ~@as(i32, 63)); }, // FLOOR
-                0x67 => { const a2 = try self.pop(); try self.push((a2 + 63) & ~@as(i32, 63)); }, // CEILING
-                0x50 => { const b = try self.pop(); const a2 = try self.pop(); try self.push(@intFromBool(a2 < b)); }, // LT
-                0x51 => { const b = try self.pop(); const a2 = try self.pop(); try self.push(@intFromBool(a2 <= b)); }, // LTEQ
-                0x52 => { const b = try self.pop(); const a2 = try self.pop(); try self.push(@intFromBool(a2 > b)); }, // GT
-                0x53 => { const b = try self.pop(); const a2 = try self.pop(); try self.push(@intFromBool(a2 >= b)); }, // GTEQ
-                0x54 => { const b = try self.pop(); const a2 = try self.pop(); try self.push(@intFromBool(a2 == b)); }, // EQ
-                0x55 => { const b = try self.pop(); const a2 = try self.pop(); try self.push(@intFromBool(a2 != b)); }, // NEQ
-                0x56 => { const a2 = try self.pop(); try self.push(@intFromBool(@rem(@divTrunc(a2 + 32, 64), 2) != 0)); }, // ODD (rounded)
-                0x57 => { const a2 = try self.pop(); try self.push(@intFromBool(@rem(@divTrunc(a2 + 32, 64), 2) == 0)); }, // EVEN
-                0x5A => { const b = try self.pop(); const a2 = try self.pop(); try self.push(@intFromBool(a2 != 0 and b != 0)); }, // AND
-                0x5B => { const b = try self.pop(); const a2 = try self.pop(); try self.push(@intFromBool(a2 != 0 or b != 0)); }, // OR
-                0x5C => { const a2 = try self.pop(); try self.push(@intFromBool(a2 == 0)); }, // NOT
-                0x8B => { const b = try self.pop(); const a2 = try self.pop(); try self.push(@max(a2, b)); }, // MAX
-                0x8C => { const b = try self.pop(); const a2 = try self.pop(); try self.push(@min(a2, b)); }, // MIN
+                0x60 => {
+                    const b = try self.pop();
+                    const a2 = try self.pop();
+                    try self.push(a2 +% b);
+                }, // ADD
+                0x61 => {
+                    const b = try self.pop();
+                    const a2 = try self.pop();
+                    try self.push(a2 -% b);
+                }, // SUB
+                0x62 => {
+                    const b = try self.pop();
+                    const a2 = try self.pop();
+                    if (b == 0) return Error.Hint;
+                    try self.push(@intCast(mulDiv(a2, 64, b)));
+                }, // DIV (26.6)
+                0x63 => {
+                    const b = try self.pop();
+                    const a2 = try self.pop();
+                    try self.push(@intCast(mulDiv(a2, b, 64)));
+                }, // MUL (26.6)
+                0x64 => {
+                    const a2 = try self.pop();
+                    try self.push(if (a2 < 0) -a2 else a2);
+                }, // ABS
+                0x65 => {
+                    const a2 = try self.pop();
+                    try self.push(-a2);
+                }, // NEG
+                0x66 => {
+                    const a2 = try self.pop();
+                    try self.push(a2 & ~@as(i32, 63));
+                }, // FLOOR
+                0x67 => {
+                    const a2 = try self.pop();
+                    try self.push((a2 + 63) & ~@as(i32, 63));
+                }, // CEILING
+                0x50 => {
+                    const b = try self.pop();
+                    const a2 = try self.pop();
+                    try self.push(@intFromBool(a2 < b));
+                }, // LT
+                0x51 => {
+                    const b = try self.pop();
+                    const a2 = try self.pop();
+                    try self.push(@intFromBool(a2 <= b));
+                }, // LTEQ
+                0x52 => {
+                    const b = try self.pop();
+                    const a2 = try self.pop();
+                    try self.push(@intFromBool(a2 > b));
+                }, // GT
+                0x53 => {
+                    const b = try self.pop();
+                    const a2 = try self.pop();
+                    try self.push(@intFromBool(a2 >= b));
+                }, // GTEQ
+                0x54 => {
+                    const b = try self.pop();
+                    const a2 = try self.pop();
+                    try self.push(@intFromBool(a2 == b));
+                }, // EQ
+                0x55 => {
+                    const b = try self.pop();
+                    const a2 = try self.pop();
+                    try self.push(@intFromBool(a2 != b));
+                }, // NEQ
+                0x56 => {
+                    const a2 = try self.pop();
+                    try self.push(@intFromBool(@rem(@divTrunc(a2 + 32, 64), 2) != 0));
+                }, // ODD (rounded)
+                0x57 => {
+                    const a2 = try self.pop();
+                    try self.push(@intFromBool(@rem(@divTrunc(a2 + 32, 64), 2) == 0));
+                }, // EVEN
+                0x5A => {
+                    const b = try self.pop();
+                    const a2 = try self.pop();
+                    try self.push(@intFromBool(a2 != 0 and b != 0));
+                }, // AND
+                0x5B => {
+                    const b = try self.pop();
+                    const a2 = try self.pop();
+                    try self.push(@intFromBool(a2 != 0 or b != 0));
+                }, // OR
+                0x5C => {
+                    const a2 = try self.pop();
+                    try self.push(@intFromBool(a2 == 0));
+                }, // NOT
+                0x8B => {
+                    const b = try self.pop();
+                    const a2 = try self.pop();
+                    try self.push(@max(a2, b));
+                }, // MAX
+                0x8C => {
+                    const b = try self.pop();
+                    const a2 = try self.pop();
+                    try self.push(@min(a2, b));
+                }, // MIN
                 // ---- rounding ops ----
-                0x68, 0x69, 0x6A, 0x6B => { const a2 = try self.pop(); try self.push(self.roundValue(a2)); }, // ROUND[ab]
-                0x6C, 0x6D, 0x6E, 0x6F => { const a2 = try self.pop(); try self.push(a2); }, // NROUND[ab]
+                0x68, 0x69, 0x6A, 0x6B => {
+                    const a2 = try self.pop();
+                    try self.push(self.roundValue(a2));
+                }, // ROUND[ab]
+                0x6C, 0x6D, 0x6E, 0x6F => {
+                    const a2 = try self.pop();
+                    try self.push(a2);
+                }, // NROUND[ab]
                 // ---- control flow ----
                 0x58 => { // IF
                     const cond = try self.pop();
@@ -425,11 +509,34 @@ pub const Hinter = struct {
                     while (count > 0) : (count -= 1) try self.callFn(fn_no);
                 },
                 // ---- storage / CVT ----
-                0x42 => { const v = try self.pop(); const idx: usize = @intCast(try self.pop()); if (idx >= self.storage.len) return Error.Hint; self.storage[idx] = v; }, // WS
-                0x43 => { const idx: usize = @intCast(try self.pop()); if (idx >= self.storage.len) return Error.Hint; try self.push(self.storage[idx]); }, // RS
-                0x44 => { const v = try self.pop(); const idx: usize = @intCast(try self.pop()); if (idx >= self.cvt.len) return Error.Hint; self.cvt[idx] = v; }, // WCVTP (pixels)
-                0x70 => { const v = try self.pop(); const idx: usize = @intCast(try self.pop()); if (idx >= self.cvt.len) return Error.Hint; self.cvt[idx] = self.scaleFUnit(v); }, // WCVTF (funits)
-                0x45 => { const idx: usize = @intCast(try self.pop()); if (idx >= self.cvt.len) return Error.Hint; try self.push(self.cvt[idx]); }, // RCVT
+                0x42 => {
+                    const v = try self.pop();
+                    const idx: usize = @intCast(try self.pop());
+                    if (idx >= self.storage.len) return Error.Hint;
+                    self.storage[idx] = v;
+                }, // WS
+                0x43 => {
+                    const idx: usize = @intCast(try self.pop());
+                    if (idx >= self.storage.len) return Error.Hint;
+                    try self.push(self.storage[idx]);
+                }, // RS
+                0x44 => {
+                    const v = try self.pop();
+                    const idx: usize = @intCast(try self.pop());
+                    if (idx >= self.cvt.len) return Error.Hint;
+                    self.cvt[idx] = v;
+                }, // WCVTP (pixels)
+                0x70 => {
+                    const v = try self.pop();
+                    const idx: usize = @intCast(try self.pop());
+                    if (idx >= self.cvt.len) return Error.Hint;
+                    self.cvt[idx] = self.scaleFUnit(v);
+                }, // WCVTF (funits)
+                0x45 => {
+                    const idx: usize = @intCast(try self.pop());
+                    if (idx >= self.cvt.len) return Error.Hint;
+                    try self.push(self.cvt[idx]);
+                }, // RCVT
                 // ---- graphics-state setters ----
                 0x00, 0x01 => { // SVTCA[a]: set both vectors to an axis
                     const axis_x = (op & 1) != 0;
@@ -438,13 +545,35 @@ pub const Hinter = struct {
                     self.gs.fv = v;
                     self.gs.dv = v;
                 },
-                0x02, 0x03 => { const axis_x = (op & 1) != 0; self.gs.pv = axisVec(axis_x); self.gs.dv = self.gs.pv; }, // SPVTCA
-                0x04, 0x05 => { const axis_x = (op & 1) != 0; self.gs.fv = axisVec(axis_x); }, // SFVTCA
+                0x02, 0x03 => {
+                    const axis_x = (op & 1) != 0;
+                    self.gs.pv = axisVec(axis_x);
+                    self.gs.dv = self.gs.pv;
+                }, // SPVTCA
+                0x04, 0x05 => {
+                    const axis_x = (op & 1) != 0;
+                    self.gs.fv = axisVec(axis_x);
+                }, // SFVTCA
                 0x06, 0x07, 0x08, 0x09, 0x86, 0x87 => try self.setVectorToLine(op), // SPVTL/SFVTL/SDPVTL
-                0x0A => { const y = try self.pop(); const x = try self.pop(); self.gs.pv = normalize(x, y); self.gs.dv = self.gs.pv; }, // SPVFS
-                0x0B => { const y = try self.pop(); const x = try self.pop(); self.gs.fv = normalize(x, y); }, // SFVFS
-                0x0C => { try self.push(self.gs.pv.x); try self.push(self.gs.pv.y); }, // GPV
-                0x0D => { try self.push(self.gs.fv.x); try self.push(self.gs.fv.y); }, // GFV
+                0x0A => {
+                    const y = try self.pop();
+                    const x = try self.pop();
+                    self.gs.pv = normalize(x, y);
+                    self.gs.dv = self.gs.pv;
+                }, // SPVFS
+                0x0B => {
+                    const y = try self.pop();
+                    const x = try self.pop();
+                    self.gs.fv = normalize(x, y);
+                }, // SFVFS
+                0x0C => {
+                    try self.push(self.gs.pv.x);
+                    try self.push(self.gs.pv.y);
+                }, // GPV
+                0x0D => {
+                    try self.push(self.gs.fv.x);
+                    try self.push(self.gs.fv.y);
+                }, // GFV
                 0x0E => self.gs.fv = self.gs.pv, // SFVTPV
                 0x10 => self.gs.rp0 = try self.popU(), // SRP0
                 0x11 => self.gs.rp1 = try self.popU(), // SRP1
@@ -452,7 +581,12 @@ pub const Hinter = struct {
                 0x13 => self.gs.zp0 = try self.popZone(), // SZP0
                 0x14 => self.gs.zp1 = try self.popZone(), // SZP1
                 0x15 => self.gs.zp2 = try self.popZone(), // SZP2
-                0x16 => { const z = try self.popZone(); self.gs.zp0 = z; self.gs.zp1 = z; self.gs.zp2 = z; }, // SZPS
+                0x16 => {
+                    const z = try self.popZone();
+                    self.gs.zp0 = z;
+                    self.gs.zp1 = z;
+                    self.gs.zp2 = z;
+                }, // SZPS
                 0x17 => self.gs.loop = try self.pop(), // SLOOP
                 0x18 => self.gs.round = .grid, // RTG
                 0x19 => self.gs.round = .half_grid, // RTHG
@@ -470,7 +604,11 @@ pub const Hinter = struct {
                 0x4E => self.gs.auto_flip = false, // FLIPOFF
                 0x5E => self.gs.delta_base = try self.popU(), // SDB
                 0x5F => self.gs.delta_shift = try self.popU(), // SDS
-                0x8E => { const sel = try self.pop(); const val = try self.pop(); if (sel == 1 or sel == 2 or sel == 3) self.gs.instruct_control = @intCast(val & 0xff); }, // INSTCTRL
+                0x8E => {
+                    const sel = try self.pop();
+                    const val = try self.pop();
+                    if (sel == 1 or sel == 2 or sel == 3) self.gs.instruct_control = @intCast(val & 0xff);
+                }, // INSTCTRL
                 0x85 => _ = try self.pop(), // SCANCTRL (grayscale: ignore)
                 0x8D => _ = try self.pop(), // SCANTYPE
                 0x7E => _ = try self.pop(), // SANGW (obsolete)
@@ -478,8 +616,15 @@ pub const Hinter = struct {
                 // ---- measurement ----
                 0x4B => try self.push(@intCast(self.ppem)), // MPPEM
                 0x4C => try self.push(@intCast(self.ppem * 64)), // MPS (point size ~ ppem)
-                0x88 => { const sel = try self.pop(); try self.push(getInfo(sel)); }, // GETINFO
-                0x91 => { _ = try self.pop(); try self.push(0); try self.push(0); }, // GETVARIATION (no variations)
+                0x88 => {
+                    const sel = try self.pop();
+                    try self.push(getInfo(sel));
+                }, // GETINFO
+                0x91 => {
+                    _ = try self.pop();
+                    try self.push(0);
+                    try self.push(0);
+                }, // GETVARIATION (no variations)
                 0x46, 0x47 => try self.opGC(op), // GC
                 0x49, 0x4A => try self.opMD(op), // MD
                 // ---- point movement (used mostly by glyph programs) ----
@@ -542,12 +687,19 @@ pub const Hinter = struct {
         }
         const v = normalize(dx, dy);
         switch (op) {
-            0x06, 0x07 => { self.gs.pv = v; self.gs.dv = v; },
+            0x06, 0x07 => {
+                self.gs.pv = v;
+                self.gs.dv = v;
+            },
             0x08, 0x09 => self.gs.fv = v,
             else => { // SDPVTL: dual set from ORIGINAL coords
                 var odx = za.org[p2][0] - zb.org[p1][0];
                 var ody = za.org[p2][1] - zb.org[p1][1];
-                if (perp) { const t = odx; odx = -ody; ody = t; }
+                if (perp) {
+                    const t = odx;
+                    odx = -ody;
+                    ody = t;
+                }
                 self.gs.dv = normalize(odx, ody);
                 self.gs.pv = v;
             },
@@ -812,8 +964,14 @@ pub const Hinter = struct {
             const pi: usize = @intCast(try self.popU());
             if (pi >= zp2.n) return Error.Hint;
             // move along the freedom vector by `amt` pixels
-            if (self.gs.fv.x != 0) { zp2.cur[pi][0] += @intCast(mul214(amt, self.gs.fv.x)); zp2.flags[pi] |= flag_touch_x; }
-            if (self.gs.fv.y != 0) { zp2.cur[pi][1] += @intCast(mul214(amt, self.gs.fv.y)); zp2.flags[pi] |= flag_touch_y; }
+            if (self.gs.fv.x != 0) {
+                zp2.cur[pi][0] += @intCast(mul214(amt, self.gs.fv.x));
+                zp2.flags[pi] |= flag_touch_x;
+            }
+            if (self.gs.fv.y != 0) {
+                zp2.cur[pi][1] += @intCast(mul214(amt, self.gs.fv.y));
+                zp2.flags[pi] |= flag_touch_y;
+            }
         }
     }
 
