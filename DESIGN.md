@@ -4621,8 +4621,12 @@ pixel-tested, as functions of columns, cells and labels. The runtime
 keeps what only it has: the list's scroll and selection state, the clip
 to the viewport, the hit boxes, and the extraction of cells from the
 script's rows (a sparkline's samples are copied out of the mshl list
-into a stack buffer, 120 at most). With this, nothing a `gui` window
-paints is painted in guicmds any more except the meter and the chart.
+into a stack buffer, 120 at most). The meter and the chart followed
+the same evening (`paint.meters`, `paint.chart`, pixel-tested: the
+fill to the reading, danger past 80%, the caption; the panel, the
+grid, bars at the right edge). With this, nothing a `gui` window
+paints is painted in guicmds any more: every leaf is a toolkit painter
+and the runtime is state, extraction and binding.
 
 ### GUIs in mshl
 

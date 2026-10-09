@@ -434,6 +434,75 @@ pub fn breadcrumbHit(b: Brush, width: usize, labels: []const []const u8, x: usiz
     return null;
 }
 
+// -------------------------------------------------------- meters, charts
+
+/// One meter row: its label and its reading in permille.
+pub const Meter = struct { label: []const u8, value: u16 };
+pub fn meterRowHeight(b: Brush) usize {
+    return b.line() + 4;
+}
+/// Stacked meters: the label at the left, a rounded bar filled to the
+/// reading in the primary colour (danger past 80%), the percentage at
+/// the right. Each row a text line tall; `r.w` is the row width.
+pub fn meters(b: Brush, r: Rect, rows: []const Meter, ground: u32) void {
+    const p = b.pal;
+    const line = b.line();
+    const row_h = meterRowHeight(b);
+    var label_w: usize = b.width("C00");
+    for (rows) |m| label_w = @max(label_w, b.width(m.label));
+    label_w += 8;
+    const caption_w = b.width("100%") + 6;
+    const bar_x = r.x + label_w;
+    const bar_w = r.w -| (label_w + caption_w);
+    const bar_h = @max(line / 2, 6);
+    for (rows, 0..) |m, i| {
+        const ry = r.y + i * row_h;
+        const v: usize = @min(m.value, 1000);
+        b.face.drawTrunc(b.canvas, r.x, ry, .ui, m.label, label_w -| 4, p.text_muted, ground);
+        const by = ry + (line -| bar_h) / 2;
+        b.canvas.fillRoundRect(bar_x, by, bar_w, bar_h, bar_h / 2, p.surface_hi);
+        const filled = bar_w * v / 1000;
+        if (filled > 0) b.canvas.fillRoundRect(bar_x, by, @max(filled, bar_h), bar_h, bar_h / 2, if (v > 800) p.danger else p.primary);
+        var cb: [8]u8 = undefined;
+        const caption = std.fmt.bufPrint(&cb, "{d}%", .{v / 10}) catch "";
+        b.face.drawTrunc(b.canvas, bar_x + bar_w + caption_w -| b.width(caption), ry, .ui, caption, caption_w, p.text, ground);
+    }
+}
+
+/// A history chart: an inset panel with the title (muted) at the left
+/// and the current reading at the right, a grid at quarters, and one
+/// bar per permille sample, newest at the right edge — a young history
+/// grows in from the right (30 slots at least). Loads past 80% paint in
+/// the danger colour.
+pub fn chart(b: Brush, r: Rect, title: []const u8, caption: []const u8, samples: []const u16) void {
+    const p = b.pal;
+    const line = b.line();
+    b.canvas.panel(r.x, r.y, r.w, r.h, control.radius, p.field_bg, p.border, p.border_w);
+    b.face.drawTrunc(b.canvas, r.x + 10, r.y + 6, .ui, title, r.w / 2, p.text_muted, p.field_bg);
+    b.face.drawTrunc(b.canvas, r.x + r.w -| (10 + b.width(caption)), r.y + 6, .ui, caption, r.w / 2, p.text, p.field_bg);
+    const px = r.x + 10;
+    const py = r.y + line + 12;
+    const pw = r.w -| 20;
+    const ph = (r.y + r.h -| 8) -| py;
+    if (ph < 8 or pw < 8) return;
+    for (1..4) |q| b.canvas.fillRect(px, py + ph * q / 4, pw, 1, p.border);
+    const n = samples.len;
+    if (n == 0) return;
+    const slots = @max(n, 30);
+    const cw = @max(pw / slots, 1);
+    const fill = palette.shade(p.primary, 2, 5);
+    for (samples, 0..) |sample, i| {
+        const v: usize = @min(sample, 1000);
+        const bar = ph * v / 1000;
+        const cx = px + pw -| (n - i) * cw;
+        if (bar > 0) {
+            const ink = if (v > 800) p.danger else p.primary;
+            b.canvas.fillRect(cx, py + ph - bar, cw, bar, if (v > 800) palette.shade(p.danger, 2, 5) else fill);
+            b.canvas.fillRect(cx, py + ph - bar, cw, @min(2, bar), ink);
+        }
+    }
+}
+
 // ------------------------------------------------------------ tab strip
 
 pub const TabItem = struct { label: []const u8, dirty: bool = false, closable: bool = true };
@@ -863,4 +932,30 @@ test "breadcrumbs flow, link every ancestor, ring the focused one, and hit-test 
     try std.testing.expectEqual(@as(?usize, null), breadcrumbHit(b, 300, &labels, last.x + 4, 4)); // not a link
     // Too narrow for one line: the strip wraps.
     try std.testing.expect(breadcrumbs(b, .{ .x = 0, .y = 0, .w = 70, .h = 60 }, &labels, null, 0x010101).h > crumbHeight(b));
+}
+
+test "meters fill to their reading, turn to danger past 80%, and caption the percentage; a chart bars its history" {
+    var bench: Bench = .{};
+    const b = bench.brush();
+    const p = b.pal;
+    const rows = [_]Meter{ .{ .label = "C0", .value = 500 }, .{ .label = "C1", .value = 950 } };
+    const r: Rect = .{ .x = 0, .y = 0, .w = 200, .h = 60 };
+    meters(b, r, &rows, 0x010101);
+    const row_h = meterRowHeight(b);
+    try std.testing.expect(countColor(&bench.canvas, .{ .x = 0, .y = 0, .w = 200, .h = row_h }, p.primary) > 0);
+    try std.testing.expectEqual(@as(usize, 0), countColor(&bench.canvas, .{ .x = 0, .y = 0, .w = 200, .h = row_h }, p.danger));
+    try std.testing.expect(countColor(&bench.canvas, .{ .x = 0, .y = row_h, .w = 200, .h = row_h }, p.danger) > 0);
+    // The half-full bar's fill ends before the track does.
+    const track_end = 200 - (b.width("100%") + 6);
+    try std.testing.expect(countColor(&bench.canvas, .{ .x = track_end - 20, .y = 0, .w = 10, .h = row_h }, p.surface_hi) > 0);
+    try std.testing.expect(countColor(&bench.canvas, r, p.text) > 0); // the captions
+    bench.canvas.fillAll(0x010101);
+    const samples = [_]u16{ 200, 600, 900 };
+    const cr: Rect = .{ .x = 0, .y = 0, .w = 200, .h = 60 };
+    chart(b, cr, "cpu", "90%", &samples);
+    try std.testing.expectEqual(p.border, bench.canvas.at(100, 0)); // the panel's edge
+    try std.testing.expect(countColor(&bench.canvas, cr, p.primary) > 0); // bar tops
+    try std.testing.expect(countColor(&bench.canvas, cr, p.danger) > 0); // the 90% sample
+    // Bars sit at the right edge: the left half of the plot has none.
+    try std.testing.expectEqual(@as(usize, 0), countColor(&bench.canvas, .{ .x = 10, .y = 30, .w = 80, .h = 20 }, p.primary));
 }

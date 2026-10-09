@@ -1318,71 +1318,42 @@ fn layoutChart(rec: mshl.Record, x: usize, y: usize, avail_w: usize, avail_h: us
     const h: usize = @max(@as(usize, @intCast(std.math.clamp(intField(rec, "h", 100), 40, 400))), avail_h);
     const w = avail_w;
     if (!paint or w < 24) return .{ .w = w, .h = h };
-    const line = lineOf(R_UI);
-    panel(x, y, w, h, r_field, pal.field_bg, pal.border, pal.border_w);
-    const title = strField(rec, "title");
-    const caption = strField(rec, "caption");
-    drawStrTrunc(x + 10, y + 6, R_UI, title, w / 2, pal.text_muted, pal.field_bg);
-    drawStrTrunc(x + w -| (10 + strW(R_UI, caption)), y + 6, R_UI, caption, w / 2, pal.text, pal.field_bg);
-    const px = x + 10;
-    const py = y + line + 12;
-    const pw = w -| 20;
-    const ph = (y + h -| 8) -| py;
-    if (ph < 8 or pw < 8) return .{ .w = w, .h = h };
-    // The grid: quarter lines.
-    for (1..4) |q| fillRect(px, py + ph * q / 4, pw, 1, pal.border);
+    // The toolkit paints it; the samples are copied out of the script's list.
     const values = rec.get("values") orelse Value.nothing;
-    const n = sampleCount(values);
-    if (n == 0) return .{ .w = w, .h = h };
-    const slots = @max(n, 30); // a young history grows in from the right
-    const cw = @max(pw / slots, 1);
-    const fill = ui.palette.shade(pal.primary, 2, 5);
-    for (0..n) |i| {
-        const v = sampleAt(values, i);
-        const bar = ph * v / 1000;
-        const cx = px + pw -| (n - i) * cw;
-        if (bar > 0) {
-            const ink = if (v > 800) pal.danger else pal.primary;
-            fillRect(cx, py + ph - bar, cw, bar, if (v > 800) ui.palette.shade(pal.danger, 2, 5) else fill);
-            fillRect(cx, py + ph - bar, cw, @min(2, bar), ink);
-        }
-    }
+    var samples: [max_chart_samples]u16 = undefined;
+    const n = @min(sampleCount(values), max_chart_samples);
+    for (0..n) |i| samples[i] = @intCast(@min(sampleAt(values, i), 1000));
+    ui.paint.chart(wf.brush(), .{ .x = x, .y = y, .w = w, .h = h }, strField(rec, "title"), strField(rec, "caption"), samples[0..n]);
     return .{ .w = w, .h = h };
 }
+/// Samples a chart keeps (the newest); Activity's histories are 60–120.
+const max_chart_samples = 240;
 
 /// `{ kind: "meter", label, value }` or `{ kind: "meter", labels: "C",
 /// values: [permille…] }`: one bar per value, its label at the left and
 /// its percentage at the right, the fill in the primary colour and in
 /// the danger colour past 80%. Rows stack; each is a text line tall.
 fn layoutMeter(rec: mshl.Record, x: usize, y: usize, avail_w: usize, paint: bool) Size {
-    const line = lineOf(R_UI);
-    const row_h = line + 4;
+    const row_h = ui.paint.meterRowHeight(wf.brush());
     const values = rec.get("values") orelse Value.nothing;
-    const n = if (values == .list) values.list.len else 1;
+    const n = if (values == .list) @min(values.list.len, max_meters) else 1;
     const h = n * row_h;
     if (!paint or avail_w < 40) return .{ .w = avail_w, .h = h };
+    // The rows as the toolkit sees them: a label (the prefix + index for a
+    // list of values) and a permille reading.
     const prefix = strField(rec, "labels");
-    const label_w = @max(strW(R_UI, "C00"), strW(R_UI, strField(rec, "label"))) + 8;
-    const caption_w = strW(R_UI, "100%") + 6;
-    const bar_x = x + label_w;
-    const bar_w = avail_w -| (label_w + caption_w);
-    const bar_h = @max(line / 2, 6);
+    var labels: [max_meters][16]u8 = undefined;
+    var rows: [max_meters]ui.paint.Meter = undefined;
     for (0..n) |i| {
-        const ry = y + i * row_h;
         const v: usize = if (values == .list) sampleAt(values, i) else @intCast(std.math.clamp(intField(rec, "value", 0), 0, 1000));
-        var lb: [24]u8 = undefined;
-        const label = if (values == .list) (std.fmt.bufPrint(&lb, "{s}{d}", .{ prefix, i }) catch "") else strField(rec, "label");
-        drawStrTrunc(x, ry, R_UI, label, label_w -| 4, pal.text_muted, content_bg);
-        const by = ry + (line -| bar_h) / 2;
-        fillRoundRect(bar_x, by, bar_w, bar_h, bar_h / 2, pal.surface_hi);
-        const filled = bar_w * v / 1000;
-        if (filled > 0) fillRoundRect(bar_x, by, @max(filled, bar_h), bar_h, bar_h / 2, if (v > 800) pal.danger else pal.primary);
-        var cb: [8]u8 = undefined;
-        const caption = std.fmt.bufPrint(&cb, "{d}%", .{v / 10}) catch "";
-        drawStrTrunc(bar_x + bar_w + caption_w -| strW(R_UI, caption), ry, R_UI, caption, caption_w, pal.text, content_bg);
+        const label = if (values == .list) (std.fmt.bufPrint(&labels[i], "{s}{d}", .{ prefix, i }) catch "") else strField(rec, "label");
+        rows[i] = .{ .label = label, .value = @intCast(@min(v, 1000)) };
     }
+    ui.paint.meters(wf.brush(), .{ .x = x, .y = y, .w = avail_w, .h = h }, rows[0..n], content_bg);
     return .{ .w = avail_w, .h = h };
 }
+/// Meter rows a widget stacks (one per core; the machine has few).
+const max_meters = 64;
 
 fn flexWeight(node: Value) usize {
     if (node != .record) return 0;

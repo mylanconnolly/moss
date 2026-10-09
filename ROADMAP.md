@@ -2757,9 +2757,9 @@ supervises), and memory history per unit beside the CPU one.
   rendering/interaction in the toolkit; no new ambient authority or local-only
   protocol. See DESIGN's shared GUI layout section.
 - Next: general, not from the 2026-10-08 passes (those landed in
-  full, list rows and breadcrumbs included; the meter and the chart are
-  the two leaves still painted in the runtime): widget identity across
-  remote views, and whatever the next application asks for. Vertical
+  full; every leaf a `gui` window paints is a toolkit painter now):
+  widget identity across remote views, and whatever the next
+  application asks for. Vertical
   viewports, focus reveal, wrapped labels, weighted rows, and stable
   focus IDs landed on 2026-09-12; menus beyond the built-in profiles
   and widget identity/lifetime landed on 2026-10-08; grid
