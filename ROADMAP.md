@@ -204,23 +204,27 @@ the size of everything built so far — and it is staged so that each
 stage is useful on its own (a `fetch` that follows redirects, an HTML
 parser for the shell, a page domain, a window) long before scripts run.
 
-**An SMP guest can start a thread on a null stack (2026-09-18, open).**
-A four-vCPU moss guest under a busy host: fabsvc's first worker faults
-at its trampoline's first instruction with SP_EL0 = 0
-(`far=0xfffffffffffffff0 elr=<usys.threadTrampoline>`), the guest
-kernel panics "reached unreachable code", the node never joins. Recipe:
-`vmnode.msh` with `arg: 2` (four vCPUs) and `zig build check
--Donly=nodevm -Dsoak=3 -Djobs=1` — 3/3 on 2026-09-18; `-Donly=vmnode
--Dsoak=3 -Djobs=3` gave 1/3. One vCPU (`arg: 3`, what the desktop
-uses) never fails. Every perturbation of the guest's switch path hides
-it (a log in `extraThreadEntry`, a compare in `scheduleLocked`, a
-trace record per switch), so the probe must be non-perturbing: record
-from the HOST side (`v.sp_el0`/`v.pc` at each guest exit into the host
-trace ring, dumped when the VMM exits), or a guest-side counter
-checked only at the fault. The interleaving that fits — two cores
-running one fresh thread, the second reading the start block after the
-first zeroed it — points at the scheduler's pick/steal or the
-hypervisor's SGI wake of a WFI'd vCPU; neither shows it by reading.
+**An SMP guest can start a thread on a null stack (2026-09-18) — ✅
+fixed by reading (2026-10-09).** The symptom: a four-vCPU moss guest
+under a busy host, fabsvc's first workers faulting at the trampoline's
+first instruction with SP_EL0 = 0, the guest kernel panicking, the node
+never joining; one vCPU never failed, and every perturbation of the
+switch path hid it. The cause was not the scheduler or the SGI wake
+but the thread *start record* (`domain.createThread` /
+`extraThreadEntry`): the new thread freed its record by zeroing the
+whole struct — several stores — and on weakly ordered hardware the
+`used = false` store could reach the creator, still in its
+worker-spawning loop on another core, before the `sp = 0` store; the
+creator claimed the slot, wrote the next worker's values, and the
+straggling zero landed on that worker's `sp`. Four vCPUs let a new
+thread start while its creator still loops; one never does; a log or
+a compare on the switch path adds the ordering that hides it. The
+record is released with one release store after the loads now and
+claimed with an atomic exchange (which also stops two creator threads
+taking one slot, a latent bug of its own). The recipe did not
+reproduce on the day of the fix (6/6 clean before it, 10/10 after,
+four vCPUs); the fix stands on the reading. `vmnode` runs the guest
+on four vCPUs again.
 
 **Nodes, what is left.** A session on the fabric acts with the
 machine's fabric identity — a remote stage runs as whatever the peer's

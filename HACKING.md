@@ -579,6 +579,13 @@ barriers in the virtio drivers, and `user/vmm.zig`.
   optimizer and moves: a ReleaseSafe kernel once saved DAIF *after*
   masking it and never took an interrupt on core 0 again. The check runs
   the kernel-heavy drills ReleaseSafe (`+rs`) to keep this honest.
+- A record handed between cores (a thread start record, a slot a peer
+  will reuse) is freed with ONE store — after everything was read from
+  it, with release ordering — never by zeroing the struct: its several
+  stores land in any order, and one can land after the next owner's
+  write. That was the three-week "SMP guest starts a thread on a null
+  stack" bug (DESIGN, Domains). Claim such a slot with an atomic
+  exchange, not a scan-then-write.
 - The kernel is FP-free by build flags; the scheduler's __fp_save/__fp_restore
   stubs are the only EL1 vector instructions (`.arch_extension` admits
   them). Userspace has NEON + hardware AES; the vector unit is per-thread

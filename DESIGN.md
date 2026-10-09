@@ -451,6 +451,31 @@ of asserting: an old disk must never cost the console.
 Because a fresh domain holds *nothing*, the empty sandbox is the zero value.
 Sandboxing is not a mode; it is the absence of grants.
 
+**The thread start record, and a release that must be one store
+(found by reading, 2026-10-09).** A second thread of a domain starts
+through a *start record* in the domain — entry, stack, two arguments —
+that `createThread` fills and the new thread reads in
+`extraThreadEntry` before dropping to user mode. The record used to be
+freed by zeroing the whole struct, several stores, and that was the
+"SMP guest starts a thread on a null stack" Heisenbug that sat open
+for three weeks: on weakly ordered hardware the `used = false` store
+could become visible to the creator — still in its worker-spawning
+loop on another core — before the `sp = 0` store, so the creator took
+the slot, wrote the next worker's values, and the straggling zero then
+landed on that worker's `sp`; it entered EL0 with SP_EL0 = 0 and
+faulted on the trampoline's first push. It needed a new thread to
+start while its creator still looped (four vCPUs, never one), and any
+log or compare on the switch path supplied the ordering that hid it.
+The record is now released with one release store after its loads and
+claimed with an atomic exchange — which also closes a latent bug: two
+threads of one domain creating threads at once could claim the same
+slot, since the scan was never locked. The recipe did not reproduce on
+the day of the fix; the fix stands on the reading, and the guest node
+runs on four vCPUs again. *Lesson:* a record handed between cores is
+freed with one store, after everything was read from it — never by
+zeroing the struct, whose stores may land in any order, one of them
+after the next owner's.
+
 ## IPC
 
 **Message passing is the semantics; shared memory is a transport.** The

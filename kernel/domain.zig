@@ -188,15 +188,23 @@ const ThreadStart = struct {
 /// `entry` with x0/x1 on a user-supplied stack. Counted in threads_alive
 /// like the first thread, so teardown drains it the same way.
 pub fn createThread(d: *Domain, entry: u64, sp: u64, x0: u64, x1: u64) Error!void {
+    // Claim a start record with one atomic exchange: two threads of the
+    // domain creating threads at once cannot take the same slot, and the
+    // acquire orders this core's writes below after the loads of whoever
+    // released the slot (extraThreadEntry's, on another core).
     var slot: ?*ThreadStart = null;
     for (&d.starts) |*ts| {
-        if (!ts.used) {
+        if (@cmpxchgStrong(bool, &ts.used, false, true, .acq_rel, .acquire) == null) {
             slot = ts;
             break;
         }
     }
     const ts = slot orelse return Error.NoThreadSlots;
-    ts.* = .{ .used = true, .d = d, .entry = entry, .sp = sp, .x0 = x0, .x1 = x1 };
+    ts.d = d;
+    ts.entry = entry;
+    ts.sp = sp;
+    ts.x0 = x0;
+    ts.x1 = x1;
     _ = d.threads_alive.fetchAdd(1, .acq_rel);
     _ = sched.spawn(d.name, extraThreadEntry, @intFromPtr(ts), .{
         .cpu_mask = d.cores,
@@ -207,7 +215,7 @@ pub fn createThread(d: *Domain, entry: u64, sp: u64, x0: u64, x1: u64) Error!voi
         .stack_account = &d.kobj,
     }) catch |e| {
         _ = d.threads_alive.fetchSub(1, .acq_rel);
-        ts.* = .{};
+        @atomicStore(bool, &ts.used, false, .release);
         return switch (e) {
             sched.Error.NoThreadSlots => Error.NoThreadSlots,
             sched.Error.OutOfFrames => Error.OutOfFrames,
@@ -222,7 +230,16 @@ fn extraThreadEntry(arg: u64) void {
     const sp = ts.sp;
     const x0 = ts.x0;
     const x1 = ts.x1;
-    ts.* = .{}; // the record is free once its values are in registers
+    // The record is free once its values are in registers — released
+    // with ONE store, after the loads. It used to be zeroed whole: on
+    // weakly ordered hardware the `used = false` store could reach the
+    // creator (still in its loop on another core) before the `sp = 0`
+    // store, so the creator claimed the slot, wrote the next thread's
+    // values, and the straggling zero then landed on its `sp` — that
+    // thread entered user mode on a null stack. A four-vCPU guest under
+    // a busy host showed it (2026-09-18); nothing else ran a creator
+    // and its new thread close enough together.
+    @atomicStore(bool, &ts.used, false, .release);
     arch.thread.enterUser(entry, sp, .{ x0, x1, 0, 0, 0 });
 }
 
