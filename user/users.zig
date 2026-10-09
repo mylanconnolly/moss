@@ -917,7 +917,7 @@ fn fetchFrom(node: u64, name: []const u8) bool {
 }
 
 fn refuse(msg: []const u8) shared.SessResp {
-    usys.sleep(20);
+    usys.sleepMs(2000);
     _ = usys.log(glog, msg);
     return .denied;
 }
@@ -1298,7 +1298,7 @@ fn waitThread(_: u64) callconv(.c) void {
                     code = st.data[1];
                     break;
                 }
-                usys.sleep(2);
+                usys.sleepMs(200);
             }
             lock();
             if (sessionOf(wait_sid)) |still| close(still);
@@ -1407,7 +1407,7 @@ fn consoleThread(i: u64) callconv(.c) void {
                 while (ctl != 0) {
                     const st = usys.domainStat(ctl);
                     if (st.err != .ok or st.data[0] == @intFromEnum(shared.DomainState.dead)) break;
-                    usys.sleep(5);
+                    usys.sleepMs(500);
                 }
                 lock();
                 if (sessionOf(x.sid)) |sess| close(sess);

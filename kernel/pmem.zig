@@ -97,10 +97,15 @@ pub fn freeContiguous(pa: u64, n: usize) void {
     }
 }
 
+/// A port may zero whole pages faster than a store loop (aarch64's DC
+/// ZVA); without that, the plain store.
+fn zeroPage(page: [*]u8) void {
+    if (@hasDecl(arch.cpu, "zeroPages")) arch.cpu.zeroPages(page, mem.page_size) else @memset(page[0..mem.page_size], 0);
+}
+
 pub fn allocZeroed() ?u64 {
     const pa = alloc() orelse return null;
-    const page = mem.physToPtr([*]u8, pa);
-    @memset(page[0..mem.page_size], 0);
+    zeroPage(mem.physToPtr([*]u8, pa));
     return pa;
 }
 

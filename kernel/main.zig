@@ -1622,10 +1622,11 @@ fn cpuTestWorker(_: u64) void {
     }
 
     // Three and a half periods, sampling placement every tick.
+    const samples = sched.cpu_period_ticks * 7 / 2;
     const t0 = cycles();
     var bad_placement: u64 = 0;
     var island_seen_on_3: u64 = 0;
-    for (0..35) |_| {
+    for (0..samples) |_| {
         sched.sleep(1);
         var c: u32 = 1;
         while (c < 4) : (c += 1) {
@@ -1658,7 +1659,7 @@ fn cpuTestWorker(_: u64) void {
     const frames_after = pmem.stats().free_bytes;
     const budget_ok = q >= 150 and q <= 380;
     const greedy_ok = g >= 1000;
-    const island_ok = i >= 850 and i <= 1100 and island_seen_on_3 >= 25 and bad_placement == 0;
+    const island_ok = i >= 850 and i <= 1100 and island_seen_on_3 >= samples * 5 / 7 and bad_placement == 0;
     if (budget_ok and greedy_ok and island_ok and frames_after == frames_before) {
         log.info("cpu-test: PASS — the CPU budget held a domain to its share, an unlimited sibling took the rest, and a partition kept a core to one domain; nothing leaked", .{});
         arch.power.systemOff();

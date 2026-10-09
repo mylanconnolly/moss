@@ -90,7 +90,7 @@ fn parent(log_h: u64) noreturn {
         shared.SpawnFlags.grant_bootfs, usys.kbLimits(512, 3 << 10)).err != .ok) usys.exit(145);
     _ = usys.log(log_h, "parent: sandbox live (real svc + proxy + child); awaiting revocation");
 
-    while (true) usys.sleep(100);
+    while (true) usys.sleepMs(10_000);
 }
 
 fn steadylog(log_h: u64, chan_h: u64) noreturn {
@@ -158,7 +158,7 @@ fn child(log_chan: u64) noreturn {
     sendText(log_chan, "the secret code is 1234");
     sendText(log_chan, "child: all went fine");
 
-    while (true) usys.sleep(100); // live here until the parent is revoked
+    while (true) usys.sleepMs(10_000); // live here until the parent is revoked
 }
 
 fn sendText(chan: u64, text: []const u8) void {
@@ -172,7 +172,7 @@ fn sendText(chan: u64, text: []const u8) void {
 }
 
 fn sleeper() noreturn {
-    while (true) usys.sleep(100);
+    while (true) usys.sleepMs(10_000);
 }
 
 fn contains(haystack: []const u8, needle: []const u8) bool {

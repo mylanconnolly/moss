@@ -58,7 +58,7 @@ pub fn log(handle: u64, msg: []const u8) shared.Errno {
 
 /// The kernel's tick, the unit of `sleep` and `timerArm`: a tenth of
 /// a second (kernel/timer.zig). Ask in milliseconds and convert.
-pub const tick_ms: u64 = 100;
+pub const tick_ms: u64 = 10;
 
 /// Milliseconds as ticks, rounded up, never zero.
 pub fn msToTicks(ms: u64) u64 {

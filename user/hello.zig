@@ -27,7 +27,7 @@ export fn umain(log_handle: u64) callconv(.c) noreturn {
     var n: u64 = 0;
     var buf: [64]u8 = undefined;
     while (true) : (n += 1) {
-        usys.sleep(5);
+        usys.sleepMs(500);
         _ = usys.log(log_handle, lineFmt(&buf, "tick ", n));
     }
 }

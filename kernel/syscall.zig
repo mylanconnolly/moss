@@ -8,6 +8,7 @@
 
 const std = @import("std");
 const arch = @import("arch.zig");
+const timer = @import("timer.zig");
 const cap = @import("cap.zig");
 const domain = @import("domain.zig");
 const clock = @import("clock.zig");
@@ -788,7 +789,7 @@ fn dropAttachment(msg: ipc.Msg) void {
 fn sysTimerArm(d: *domain.Domain, handle_bits: u64, period: u64, bits: u64) u64 {
     const handle: shared.Handle = @bitCast(handle_bits);
     const obj = d.captable.?.lookup(handle, .notification) orelse return errno(.bad_handle);
-    if (period > 60 * 60 * 10) return errno(.bad_arg);
+    if (period > 60 * 60 * timer.ticks_per_second) return errno(.bad_arg);
     if (!ipc.armTimer(@ptrFromInt(obj), period, bits, sched.uptimeTicks())) return errno(.no_space);
     return errno(.ok);
 }

@@ -791,7 +791,7 @@ fn dialSeeds(u: *Unit) void {
                 },
                 .err => break,
             }
-            usys.sleep(5);
+            usys.sleepMs(500);
         }
         logLine(if (joined) "init: joined the fabric via a seed for unit " else "init: could not reach a seed for unit ", u.name);
     }
@@ -813,7 +813,7 @@ fn certifySecret(u: *Unit) bool {
         var tries: usize = 0;
         while (usys.getrandom(&seed) != .ok) : (tries += 1) {
             if (tries == 50) return false; // rngd never seeded the pool
-            usys.sleep(1);
+            usys.sleepMs(100);
         }
         if (!stateWrite(fs, sp, &seed)) return false;
         u.identity_restored = false;
@@ -876,7 +876,7 @@ fn certifyFinish(u: *Unit) bool {
                 },
                 .fab_err => |e| {
                     if (e.code != @intFromEnum(shared.FabErr.no_entropy)) return false;
-                    usys.sleep(1); // rngd is still seeding the pool
+                    usys.sleepMs(100); // rngd is still seeding the pool
                 },
                 else => return false,
             },
@@ -997,7 +997,7 @@ fn superviseDeaths() void {
             continue;
         }
         u.restarts += 1;
-        usys.sleep(u.restarts); // linear backoff, one tick per prior death
+        usys.sleepMs(100 * u.restarts); // linear backoff, 100 ms per prior death
         if (activate(u)) {
             logLine("init: unit died; restarted it (one-for-one): ", u.name);
         }
@@ -1537,7 +1537,7 @@ fn flapDrill(notif: u64) noreturn {
             usys.exit(escalate_code);
         }
         restarts += 1;
-        usys.sleep(restarts); // backoff grows with each death
+        usys.sleepMs(100 * restarts); // backoff grows with each death
         _ = usys.capDrop(ctl);
         ctl = spawnFlapper();
         _ = usys.log(glog, "init: flapper died; restarted (budget shrinking)");

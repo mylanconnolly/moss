@@ -471,7 +471,7 @@ fn fabsvc(log_h: u64, chan_h: u64, node: u64) noreturn {
     if (n.err != .ok) usys.exit(163);
     notif = n.data[0];
     if (usys.notifyBind(notif) != .ok) usys.exit(164);
-    if (usys.timerArm(notif, 1, bit_tick) != .ok) usys.exit(165);
+    if (usys.timerArm(notif, usys.msToTicks(100), bit_tick) != .ok) usys.exit(165);
     // Workers for inbound calls: each waits on its own bell.
     for (&jobs, 0..) |*j, i| {
         const b = usys.notifyCreate();
@@ -1174,7 +1174,7 @@ fn sendFrameN(p: *Peer, frame: []const u8, retries: u64) bool {
             peerFailed(p, "send failed");
             return false;
         }
-        if (retries > 1) usys.sleep(1);
+        if (retries > 1) usys.sleepMs(100);
     }
     peerFailed(p, "send retries exhausted");
     return false;
@@ -1784,7 +1784,7 @@ fn doConnectPeer(node: u64) shared.FabResp {
             break;
         }
         if (st == @intFromEnum(shared.TcpState.closed)) break;
-        usys.sleep(1);
+        usys.sleepMs(100);
     }
     if (!established) {
         _ = ncall(.{ .tcp_close = .{ .sock = sock } });
@@ -1816,7 +1816,7 @@ fn doConnectPeer(node: u64) shared.FabResp {
         pumpAll();
         if (p.greeted) return .ok;
         if (p.dead) return ferr(.disconnected);
-        usys.sleep(1);
+        usys.sleepMs(100);
     }
     return ferr(.timeout);
 }
@@ -1873,7 +1873,7 @@ fn doRemoteSpawn(node_arg: u64, image: u64, arg: u64) void {
             freply(ferr(.disconnected));
             return;
         }
-        usys.sleep(1);
+        usys.sleepMs(100);
     }
     if (!got_spawn_ack) {
         freply(ferr(.timeout));
@@ -1927,7 +1927,7 @@ fn doRemoteConnect(node: u64, a: u64, b: u64) void {
             freply(ferr(.disconnected));
             return;
         }
-        usys.sleep(1);
+        usys.sleepMs(100);
     }
     if (!got_connect_ack) {
         freply(ferr(.timeout));
@@ -1986,7 +1986,7 @@ fn doLookup(node: u64, a: u64, b: u64) void {
             freply(ferr(.disconnected));
             return;
         }
-        usys.sleep(1);
+        usys.sleepMs(100);
     }
     if (!got_lookup_ack) {
         freply(ferr(.timeout));

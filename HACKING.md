@@ -622,10 +622,13 @@ barriers in the virtio drivers, and `user/vmm.zig`.
   0; use `0xffff...` or an optional).
 - Handle-slot conventions for spawn grants are fixed by insert order in
   `domain.spawn`: log→chan→spawner→entropy→introspect→clock→windows→hypervisor; user
-- **The kernel tick is 100 ms**, and `sleep` and `timer_arm` count
-  ticks. Nothing in userspace should count ticks by hand: ask in
-  milliseconds through `usys.sleepMs` / `usys.msToTicks` (a day's worth
-  of timeouts were ten times their stated length before that existed).
+- **The kernel tick is 10 ms** (100 ms until 2026-10-08), and `sleep`
+  and `timer_arm` count ticks. Nothing in userspace should count ticks
+  by hand: ask in milliseconds through `usys.sleepMs` / `usys.msToTicks`
+  (a day's worth of timeouts were ten times their stated length before
+  that existed, and every `sleep(1)` meant 100 ms until the tick moved —
+  the move converted them all to milliseconds). Every wait rounds up to
+  a tick, so a poll loop's cadence is the tick, whatever it asks.
   programs hardcode the slots they expect (documented per program).
 - The kernel embeds exactly one blob, the boot archive; `spawn` takes an
   shm cap holding a staged image, never an index. An shm mapping refs

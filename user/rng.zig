@@ -112,7 +112,7 @@ fn rngd(log_h: u64, reseed_arg: u64) noreturn {
     // Reseed on our own clock — the pool's key erasure covers the gaps.
     var reseeds: u64 = 0;
     while (true) {
-        usys.sleep(reseed_ticks);
+        usys.sleepMs(reseed_ticks * 100); // the argument counts tenths of a second
         var more: [reseed_len]u8 = undefined;
         harvest(&more);
         if (usys.rngSeed(entropy_h, &more) != .ok) usys.exit(176);

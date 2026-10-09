@@ -2621,6 +2621,18 @@ not fix, each verified by reading:
 
 **Kernel**
 
+- The tick is 10 ms (2026-10-08; 100 ms before): every sleep and
+  timeout rounds up to it, preemption is per tick, and there is no
+  tickless/one-shot timer — an idle machine takes 100 interrupts a
+  second per core.
+- Spawn maps and zeroes a domain's whole image eagerly, .bss included:
+  the page domain's 117 MB costs ~110 ms per spawn (after `dc zva`
+  zeroing; 230 before) and the frames are held whether touched or not.
+  Next: a lazily-populated .bss — budget charged at spawn, frames on
+  first touch via the user data-abort path and the kernel's user-range
+  checks (which must fault pages in before the kernel touches them),
+  untouched pages credited at teardown; gated per port.
+
 - Every pool is static and small: 16 domains, 64 threads, 64 channels,
   64 notifications, 64 shared buffers, 256 client badges, 16 devices,
   64 LPIs, 64 window mappings per domain. Shared-buffer pages are

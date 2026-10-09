@@ -2437,7 +2437,7 @@ fn netsvc(log_h: u64, chan_h: u64, node: u64) noreturn {
     // waits for exactly that. Every tick (a tenth of a second), bit_tick
     // — the first cut asked for ten of them, believing a tick was 10 ms.
     // Armed before the wait below, whose DHCP retransmits need it.
-    if (usys.timerArm(irq_notif, 1, bit_tick) != .ok) usys.exit(180);
+    if (usys.timerArm(irq_notif, usys.msToTicks(100), bit_tick) != .ok) usys.exit(180);
     // Before serving anyone: every DHCP interface bound and every
     // configured gateway resolved, so the first client's first packet is
     // not the one that asks. Bounded (ten seconds): a NIC on a dead
@@ -2921,7 +2921,7 @@ fn waitEstablished(chan: u64, sock: u64) bool {
         const st = nnum(ncall(chan, .{ .tcp_status = .{ .sock = sock } })) orelse return false;
         if (st == @intFromEnum(shared.TcpState.established)) return true;
         if (st == @intFromEnum(shared.TcpState.closed)) return false;
-        usys.sleep(1);
+        usys.sleepMs(100);
     }
     return false;
 }
@@ -2942,7 +2942,7 @@ fn echoRoundTrip(chan: u64, buf: [*]u8, sock: u64, msg: []const u8) bool {
         if (ncode(resp)) |c| {
             if (c != .would_block) usys.exit(151);
         }
-        usys.sleep(1);
+        usys.sleepMs(100);
     }
     if (got != msg.len) usys.exit(152);
     for (msg, 0..) |c, i| {
@@ -2967,7 +2967,7 @@ fn echosrv(log_h: u64, chan_h: u64) noreturn {
                 child = c;
                 break;
             }
-            usys.sleep(1);
+            usys.sleepMs(100);
         }
         while (true) {
             const resp = ncall(chan_h, .{ .tcp_recv = .{ .sock = child, .len = 512 } });
@@ -2979,7 +2979,7 @@ fn echosrv(log_h: u64, chan_h: u64) noreturn {
                 if (c == .closed) break;
                 if (c != .would_block) usys.exit(231);
             }
-            usys.sleep(1);
+            usys.sleepMs(100);
         }
         _ = ncall(chan_h, .{ .tcp_close = .{ .sock = child } });
     }
@@ -3024,7 +3024,7 @@ fn echocli(log_h: u64, chan_h: u64) noreturn {
             ok = true;
             break;
         }
-        usys.sleep(1);
+        usys.sleepMs(100);
     }
     if (!ok) usys.exit(251);
     _ = usys.log(log_h, "echocli: IPv6 wire round trip (ping fec0::2) verified");

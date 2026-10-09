@@ -34,6 +34,7 @@
 
 const std = @import("std");
 const arch = @import("arch.zig");
+const timer = @import("timer.zig");
 const ipc = @import("ipc.zig");
 const cap = @import("cap.zig");
 const kalloc = @import("kalloc.zig");
@@ -842,7 +843,7 @@ pub fn releaseCores(who: *anyopaque) void {
 pub var cpu_charge: ?*const fn (*anyopaque, u64) void = null;
 pub var cpu_over_budget: ?*const fn (*anyopaque) bool = null;
 pub var cpu_period_reset: ?*const fn () void = null;
-pub const cpu_period_ticks: u64 = 10; // 1s at the 100ms tick
+pub const cpu_period_ticks: u64 = timer.ticks_per_second; // 1 s
 
 fn cycles() u64 {
     return arch.cpu.cycles();

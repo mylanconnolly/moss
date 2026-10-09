@@ -2395,6 +2395,29 @@ stall — a server-side timestamp pair cost ten lines and ended an hour of
 wrong theories about doorbells. Each socket now carries counters
 (segments, bytes, no-room drops, out-of-order drops, retransmits) and
 logs a one-line story at close when any of them is nonzero.
+
+**The same round, under the page: the tick and the zeroing.** With the
+network out of the way the browser's navigation still cost 390 ms
+between one page's load and the next page's first line, and the log had
+nothing in the gap. The broker destroys the old page domain, waits for
+its death polling every 10 ms, then spawns the new one. Measured: the
+wait took 200 ms for two polls — because the kernel tick was 100 ms and
+every sleep rounds up to a tick, so a 10 ms poll slept 100; and the spawn
+took 230 ms, of which 190 was zeroing the page domain's 117 MB image
+(114 MB of it arenas in .bss) at 650 MB/s — a byte at a time, because the
+kernel is built without NEON and compiler-rt's memset is a byte loop
+there (memcpy is not: the same image's 3 MB copy ran at 5 GB/s). The
+tick is 10 ms now (`timer.ticks_per_second`, with the CPU-budget period
+and the timer-arm cap expressed in it, and every raw `sleep(n)` in
+userspace rewritten in milliseconds, since each one meant 100 ms × n);
+and pages are zeroed with `dc zva` behind the HAL (`arch.cpu.zeroPages`,
+optional: a port without it gets the plain store), 2.5 GB/s under the
+hypervisor. The gap is 166 ms; the whole gate got faster with the tick
+(ipc 5.4 s → 1.6 s, net 9 s → 3.6 s), the CPU-budget drill's "three and
+a half periods" had to be written in period ticks rather than as 35.
+What is left of the gap is the spawn mapping 117 MB it will mostly never
+touch: a lazily-populated .bss (budget charged at spawn, frames on first
+touch) is the next step, noted in ROADMAP.
 The ABI is IPv6-native: addresses are always 128 bits (two words), IPv4
 rides v4-mapped, and there is no v4-only path to fossilize. Local
 destinations (own addresses, ::1, 127/8) short-circuit through the stack,

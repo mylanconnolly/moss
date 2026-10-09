@@ -81,7 +81,7 @@ fn rogue(log_h: u64, target: u64) noreturn {
     avail_shadow = 1;
     _ = usys.log(log_h, "rogue: asking the disk to DMA a sector into kernel memory");
     kick();
-    usys.sleep(5);
+    usys.sleepMs(500);
     const used_idx: *volatile u16 = @ptrFromInt(vq_va + 1024 + 2);
     _ = usys.log(log_h, if (used_idx.* == 0) "rogue: the device never completed the request" else "rogue: the device completed the request");
     usys.exit(0);

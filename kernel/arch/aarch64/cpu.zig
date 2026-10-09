@@ -44,6 +44,30 @@ pub fn cycles() u64 {
     );
 }
 
+/// Zero `len` bytes at `ptr` (page-aligned, a multiple of the cache
+/// line) with DC ZVA: one instruction clears a whole line, the fastest
+/// store the architecture has. The kernel is built without NEON, so
+/// compiler-rt's memset is a byte loop (650 MB/s: 190 ms for a page
+/// domain's 117 MB, 2026-10-08); this runs at memory speed. Falls back
+/// to the plain store when zeroing by VA is prohibited.
+pub fn zeroPages(ptr: [*]u8, len: usize) void {
+    const dczid = asm ("mrs %[v], dczid_el0"
+        : [v] "=r" (-> u64),
+    );
+    if (dczid & 0x10 != 0) {
+        @memset(ptr[0..len], 0);
+        return;
+    }
+    const block: usize = @as(usize, 4) << @intCast(dczid & 0xf);
+    var off: usize = 0;
+    while (off < len) : (off += block) {
+        asm volatile ("dc zva, %[p]"
+            :
+            : [p] "r" (ptr + off),
+            : .{ .memory = true });
+    }
+}
+
 /// The counter's frequency (a constant).
 pub fn cycleHz() u64 {
     return asm ("mrs %[v], cntfrq_el0"

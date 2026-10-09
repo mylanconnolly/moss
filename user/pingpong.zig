@@ -130,7 +130,7 @@ fn askr(log_h: u64, chan_h: u64) noreturn {
             },
         }
         fpLoad(&pattern);
-        usys.sleep(3);
+        usys.sleepMs(300);
         fpStore(&readback);
         for (pattern[0..fp_live], readback[0..fp_live]) |a, b| {
             if (a != b) usys.exit(40); // vector state corrupted across a switch

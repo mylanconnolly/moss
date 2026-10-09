@@ -10,6 +10,7 @@
 
 const std = @import("std");
 const arch = @import("arch.zig");
+const timer = @import("timer.zig");
 const cap = @import("cap.zig");
 const ipc = @import("ipc.zig");
 const kalloc = @import("kalloc.zig");
@@ -350,8 +351,8 @@ var cntfrq: u64 = 0;
 fn cpuLimitCycles(permille: u64) u64 {
     if (permille == 0) return 0;
     if (cntfrq == 0) cntfrq = arch.cpu.cycleHz();
-    // One period is cpu_period_ticks x 100ms.
-    return cntfrq * sched.cpu_period_ticks / 10 * permille / 1000;
+    // One period is cpu_period_ticks ticks.
+    return cntfrq * sched.cpu_period_ticks / timer.ticks_per_second * permille / 1000;
 }
 
 fn chargeCpu(ctx: *anyopaque, cyc: u64) void {
