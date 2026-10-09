@@ -1572,6 +1572,12 @@ pub const NetReq = union(enum(u64)) {
     tcp_connect: struct { ip_hi: u64, ip_lo: u64, port: u64 },
     tcp_status: struct { sock: u64 }, // -> num(TcpState)
     tcp_accept: struct { sock: u64 }, // -> num(new sock) | would_block
+    /// Readiness without consuming anything: num(flags) with
+    /// `poll_readable` (bytes wait), `poll_closed` (recv would say
+    /// closed) and `poll_acceptable` (a listener has a connection to
+    /// accept). What a server watching several sockets on one bell asks
+    /// after a wake, to find which of them rang.
+    tcp_poll: struct { sock: u64 },
     tcp_send: struct { sock: u64, len: u64 }, // data from buf[0..len]
     tcp_recv: struct { sock: u64, len: u64 }, // data into buf[0..n]
     tcp_close: struct { sock: u64 },
@@ -1801,6 +1807,11 @@ pub const NetResp = union(enum(u64)) {
     num: struct { n: u64 },
     net_err: struct { code: u64 },
 };
+
+/// `tcp_poll`'s answer bits.
+pub const poll_readable: u64 = 1;
+pub const poll_closed: u64 = 2;
+pub const poll_acceptable: u64 = 4;
 
 pub const NetErr = enum(u64) {
     would_block = 1,

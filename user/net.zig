@@ -325,6 +325,10 @@ const Iface = struct {
     mac: [6]u8 = @splat(0),
     rx_frames: u64 = 0,
     tx_frames: u64 = 0,
+    /// Drains that found the receive ring entirely used: the device had
+    /// nowhere to put the next frame until this drain (a dropped frame
+    /// shows as a retransmission, not here).
+    rx_ring_full: u64 = 0,
     // Addressing.
     mode: shared.IfaceMode = .off,
     up: bool = false,
@@ -869,6 +873,7 @@ fn drainTxUsed(f: *Iface) void {
 }
 
 fn drainRxUsed(f: *Iface) void {
+    if (qUsedIdx(f, rxq).* -% f.rx_seen >= qn) f.rx_ring_full += 1;
     while (f.rx_seen != qUsedIdx(f, rxq).*) {
         usys.barrier();
         const e = qUsedElem(f, rxq, f.rx_seen);
@@ -1870,6 +1875,10 @@ const backlog_len = 8;
 /// Receive buffer: also the window we advertise (free space in it) —
 /// two full exchanges of the fabric's bulk transport.
 const rx_cap = 65536;
+/// Out-of-order ranges a socket keeps (a burst past one hole is one
+/// range; more holes than this and the rest is dropped as before).
+const max_ooo = 8;
+const OooRange = struct { off: u32 = 0, len: u32 = 0 };
 /// Send buffer: unacknowledged and not-yet-sent bytes, in order; one
 /// whole tcp_send (net_max_send) fits when it is empty.
 const snd_cap = 32768;
@@ -1920,12 +1929,25 @@ const Sock = struct {
     rexmits: u32 = 0,
     rto: u64 = 0,
     in_output: bool = false,
+    /// Where a slow connection's time went, summed for the close line:
+    /// segments taken in order, dropped for lack of room, dropped as
+    /// out of order (this stack buffers none), retransmissions sent.
+    st_in: u32 = 0,
+    st_noroom: u32 = 0,
+    st_ooo: u32 = 0,
+    st_rexmit: u32 = 0,
+    st_bytes: u64 = 0,
     /// When the client closed: a lingering socket is kept until its FIN
     /// is acknowledged and the peer has closed too, or this long.
     closed_at: u64 = 0,
-    /// Receive side: in-order bytes the client has not taken yet.
+    /// Receive side: in-order bytes the client has not taken yet, and
+    /// segments that arrived past a hole, kept at their place in the
+    /// window (`ooo`: offset from the first byte in the buffer, length)
+    /// so one lost segment costs one retransmission, not the burst.
     rcv_nxt: u32 = 0,
     rx_len: usize = 0,
+    ooo: [max_ooo]OooRange = @splat(.{}),
+    n_ooo: u8 = 0,
     /// Listener backlog: accepted-but-not-yet-taken connections, FIFO.
     /// One slot was a bug: a second SYN overwrote the first, orphaning an
     /// established socket whose data nobody would ever read.
@@ -2161,6 +2183,8 @@ fn retransmitScan() void {
             continue;
         }
         s.rexmits += 1;
+        s.st_rexmit += 1;
+        if (s.st_rexmit <= 2) logf("netsvc: sock {d} retransmit {d} in {s} after {d} ms", .{ sockIdx(s), s.st_rexmit, @tagName(s.state), s.rto * 1000 / usys.cycleHz() });
         s.rto = @min(s.rto * 2, rtoInitial() * 16);
         s.sent_at = now;
         switch (s.state) {
@@ -2340,9 +2364,22 @@ fn sockInput(s: *Sock, seq: u32, ack: u32, flags: u8, wnd: u16, opts: []const u8
             @memcpy(rxBuf(s)[s.rx_len .. s.rx_len + payload.len], payload);
             s.rx_len += payload.len;
             s.rcv_nxt +%= @intCast(payload.len);
+            s.st_in += 1;
+            s.st_bytes += payload.len;
             advance = true;
-        }
-    }
+            oooAbsorb(s);
+        } else s.st_noroom += 1;
+    } else if (payload.len > 0 and !s.lingering and seqLe(s.rcv_nxt, seq)) {
+        // Past a hole: kept at its place in the window if it fits and a
+        // range is free; the cumulative ACK below (a duplicate) tells
+        // the sender where the hole is. The buffer's front holds the
+        // in-order run the reader has not taken yet, so the place is
+        // the hole's distance past that run — not past the buffer's
+        // first byte (which overwrote unread bytes under a slow reader
+        // and corrupted the fabric's stream in the webfab drill).
+        const past_run: u64 = @as(u64, s.rx_len) + @as(u64, seq -% s.rcv_nxt);
+        if (!oooStore(s, past_run, payload)) s.st_ooo += 1;
+    } else if (payload.len > 0) s.st_ooo += 1;
     if (flags & F_FIN != 0 and seq +% @as(u32, @intCast(payload.len)) == s.rcv_nxt) {
         s.rcv_nxt +%= 1;
         s.peer_closed = true;
@@ -2469,6 +2506,7 @@ fn netsvc(log_h: u64, chan_h: u64, node: u64) noreturn {
             .tcp_connect => |q| nreply(opConnect(v, r.badge, q.ip_hi, q.ip_lo, q.port)),
             .tcp_status => |q| nreply(opStatus(r.badge, q.sock)),
             .tcp_accept => |q| nreply(opAccept(r.badge, q.sock)),
+            .tcp_poll => |q| nreply(opPoll(r.badge, q.sock)),
             .tcp_send => |q| nreply(opSend(v, r.badge, q.sock, q.len)),
             .tcp_recv => |q| nreply(opRecv(v, r.badge, q.sock, q.len)),
             .tcp_close => |q| nreply(if (udpOf(r.badge, q.sock)) |u| opUdpClose(u) else opClose(r.badge, q.sock)),
@@ -2563,6 +2601,28 @@ fn opAccept(badge: u64, idx: u64) shared.NetResp {
     return .{ .num = .{ .n = ci } };
 }
 
+/// Readiness as recv/accept would see it, without taking anything:
+/// the answer a client holding several sockets on one bell uses to
+/// find the one that rang.
+fn opPoll(badge: u64, idx: u64) shared.NetResp {
+    const s = sockOf(badge, idx) orelse return nerr(.bad);
+    var flags: u64 = 0;
+    if (s.state == .listen) {
+        while (s.backlog_n > 0 and socks[s.backlog[0]].state == .closed) {
+            socks[s.backlog[0]] = .{};
+            backlogPop(s);
+        }
+        if (s.backlog_n > 0) {
+            const head = socks[s.backlog[0]].state;
+            if (head == .established or head == .close_wait) flags |= shared.poll_acceptable;
+        }
+        return .{ .num = .{ .n = flags } };
+    }
+    if (s.rx_len > 0) flags |= shared.poll_readable;
+    if (s.rx_len == 0 and (s.peer_closed or s.state == .closed)) flags |= shared.poll_closed;
+    return .{ .num = .{ .n = flags } };
+}
+
 fn backlogPop(l: *Sock) void {
     for (1..l.backlog_n) |i| l.backlog[i - 1] = l.backlog[i];
     l.backlog_n -= 1;
@@ -2586,6 +2646,65 @@ fn opSend(v: *NetView, badge: u64, idx: u64, len: u64) shared.NetResp {
     return .{ .num = .{ .n = len } };
 }
 
+/// Keep an out-of-order segment at `off64` from the buffer's first byte.
+/// Overlapping or adjacent ranges merge; the data is copied into place.
+fn oooStore(s: *Sock, off64: u64, payload: []const u8) bool {
+    if (off64 + payload.len > rx_cap) return false;
+    const off: u32 = @intCast(off64);
+    const end: u32 = off + @as(u32, @intCast(payload.len));
+    @memcpy(rxBuf(s)[off..end], payload);
+    // Merge into a touching range, else take a free one.
+    var i: usize = 0;
+    while (i < s.n_ooo) : (i += 1) {
+        const r = &s.ooo[i];
+        if (off <= r.off + r.len and end >= r.off) {
+            const lo = @min(r.off, off);
+            const hi = @max(r.off + r.len, end);
+            r.* = .{ .off = lo, .len = hi - lo };
+            return true;
+        }
+    }
+    if (s.n_ooo == max_ooo) return false;
+    s.ooo[s.n_ooo] = .{ .off = off, .len = end - off };
+    s.n_ooo += 1;
+    return true;
+}
+/// In-order bytes arrived: any kept range that now touches the end of
+/// the in-order run joins it (repeat: ranges may chain).
+fn oooAbsorb(s: *Sock) void {
+    var merged = true;
+    while (merged) {
+        merged = false;
+        var i: usize = 0;
+        while (i < s.n_ooo) : (i += 1) {
+            const r = s.ooo[i];
+            if (r.off <= s.rx_len and r.off + r.len > s.rx_len) {
+                const gain = r.off + r.len - @as(u32, @intCast(s.rx_len));
+                s.rx_len += gain;
+                s.rcv_nxt +%= gain;
+                s.st_bytes += gain;
+                s.ooo[i] = s.ooo[s.n_ooo - 1];
+                s.n_ooo -= 1;
+                merged = true;
+                break;
+            } else if (r.off + r.len <= s.rx_len) {
+                // Entirely behind the run already (a retransmission filled it).
+                s.ooo[i] = s.ooo[s.n_ooo - 1];
+                s.n_ooo -= 1;
+                merged = true;
+                break;
+            }
+        }
+    }
+}
+
+/// The buffer's last used byte: the in-order run, or the farthest kept range.
+fn oooEnd(s: *Sock) usize {
+    var end: usize = s.rx_len;
+    for (s.ooo[0..s.n_ooo]) |r| end = @max(end, r.off + r.len);
+    return end;
+}
+
 fn opRecv(v: *NetView, badge: u64, idx: u64, len: u64) shared.NetResp {
     const s = sockOf(badge, idx) orelse return nerr(.bad);
     if (v.buf == 0 or len == 0 or len > shared.net_max_recv) return nerr(.bad);
@@ -2596,9 +2715,11 @@ fn opRecv(v: *NetView, badge: u64, idx: u64, len: u64) shared.NetResp {
     const n = @min(len, s.rx_len);
     const dst = @as([*]u8, @ptrFromInt(v.buf))[0..n];
     @memcpy(dst, rxBuf(s)[0..n]);
-    if (n < s.rx_len) {
-        for (0..s.rx_len - n) |i| rxBuf(s)[i] = rxBuf(s)[n + i];
-    }
+    // The run and every kept range slide down with it: the buffer is
+    // the window's bytes from rcv_nxt - rx_len on.
+    const tail = oooEnd(s);
+    if (n < tail) std.mem.copyForwards(u8, rxBuf(s)[0 .. tail - n], rxBuf(s)[n..tail]);
+    for (s.ooo[0..s.n_ooo]) |*r| r.off -= @intCast(n);
     const was_free = rx_cap - s.rx_len;
     s.rx_len -= n;
     // A window update: the peer last saw a window under one segment
@@ -2641,10 +2762,20 @@ fn opClose(badge: u64, idx: u64) shared.NetResp {
     const s = sockOf(badge, idx) orelse return nerr(.bad);
     if (s.bell != 0) _ = usys.capDrop(s.bell);
     s.bell = 0;
+    // The connection's story when it was not a clean one: what came in,
+    // what was dropped and why, what had to be sent twice, and whether
+    // the NIC's ring ran full under it. (acid3's 180 KB body took 4.7 s
+    // for one dropped segment before out-of-order bytes were kept.)
+    if (s.st_noroom > 0 or s.st_ooo > 0 or s.st_rexmit > 0) {
+        var ring_full: u64 = 0;
+        for (ifaces[0..n_ifaces]) |*f| ring_full += f.rx_ring_full;
+        logf("netsvc: sock {d} closed: {d} KB in {d} segments, dropped {d} no-room {d} out-of-order, {d} retransmits, ring full {d}x", .{ sockIdx(s), s.st_bytes / 1024, s.st_in, s.st_noroom, s.st_ooo, s.st_rexmit, ring_full });
+    }
     if (s.state == .established or s.state == .close_wait) {
         s.lingering = true;
         s.badge = 0;
         s.rx_len = 0;
+        s.n_ooo = 0;
         s.closed_at = usys.cycles();
         tcpSendFin(s);
         return .ok;

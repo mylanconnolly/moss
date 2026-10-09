@@ -74,6 +74,8 @@ const pump_stack_pages: u64 = 64;
 pub const relay_stale_ms: u64 = 15_000;
 
 const stall_ms: u64 = 10_000;
+/// A body slower than this gets a line in the log.
+const slow_body_ms: u64 = 250;
 const max_redirects = 10;
 const head_max = 16 << 10;
 const request_max = 4 << 10;
@@ -2210,6 +2212,7 @@ pub const Host = struct {
                     .failed => {
                         conn.close(h.net);
                         if (reused and got == 0) {
+                            logf(h.log, "webhost: {s}: the parked connection failed after {d} ms; a fresh one", .{ tag, usys.nowMs() - t_open });
                             retry_fresh = true;
                             break;
                         }
@@ -2223,6 +2226,7 @@ pub const Host = struct {
                         // stall the server may have taken the form, and it
                         // must not be sent twice.
                         if (reused and got == 0 and !post) {
+                            logf(h.log, "webhost: {s}: the parked connection stalled {d} ms; a fresh one", .{ tag, usys.nowMs() - t_open });
                             retry_fresh = true;
                             break;
                         }
@@ -2233,6 +2237,7 @@ pub const Host = struct {
                 if (closed and got == 0 and reused) {
                     // The server had let the parked connection go.
                     conn.close(h.net);
+                    logf(h.log, "webhost: {s}: the parked connection was closed, seen after {d} ms; a fresh one", .{ tag, usys.nowMs() - t_open });
                     retry_fresh = true;
                     break;
                 }
@@ -2387,7 +2392,14 @@ pub const Host = struct {
                     res.stash_off += n;
                     res.remaining -= n;
                     produced += n;
-                    if (res.remaining == 0) res.done = true;
+                    res.got_bytes += n;
+                    if (res.remaining == 0) {
+                        res.done = true;
+                        // A body that took its time is worth a line (a
+                        // window of loss, a slow peer); the quick ones are not.
+                        const took = usys.nowMs() - res.opened_ms;
+                        if (took >= slow_body_ms) logf(h.log, "webhost: {s}: body {d} KB in {d} ms", .{ tag, res.got_bytes / 1024, took });
+                    }
                 },
                 .none => {
                     const n = @min(in.len, room.len);

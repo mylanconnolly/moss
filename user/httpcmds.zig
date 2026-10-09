@@ -2,10 +2,12 @@
 //! `http-read $sock` parses a request into a record, `http-write $sock
 //! $resp` answers it, `http-serve $listener $handler [n]` loops accept /
 //! read / handle / write with handlers as ordinary functions of the
-//! request record (one connection at a time; for concurrency across
-//! connections, the worker-pool `serve` hands each socket to a worker
-//! whose handler may itself call http-read/http-write), and `fetch URL
-//! [opts]` is the client. What a
+//! request record (one thread, an event loop over up to `max_conns`
+//! open connections: whoever has a request is served in turn, and a
+//! kept connection waits out its idle time without holding the listener;
+//! for handlers that must run concurrently, the worker-pool `serve`
+//! hands each socket to a worker whose handler may itself call
+//! http-read/http-write), and `fetch URL [opts]` is the client. What a
 //! handler returns decides the response: a record { status, headers,
 //! body } is explicit; a string is 200 text/plain; a list, record or
 //! table is 200 application/json. Every outcome the network or the
@@ -89,6 +91,49 @@ fn keepLeftover(key: u64, bytes: []const u8) void {
 const idle_ms: u64 = 3000;
 /// How long any read waits for the rest of a request once it began.
 const stall_ms: u64 = 10_000;
+/// The first-byte wait on a connection the poll called readable: the
+/// bytes are there, this only bounds a wake the poll misread.
+const poll_ms: u64 = 20;
+
+/// `serve`'s open connections. The server is one thread; before this
+/// pool it took one connection at a time and a kept connection's idle
+/// wait held the listener — a browser's first page sat 2.5 s behind a
+/// script's parked `fetch` connection (2026-10-08). Now a connection
+/// waits out its idle time here while others are accepted and served.
+const Pool = struct {
+    const Entry = struct { c: Conn, last: u64 };
+    conns: [max_conns]Entry = undefined,
+    n: usize = 0,
+
+    fn add(p: *Pool, c: Conn, now: u64) void {
+        p.conns[p.n] = .{ .c = c, .last = now };
+        p.n += 1;
+    }
+    /// Close and forget the i-th connection (the last one takes its slot).
+    fn drop(p: *Pool, n: *Net, i: usize) void {
+        keepLeftover(p.conns[i].c.leftoverKey(), ""); // the number may be reused
+        p.conns[i].c.close(n);
+        p.n -= 1;
+        p.conns[i] = p.conns[p.n];
+    }
+    /// The connection longest without a request.
+    fn quietest(p: *Pool) usize {
+        var best: usize = 0;
+        for (p.conns[0..p.n], 0..) |e, i| if (e.last < p.conns[best].last) {
+            best = i;
+        };
+        return best;
+    }
+    fn closeAll(p: *Pool, n: *Net) void {
+        while (p.n > 0) p.drop(n, p.n - 1);
+    }
+};
+
+/// A connection waits at the listener.
+fn acceptable(n: *Net, l: u64) bool {
+    const p = n.pollRaw(l) orelse return false;
+    return p.acceptable;
+}
 
 /// A client connection: a socket, or a tls session over one.
 const Conn = union(enum) {
@@ -114,6 +159,14 @@ const Conn = union(enum) {
             .plain => |s| n.closeRaw(s),
             .tls => |t| tlscmds.close(t),
         }
+    }
+
+    /// What a read would find now, without taking it.
+    fn poll(c: Conn, n: *Net) ?Net.Poll {
+        return switch (c) {
+            .plain => |s| n.pollRaw(s),
+            .tls => |t| tlscmds.poll(t),
+        };
     }
 
     /// A key for the per-connection leftover buffer, distinct across the
@@ -404,34 +457,61 @@ pub fn call(n: *Net, it: *mshl.Interp, name: []const u8, args: []const Value, in
             left = args[2].int;
         }
         var served: i64 = 0;
+        var open: Pool = .{};
+        defer open.closeAll(n);
         while (left == null or left.? > 0) {
-            const c: Conn = if (tls_listener) switch (tlscmds.accept(n, l)) {
-                .conn => |t| .{ .tls = t },
-                // A handshake that fails is one client's problem, not the
-                // server's: wait for the next.
-                .failed => continue,
-            } else switch (n.acceptRaw(l)) {
-                .sock => |x| .{ .plain = x },
-                .failed => |m| return try errResult(it, m),
-            };
-            defer c.close(n);
-            // Every request the connection carries, until the peer says
-            // close, the count runs out, or it sits idle.
-            while (left == null or left.? > 0) {
-                const req = switch (try readRequest(n, it, c, idle_ms)) {
+            var progress = false;
+            // Whoever waits at the listener comes in while there is room;
+            // with every slot a kept connection, the quietest makes way.
+            while (acceptable(n, l)) {
+                if (open.n == open.conns.len) open.drop(n, open.quietest());
+                const c: Conn = if (tls_listener) switch (tlscmds.accept(n, l)) {
+                    .conn => |t| .{ .tls = t },
+                    // A handshake that fails is one client's problem, not the
+                    // server's: on to the next.
+                    .failed => continue,
+                } else switch (n.acceptRaw(l)) {
+                    .sock => |x| .{ .plain = x },
+                    .failed => |m| return try errResult(it, m),
+                };
+                open.add(c, usys.nowMs());
+                progress = true;
+            }
+            // One request from each connection that has one, in turn, so
+            // a chatty peer cannot starve the others.
+            var i: usize = 0;
+            while (i < open.n and (left == null or left.? > 0)) {
+                const e = &open.conns[i];
+                const ready: Net.Poll = e.c.poll(n) orelse .{ .readable = false, .closed = true, .acceptable = false };
+                // Bytes read past the last request are a request too (a
+                // pipelined pair arrives in one segment; the socket then
+                // shows nothing while the leftover holds the second).
+                const held = leftoverOf(e.c.leftoverKey()) != null;
+                if (!held and !ready.readable and !ready.closed) {
+                    i += 1;
+                    continue;
+                }
+                progress = true;
+                const req = switch (try readRequest(n, it, e.c, poll_ms)) {
                     .request => |r| r,
-                    .idle => break,
+                    // A wake that carried no request (a tls key update, a
+                    // poll the peer's bytes have not caught up with).
+                    .idle => {
+                        i += 1;
+                        continue;
+                    },
                     .failed => |m| {
-                        if (!is(u8, m, "closed")) _ = try writeResponse(n, it, c, .{ .record = .{ .keys = &.{ "status", "body" }, .vals = &.{ .{ .int = 400 }, .{ .str = m } } } }, false);
-                        break;
+                        if (!is(u8, m, "closed")) _ = try writeResponse(n, it, e.c, .{ .record = .{ .keys = &.{ "status", "body" }, .vals = &.{ .{ .int = 400 }, .{ .str = m } } } }, false);
+                        open.drop(n, i);
+                        continue;
                     },
                 };
                 // The handler runs in its own line-sized world; a failure is
                 // a 500 with the message, never the end of the server.
                 const reply: Value = blk: {
-                    const out = it.callValue(args[1], &.{try requestRecord(it, req)}, null, &.{"req"}) catch |e| switch (e) {
+                    const out = it.callValue(args[1], &.{try requestRecord(it, req)}, null, &.{"req"}) catch |err| switch (err) {
                         mshl.Error.Runtime => break :blk .{ .record = .{ .keys = &.{ "status", "body" }, .vals = &.{ .{ .int = 500 }, .{ .str = it.err_msg } } } },
-                        else => return e,
+                        else => return err,
                     };
                     if (out == .result) {
                         if (!out.result.ok) {
@@ -446,10 +526,31 @@ pub fn call(n: *Net, it: *mshl.Interp, name: []const u8, args: []const Value, in
                 served += 1;
                 if (left) |*k| k.* -= 1;
                 const keep = req.keep and !wantsClose(reply) and (left == null or left.? > 0);
-                if (try sendReply(n, it, c, reply, keep, is(u8, req.method, "HEAD"))) |_| break;
-                if (!keep) break;
+                const sent = (try sendReply(n, it, e.c, reply, keep, is(u8, req.method, "HEAD"))) == null;
+                if (!sent or !keep) {
+                    open.drop(n, i);
+                    continue;
+                }
+                e.last = usys.nowMs();
+                i += 1;
             }
-            keepLeftover(c.leftoverKey(), ""); // the number may be reused
+            // Kept connections quiet for `idle_ms` go.
+            const now = usys.nowMs();
+            var wait: u64 = forever_ms;
+            i = 0;
+            while (i < open.n) {
+                const quiet = now -| open.conns[i].last;
+                if (quiet >= idle_ms) {
+                    open.drop(n, i);
+                    continue;
+                }
+                wait = @min(wait, idle_ms - quiet);
+                i += 1;
+            }
+            // Nothing happened this turn: sleep until a socket rings (the
+            // listener and every connection hang on the one bell) or the
+            // next idle deadline.
+            if (!progress) _ = n.waitFor(wait);
         }
         return try okResult(it, .{ .int = served });
     }

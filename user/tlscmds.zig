@@ -339,6 +339,19 @@ fn readErr(e: anyerror, why: []const u8) Net.RecvFor {
     return .{ .failed = why };
 }
 
+/// Readiness without blocking: a read would return something now when
+/// the session holds bytes it already took off the wire, or the socket
+/// has more (`Net.pollRaw`). Null for a connection that is gone.
+pub fn poll(c: Conn) ?Net.Poll {
+    const sl = slotOf(c) orelse return null;
+    var p = sl.net.pollRaw(sl.sock) orelse return null;
+    if (sl.role == .server and sl.conn.server.pending()) {
+        p.readable = true;
+        p.closed = false;
+    }
+    return p;
+}
+
 /// Close notify, then the socket; the slot is free again.
 pub fn close(c: Conn) void {
     const sl = slotOf(c) orelse return;

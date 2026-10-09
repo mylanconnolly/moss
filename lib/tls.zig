@@ -721,6 +721,14 @@ pub const Server = struct {
         sv.wire.writer.flush() catch return sv.wireFailed();
     }
 
+    /// Bytes already taken off the wire that a `read` would hand over
+    /// without touching the transport: decrypted leftover, or record
+    /// bytes the wire reader buffered past the last record opened. A
+    /// server polling the socket for readiness must ask this too.
+    pub fn pending(sv: *Server) bool {
+        return sv.leftover_off < sv.leftover_len or sv.wire.reader.end > sv.wire.reader.seek;
+    }
+
     /// Some decrypted application bytes; 0 at a clean close.
     pub fn read(sv: *Server, out: []u8) Error!usize {
         if (!sv.open) return error.Closed;

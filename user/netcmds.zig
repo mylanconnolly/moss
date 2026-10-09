@@ -151,6 +151,21 @@ pub const Net = struct {
         }
     }
 
+    /// What a recv or accept on the socket would find right now; null
+    /// when the service does not answer or the socket is not ours.
+    pub fn pollRaw(n: *Net, s: u64) ?Poll {
+        const rep = ncall(n, .{ .tcp_poll = .{ .sock = s } }) orelse return null;
+        return switch (rep) {
+            .num => |x| .{
+                .readable = (x.n & shared.poll_readable) != 0,
+                .closed = (x.n & shared.poll_closed) != 0,
+                .acceptable = (x.n & shared.poll_acceptable) != 0,
+            },
+            else => null,
+        };
+    }
+    pub const Poll = struct { readable: bool, closed: bool, acceptable: bool };
+
     /// Send everything, waiting for room; null on success.
     pub fn sendAll(n: *Net, s: u64, data: []const u8) ?[]const u8 {
         var off: usize = 0;

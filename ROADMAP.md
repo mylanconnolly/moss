@@ -1713,7 +1713,8 @@ not fix, each verified by reading:
   shipping and updating reference data, timezone and locale databases to
   come);
   concurrent handling (needs the language to spawn), and, when a use
-  case demands them, congestion control and out-of-order receive; (4)
+  case demands them, congestion control (✅ out-of-order receive landed
+  2026-10-08: kept in the buffer, up to eight ranges); (4)
   the fabric surface — ✅ the bulk transport across the wire and remote
   pipeline stages (landed 2026-09-04: session buffers diffed both ways,
   `fw_bulk`/`fw_bulk_resp`/`fw_release`, wire v6, `remote NODE { … }`
@@ -2689,12 +2690,18 @@ not fix, each verified by reading:
 **Networking**
 
 - A minimal stack by design: no congestion control, no TCP options
-  beyond MSS; UDP sockets keep eight datagrams and drop the rest; the
+  beyond MSS — out-of-order segments are kept (up to eight ranges per
+  socket, since 2026-10-08) but without SACK the sender still learns of
+  a loss only from its retransmit timer; UDP sockets keep eight datagrams
+  and drop the rest; the
   resolver holds eight lookups and a cache of sixteen names; a
   truncated DNS answer is not retried over TCP.
 - Blocking is polling plus a doorbell; rings as the wakeup path are not
   built.
 - 16 sockets and 8 views per service.
+- `http-serve` is one thread: an event loop over eight connections
+  (2026-10-08), so a handler that blocks, or a TLS handshake that stalls,
+  holds every other client; `serve` with workers is the concurrent form.
 - Unit-file allowlists are IPv4 (`allow:` is parsed with `parseV4`);
   IPv6 filtering is reachable only through `derive` directly.
 - Cluster addressing is static: node N is `10.77.0.N`.

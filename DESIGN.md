@@ -1332,9 +1332,10 @@ are the primitives; `http-serve $listener $handler [n]` is the loop, with
 a handler as an ordinary function of the request record and its return
 value deciding the response (a record is explicit, a string is text,
 data is JSON; a failing handler is a 500 and the server goes on) — one
-connection at a time (for concurrency across connections, the worker-pool
-`serve` hands each socket to a worker whose handler may itself call
-`http-read`/`http-write`);
+thread, since 2026-10-08 an event loop over up to eight open connections
+(it was one connection at a time; for handlers that must run
+concurrently, the worker-pool `serve` hands each socket to a worker whose
+handler may itself call `http-read`/`http-write`);
 `fetch URL [opts]` is the client, address-only hosts. `to-json` and
 `from-json` joined the language. One request per connection, no
 keep-alive, no chunked transfer: what a script needs, not a proxy.
@@ -2351,9 +2352,49 @@ syscall is no longer the bottleneck the lock contention hides behind).
 the virtio-net driver and a deliberately tiny dual-stack TCP/IP: ARP (v4)
 and NDP/ICMPv6 (v6) resolve the slirp gateways at startup; TCP was
 stop-and-wait (one unacked segment per socket) until the mshl v3 network
-step below made it windowed; receive is in-order, there is no congestion
-control — enough for the fabric protocol and a script's, not an RFC
-museum.
+step below made it windowed; receive was in-order until the 2026-10-08
+performance round (below) kept out-of-order segments; there is no
+congestion control — enough for the fabric protocol and a script's, not
+an RFC museum.
+
+**Performance round (2026-10-08): two seconds that were not the
+network's.** Measured first, with the drills as the workload. acid3's
+180 KB document body took 4.7 s on a loopback that moves megabytes in
+milliseconds: one segment dropped for want of room, and every segment
+behind it in the window — 23 of them — thrown away as out-of-order, so
+the peer's whole window was sent twice after its retransmit timer. The
+receive side now keeps out-of-order segments where they belong in the
+64 KB buffer (up to eight ranges per socket, touching ranges merged,
+absorbed into the in-order run the moment the gap fills; a range that
+would not fit is dropped and counted); the body takes 4 ms. The first
+version placed a kept segment at its distance from the *window's* start
+rather than past the unread in-order run at the buffer's front — fine
+while the reader keeps up (rx_len 0, the acid3 case), and under a slow
+reader an overwrite of bytes not yet read: the full gate's webfab drill
+had the fabric's stream corrupted and both nodes' network units down.
+Keep the one bar: a buffering change runs the whole gate, not the drill
+that motivated it. Then every
+first page load, in every web drill, waited 2.5 s between connecting and
+the first header byte, with no retransmit anywhere — and the client's
+wake path looked guilty. Timestamps at both ends settled it in one run:
+the fixture server accepted the connection 2.5 s after it arrived, but
+had waited only 2 ms in `accept` — it had been sitting in the *previous*
+connection's 3 s keep-alive idle wait, one connection at a time, and
+the previous connection was the drill script's own parked `fetch`. The
+server is now an event loop: a new `tcp_poll` request answers readiness
+(readable, peer closed, acceptable) without consuming anything, the
+listener and every open connection hang on the one bell, and `http-serve`
+serves whichever connection has a request in turn while kept ones wait
+out their idle time without holding the listener (a pipelined pair
+arrives in one segment, so a connection whose leftover holds a request
+counts as readable; a TLS session's already-read record bytes count
+too). The web drill's first page went from 2663 ms to 158 ms. Two
+lessons, both already on the wall: measure before theorizing (the 2.5 s
+was neither the network nor the client), and instrument *both* ends of a
+stall — a server-side timestamp pair cost ten lines and ended an hour of
+wrong theories about doorbells. Each socket now carries counters
+(segments, bytes, no-room drops, out-of-order drops, retransmits) and
+logs a one-line story at close when any of them is nonzero.
 The ABI is IPv6-native: addresses are always 128 bits (two words), IPv4
 rides v4-mapped, and there is no v4-only path to fossilize. Local
 destinations (own addresses, ::1, 127/8) short-circuit through the stack,
