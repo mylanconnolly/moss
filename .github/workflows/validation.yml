@@ -29,6 +29,36 @@ jobs:
           path: zig-out/validation/
           retention-days: 14
 
+  smoke:
+    # 26.04 supplies QEMU 10.2; 24.04's QEMU lacks x-flts.
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    env:
+      MOSS_LIMINE: ${{ github.workspace }}/zig-out/limine-binary
+      MOSS_OVMF: /usr/share/OVMF/OVMF_CODE_4M.fd
+      MOSS_OVMF_VARS: /usr/share/OVMF/OVMF_VARS_4M.fd
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@v4
+      - name: Install emulator and firmware
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y qemu-system-x86 qemu-system-arm ovmf openssl
+          mkdir -p zig-out
+          curl --fail --location --retry 3 https://github.com/Limine-Bootloader/Limine/releases/download/v12.9.3/limine-binary.tar.xz -o zig-out/limine-binary.tar.xz
+          echo 'e02a473c6dc6df25159697f94930272397f21fd86e5d4eeee61bba72c95ec8d2  zig-out/limine-binary.tar.xz' | sha256sum --check
+          tar -xJf zig-out/limine-binary.tar.xz -C zig-out
+      - name: TCG smoke on both ports
+        run: python3 tools/validate.py smoke
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: tcg-smoke-${{ github.run_id }}-${{ github.run_attempt }}
+          path: zig-out/validation/
+          retention-days: 14
+
   runtime:
     # Enable after provisioning a dedicated runner with these labels.
     # Self-hosted execution uses trusted default-branch code only.
@@ -46,10 +76,7 @@ jobs:
         with:
           persist-credentials: false
       - uses: jdx/mise-action@v4
-      - name: TCG smoke on both ports
-        run: python3 tools/validate.py smoke
       - name: Full AMD64 KVM and ARM64 TCG gates
-        if: ${{ !cancelled() }}
         run: python3 tools/validate.py full
       - uses: actions/upload-artifact@v4
         if: ${{ !cancelled() }}

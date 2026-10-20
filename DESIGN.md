@@ -10272,9 +10272,9 @@ grid at its native 12 px without anti-aliasing to lose (SIL Open Font
 License 1.1; the notice and license sit beside it in `kernel/font/`,
 `tools/mkfont.py` regenerates it); three candidates were rendered and
 looked at before choosing. A shadow of the text (rows by columns of
-bytes) is what a scroll redraws the whole screen from — no reads of
-the framebuffer, which through a WC mapping are uncached and slow, and
-no second pixel buffer to size to the mode. The log is UTF-8 and the
+bytes) lets a scroll compare each old/new character and redraw only changed
+cells — no reads of the framebuffer, which through a WC mapping are uncached
+and slow, and no second pixel buffer to size to the mode. The log is UTF-8 and the
 font is ASCII, so a multibyte sequence is gathered and drawn as one
 stand-in — a hyphen for the dashes, an angle bracket for an arrow,
 `?` for the rest — after the first screenshot showed the em dash in
@@ -10286,8 +10286,9 @@ serial port already has it.
 Verification was by looking: QEMU's monitor `screendump` of the panic
 drill (the boot log and the panic, legible) and of the sched drill
 mid-run (a scrolled screenful, every row where it should be). The
-gate cannot look, so the panic drill asserts the console's attach line
-on x86_64 and the rest is the eye's, as it should be for a console.
+panic drill asserts the console's attach line on x86_64. A native regression
+also compares scroll output pixel-for-pixel with moving the rendered image,
+including padded pitch, a one-row console and repeated empty scrolls.
 
 The gate found what the eye could not. With the console on, the users,
 login and fabric drills stalled for a minute at a time while the
@@ -10471,12 +10472,19 @@ runs with preflight checks and separate timestamped evidence directories.
 It probes KVM acceleration and forbids fallback with `-Drequire-kvm` in
 the AMD64 full gate, and records firmware hashes, tool versions, revision,
 dirty state and commands, and preserves failed status while running the other
-port. GitHub Actions runs native AMD64 Debug/ReleaseSafe per change; a
-separately enabled, dedicated AMD KVM runner performs smoke and both full
-gates on main and weekly. Runtime registration is an explicit deployment
-step documented in tools/README; the workflow files alone do not activate it.
+port. GitHub Actions defines native AMD64 Debug/ReleaseSafe and hosted TCG
+smoke on both ports per change, manual run and weekly. The smoke image is
+Ubuntu 26.04 with distro QEMU 10.2/OVMF and checksum-verified Limine 12.9.3.
+Build and execution share `tools/check_filter.zig`: base names include their
+ReleaseSafe row and explicit `+rs` names select only that row. Filtered checks
+compile only selected kernels; interactive shell/login targets retain their
+own dependencies. This avoids compiling both full 83-kernel sets (about 91 MB
+per AMD64 variant) on a hosted smoke runner with limited disk and CPU.
+A separately enabled dedicated AMD KVM runner can perform both full gates on
+main and weekly; that job remains disabled pending hardware. Provisioning is
+documented in tools/README.
 
-Validation on the final OS/runner source: **83/83 AMD64 KVM and 83/83
+Validation of the initial recovery: **83/83 AMD64 KVM and 83/83
 ARM64 TCG**, four drills at a time, including all six ReleaseSafe rows.
 Browser, chrome scale round trips and remote-page rendering/closure each
 passed three isolated repetitions on each port. Users passed three per mode
@@ -10485,14 +10493,40 @@ on AMD64 and five per mode on ARM64. Native Debug and ReleaseSafe each pass
 validation helper passes five integration checks. The fast TCG smoke passes
 10/10 rows on each port, using compositor pixel assertions.
 
-The interactive `gui` drill remains in both full gates. AMD64 TCG's longer
-clipboard/editing sequence failed once under the two-job smoke, duplicating
-the pasted text, then passed in isolation with no QEMU input-queue overflow.
-That residual and the next diagnostic steps remain Open in ROADMAP; the
-final-state assertion is unchanged. Full-gate metadata, source hashes and
-per-node captures are retained in
-`zig-out/validation/20261020T124145.622370Z-full/`; the passing smoke record
-is `zig-out/validation/20261020T131404.864322Z-smoke/`.
+The interactive `gui` drill also runs in TCG smoke. QEMU traces exposed
+`virtio_input_queue_full` exactly around the second select-all: raw modifier
+and A frames were dropped, producing either `MossxMossx` or a literal trailing
+`v`. Buffered semantic traces confirmed the editor never received select-all;
+this was input admission, not clipboard replacement. The gallery now opts into
+`trace_input: true`: completed renders log a numbered acknowledgement with
+no key or field contents. The driver waits for each semantic input's render,
+then checks the same exact final state, password protection and two dialog
+round trips. A wrong final state fails immediately. Raw QEMU key/overflow
+traces remain in the evidence.
+
+The acknowledgement run also exposed why the guest fell behind: after the
+firmware console filled, every log line repainted a full screen while the
+logger masked interrupts, about 0.9 seconds under AMD64 TCG. Waiting for each
+render made that cost cross the existing 60-second watchdog. Console scrolls
+now repaint only changed character cells, retaining every log line and the
+same memory bound. The native pixel comparison covers the optimization; the
+QEMU sequence still uses the original queues and watchdog. A QMP reply means
+emulator acceptance, not guest consumption; harnesses must observe progress,
+and kernel diagnostics must avoid needless MMIO under an interrupt lock.
+
+The original full-gate metadata, source hashes and per-node captures are in
+`zig-out/validation/20261020T124145.622370Z-full/`. The queue-overflow trace is
+in `zig-out/validation/tcg-edit-overflow/`, and the acknowledged run before
+the console fix in `zig-out/validation/tcg-edit-ack-before-console/`.
+The final follow-up gates pass **83/83 AMD64 KVM and 83/83 ARM64 TCG**;
+`zig-out/validation/20261020T140520.962134Z-full/` retains the final ARM64
+run and an `amd64-final/` revalidation after sharing the build filter.
+Native Debug and ReleaseSafe pass 347 tests with three optional fixture
+skips; shell tooling passes 20 and validation-helper integration passes five.
+The repaired AMD64 TCG gallery passes three repetitions alongside ReleaseSafe
+storage, about 10 seconds per gallery run with no input-queue overflow. Expanded
+TCG smoke passes 11/11 rows on each port, retained in
+`zig-out/validation/20261020T144353.897429Z-smoke/`.
 
 Boot contract (Phase 0): the bootable artifact is a raw arm64 Image (Linux
 boot protocol) objcopy'd from the kernel ELF, which is kept for symbols and

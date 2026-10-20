@@ -4,8 +4,9 @@
 # keyboard (Tab moves between the buttons, Enter fires the focused one),
 # and threads the returned state forward. No loop, no drawing here.
 let final = (gui {
-    init:  { count: 0, done: false, name: "", other: "", secret_len: 0, dark: false, notify: false, agree: false, asking: false, wiped: false }
-    title: "Moss · Components"
+    trace_input: true
+    init:        { count: 0, done: false, name: "", other: "", secret_len: 0, dark: false, notify: false, agree: false, asking: false, wiped: false }
+    title:       "Moss · Components"
     view: (fn [state] {
         {
           kind: "column"

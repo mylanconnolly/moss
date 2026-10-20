@@ -96,6 +96,7 @@ pub fn declareStrut(edge: u64, size: usize) void {
 
 pub var output_control: u64 = 0;
 pub var log_h: u64 = 0; // for the run loops' `gui:`/`topbar:`/`dock:` logging
+
 /// The host's retained-value pool occupancy (chunks busy), logged when it
 /// climbs a step past the last mark: which turn fills it.
 pub var pool_busy: ?*const fn () usize = null;
@@ -2304,6 +2305,12 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
     const title = if (spec.get("title")) |t| (if (t == .str) t.str else "") else "";
     const want_trusted = boolField(spec, "trusted", false);
     const want_isolate = boolField(spec, "isolate", false);
+    // Opt-in driver acknowledgement: a QMP reply only means the emulator
+    // accepted input, not that the guest consumed it. Report completed
+    // renders without logging keys or field contents (including passwords).
+    const trace_input = boolField(spec, "trace_input", false);
+    var input_serial: usize = 0;
+    var reported_input_serial: ?usize = null;
     // `tick: <ms>` (or `tick: true` → 1s) asks the loop to re-render on a
     // timer so a `view` that reads the clock updates on its own.
     wf.tick_ms = if (spec.get("tick")) |t| switch (t) {
@@ -2603,6 +2610,12 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
             announced = true;
         }
 
+        if (trace_input and reported_input_serial != input_serial) {
+            var line: [64]u8 = undefined;
+            _ = usys.log(log_h, std.fmt.bufPrint(&line, "gui: input settled {d}.", .{input_serial}) catch "gui: input trace failed");
+            reported_input_serial = input_serial;
+        }
+
         // Wait for a key. Tab moves focus; a printable key or backspace
         // edits the focused field; Enter fires a focused button (with the
         // fields' text) or advances past a focused field. Each break
@@ -2851,6 +2864,7 @@ pub fn call(it: *mshl.Interp, name: []const u8, args: []const Value, input: ?Val
             }
             pressed = null;
             const ch = ev.ch;
+            if (trace_input and ch != 0) input_serial += 1;
             if (!want_trusted and (ch == shared.keyboard.close_window or ch == shared.keyboard.close_all)) {
                 closed = true;
                 break :input;

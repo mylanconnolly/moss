@@ -16,7 +16,7 @@ import time
 import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
-SMOKE = "panic,fault,domain,ipc,pan,smmu,comp,fs+rs"
+SMOKE = "panic,fault,domain,ipc,pan,smmu,comp,gui,fs+rs"
 
 
 def capture(*args):

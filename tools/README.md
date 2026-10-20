@@ -77,9 +77,13 @@ python3 -m unittest discover -s tools -p test_validate.py
 
 `host` runs native Debug and ReleaseSafe tests. `smoke` runs AMD64 TCG,
 then ARM64 TCG: boot/panic, fault containment, domain accounting, IPC,
-PAN/SMAP, DMA refusal, compositor pixels and ReleaseSafe storage.
-The interactive gallery stays in the full gates; its TCG editing failure
-is tracked in ROADMAP. `full` runs all
+PAN/SMAP, DMA refusal, compositor pixels, interactive editing and ReleaseSafe
+storage. The build and runner share the same `-Donly` selection: only the
+selected kernels compile, a base name includes its ReleaseSafe row, and
+`name+rs` selects only that row. This keeps hosted smoke within disk/time
+budgets instead of building all 83 kernels per port. The gallery waits for a guest render acknowledgement after each key
+or chord; QMP acceptance alone can overrun the 32-entry virtio-input queue
+under TCG. `full` runs all
 83 rows on AMD64 KVM, then all 83 on ARM64 TCG. It requires an AMD Linux
 host with readable/writable `/dev/kvm` and nested AMD-V enabled; a QMP
 probe verifies acceleration, and `-Drequire-kvm` forbids TCG fallback in
@@ -105,8 +109,14 @@ raw `zig build check` processes must also be kept sequential.
 
 `.github/workflows/validation.yml` runs the native AMD64 tests on GitHub's
 Ubuntu runner for pushes to main, pull requests, manual runs and a weekly
-schedule. The runtime job runs TCG smoke followed by both full gates on
-trusted main-branch code, retaining artifacts for 14 days. To activate it:
+schedule. A separate hosted `smoke` job boots both ports under TCG on Ubuntu
+26.04 (its QEMU 10.2 provides the required VT-d properties; 24.04's does not).
+It installs distro QEMU/OVMF and checksum-verifies the pinned Limine 12.9.3
+release. The hosted jobs need no self-hosted runner or KVM. Each uploads its
+own evidence for 14 days, including failure logs and screenshots.
+
+The optional `runtime` job runs both full gates on trusted main-branch code.
+It remains disabled until dedicated AMD hardware is available. To activate it:
 
 1. Provision a dedicated Linux AMD64 runner with the `self-hosted`, `Linux`,
    `X64`, `moss-amd64` labels. Install Python 3.11+, mise, QEMU with both
@@ -122,5 +132,6 @@ trusted main-branch code, retaining artifacts for 14 days. To activate it:
    repository variable are deployment steps, not performed by these files.
 
 The runtime job is serialized and excludes pull-request code. Native checks
-run on pull requests; runtime evidence arrives on main after activation.
-A green hosted job alone does not establish that either OS port boots.
+and hosted TCG smoke run on pull requests. Full KVM evidence arrives on main
+after activation. TCG smoke covers selected drills; it does not replace
+either complete architecture gate.

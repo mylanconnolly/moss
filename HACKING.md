@@ -79,8 +79,13 @@ The underlying commands remain `zig build -Darch=x86_64 check` and
 `zig build test` and `zig build test -Doptimize=ReleaseSafe` exercise the
 native host compiler: cross-compiling on a Mac does not cover Zig's native
 x86 backend. See [tools/README.md](tools/README.md#repeatable-validation)
-for CI and runtime-runner provisioning. Smoke uses the compositor
-pixel drill; the interactive gallery remains in the full gates.
+for hosted native/TCG CI and optional full KVM runner provisioning. Smoke
+includes compositor pixels and the interactive gallery. The gallery uses
+`trace_input: true` to log a render sequence acknowledgement after each
+semantic key; the runner waits for it before sending the next chord. QMP
+acceptance does not mean the guest drained its bounded input queue. The
+trace contains sequence numbers, never keystrokes or field contents.
+The gallery's raw QEMU input/overflow trace is `gui-qmp-keys.log`.
 For AMD64 failures, a user-mode SIMD exception at ordinary arithmetic
 can mean bad initial MXCSR masks, not unsupported instructions. A
 1280x800 QMP capture while virtio-gpu logs 1280x1024 can mean the wrong

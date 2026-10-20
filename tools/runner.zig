@@ -305,9 +305,7 @@ pub fn main(init: std.process.Init) !u8 {
         const label = argv[i];
         const bin = argv[i + 1];
         const base = if (std.mem.endsWith(u8, label, "+rs")) label[0 .. label.len - 3] else label;
-        if (only) |list| {
-            if (!listed(list, label) and !listed(list, base)) continue;
-        }
+        if (!@import("check_filter.zig").selected(only, label)) continue;
         var spec = specByName(base) orelse {
             std.debug.print("[FAIL] {s}: no spec for this test\n", .{label});
             failures += 1;
@@ -459,15 +457,6 @@ fn keepFailedLog(label: []const u8) void {
     const dst = std.fmt.allocPrint(gpa, "{s}/{s}-failed.log", .{ check_dir, label }) catch return;
     cwd.copyFile(src, cwd, dst, io, .{}) catch return;
     std.debug.print("       (log kept as {s})\n", .{dst});
-}
-
-/// Is `name` one of the comma-separated entries of `list`?
-fn listed(list: []const u8, name: []const u8) bool {
-    var it = std.mem.splitScalar(u8, list, ',');
-    while (it.next()) |entry| {
-        if (std.mem.eql(u8, std.mem.trim(u8, entry, " "), name)) return true;
-    }
-    return false;
 }
 
 fn specByName(name: []const u8) ?Spec {
@@ -683,6 +672,8 @@ fn runOnce(spec: Spec, bin: []const u8, disk: []const u8, run_no: u32, extra: ?[
         },
         else => {},
     }
+    // Keep raw input and queue-overflow evidence alongside the GUI assertions.
+    if (spec.kind == .gui) try args.appendSlice(gpa, &.{ "-D", "zig-out/check/gui-qmp-keys.log", "-trace", "enable=input_event_key_qcode", "-trace", "enable=virtio_input_queue_full" });
     // net and dot keep their assets (trust roots) in mossfs, so they
     // boot a scratch disk alongside the NIC.
     if (spec.kind == .net or spec.kind == .dot or spec.kind == .web or spec.kind == .localeupd or spec.kind == .topbar) try appendDisk(&args, disk);
@@ -2842,12 +2833,37 @@ fn trustDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     return true;
 }
 
+/// One semantic input at a time: QMP acceptance is not guest consumption.
+/// The gallery opts into render sequence acknowledgements, so TCG cannot
+/// accumulate modifier/key frames faster than the bounded virtqueue drains.
+const GuiInput = struct {
+    q: *Qmp,
+    spec: Spec,
+    log_path: []const u8,
+    polls: *u64,
+    serial: usize = 0,
+
+    fn settled(self: *GuiInput) !bool {
+        const needle = try std.fmt.allocPrint(gpa, "gui: input settled {d}.", .{self.serial});
+        return waitLogN(self.log_path, needle, 1, "the gui input was not consumed and rendered", self.spec, self.polls);
+    }
+    fn ack(self: *GuiInput) !bool {
+        self.serial += 1;
+        return self.settled();
+    }
+    fn key(self: *GuiInput, code: []const u8) !bool {
+        return self.q.sendKey(code) and try self.ack();
+    }
+    fn chord(self: *GuiInput, modifier: []const u8, code: []const u8) !bool {
+        return self.q.chord(modifier, code) and try self.ack();
+    }
+};
+
 /// The mshl GUI drill (`gui`): mshrun runs a GUI defined in mshl as a
-/// pure view/update service. Once the window is up we type Enter (fire
-/// the focused "increment" button), Tab (move focus to "quit"), Enter
-/// (fire "quit"); the app increments its state, re-renders, and closes,
-/// and mshrun logs the final value. Proves a GUI written entirely in
-/// mshl renders, routes the keyboard, and threads state through update.
+/// pure view/update service. Exercise increment, field editing, clipboard,
+/// password protection, undo/redo, switches and dialog confirmation, then
+/// quit and assert the exact final state. Each semantic input waits for
+/// the guest's completed render; the final quit is acknowledged by exit.
 fn guiDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     var n: u64 = 0;
     while (true) {
@@ -2868,52 +2884,35 @@ fn guiDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     defer q.close();
     fail_qmp = &q;
     defer fail_qmp = null;
-    // Enter fires "increment" (count -> 1). Give the app a moment to
-    // update + re-render, then keep a screendump of the live window for
-    // the record — before we close it.
-    if (!q.sendKey("ret")) {
-        reportFailure(spec.name, "QMP could not type Enter", log_path);
-        return false;
-    }
-    sleepMs(300);
+    var input = GuiInput{ .q = &q, .spec = spec, .log_path = log_path, .polls = polls };
+    if (!try input.settled()) return false;
+    // Enter fires "increment" (count -> 1). Capture the completed render.
+    if (!try input.key("ret")) return false;
     const ppm_path = try std.fmt.allocPrint(gpa, "{s}/{s}.ppm", .{ check_dir, spec.name });
     _ = q.screendump(ppm_path);
-    // Traverse past the disabled action into the field, edit it, then
-    // Shift-Tab returns to Close. A disabled button must never take focus.
+    // Traverse past the disabled action into the field and edit it.
+    // A disabled button must never take focus.
     for ([_][]const u8{ "tab", "tab", "x" }) |k| {
-        if (!q.sendKey(k)) return false;
-        sleepMs(150);
+        if (!try input.key(k)) return false;
     }
     // Cross-field clipboard transfer, cut/undo and redo, plus focus reveal
     // into the nested scroll viewport. Control-A keeps Emacs semantics;
     // the Command modifier selects all and owns the familiar shortcuts.
     for ([_][]const u8{ "a", "c", "x", "z" }) |key| {
-        if (!q.chord("meta_l", key)) return false;
-        sleepMs(150);
+        if (!try input.chord("meta_l", key)) return false;
     }
-    if (!q.sendKey("tab")) return false;
-    sleepMs(150);
-    if (!q.chord("meta_l", "v")) return false;
-    sleepMs(150);
-    if (!q.chord("meta_l", "z")) return false;
-    sleepMs(150);
-    // Hold Shift around Command-Z for redo.
-    if (!q.execute("{\"execute\":\"input-send-event\",\"arguments\":{\"events\":[{\"type\":\"key\",\"data\":{\"down\":true,\"key\":{\"type\":\"qcode\",\"data\":\"shift\"}}}]}}")) return false;
-    if (!q.chord("meta_l", "z")) return false;
-    if (!q.execute("{\"execute\":\"input-send-event\",\"arguments\":{\"events\":[{\"type\":\"key\",\"data\":{\"down\":false,\"key\":{\"type\":\"qcode\",\"data\":\"shift\"}}}]}}")) return false;
-    sleepMs(200);
+    if (!try input.key("tab")) return false;
+    if (!try input.chord("meta_l", "v")) return false;
+    if (!try input.chord("meta_l", "z")) return false;
+    if (!q.chord2("shift", "meta_l", "z") or !try input.ack()) return false;
     _ = q.screendump(check_dir ++ "/gui-edit-scroll.ppm");
     // A password selection must neither replace the clipboard nor be cut.
-    if (!q.sendKey("tab")) return false;
-    sleepMs(150);
+    if (!try input.key("tab")) return false;
     for ([_][]const u8{ "a", "c", "x" }) |key| {
-        if (!q.chord("meta_l", key)) return false;
-        sleepMs(100);
+        if (!try input.chord("meta_l", key)) return false;
     }
-    if (!q.chord("shift", "tab")) return false;
-    sleepMs(150);
-    if (!q.chord("meta_l", "a") or !q.chord("meta_l", "v")) return false;
-    sleepMs(150);
+    if (!try input.chord("shift", "tab")) return false;
+    if (!try input.chord("meta_l", "a") or !try input.chord("meta_l", "v")) return false;
     // The switches: Tab past the password to "dark" and flip it with
     // Space, "notify" with Enter, the "agree" checkbox with Space; the
     // disabled "managed" switch is never reached. Then the dialog: Enter on
@@ -2922,19 +2921,18 @@ fn guiDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     // Tab reaches Delete, Enter confirms. The focus returns to the button
     // again, so two Tabs reach "quit" by wrapping through "inc".
     for ([_][]const u8{ "tab", "tab", "spc", "tab", "ret", "tab", "spc", "tab", "ret", "esc", "ret" }) |k| {
-        if (!q.sendKey(k)) return false;
-        sleepMs(200);
+        if (!try input.key(k)) return false;
     }
     _ = q.screendump(check_dir ++ "/gui-dialog.ppm");
     for ([_][]const u8{ "tab", "ret" }) |k| {
-        if (!q.sendKey(k)) return false;
-        sleepMs(200);
+        if (!try input.key(k)) return false;
     }
     _ = q.screendump(check_dir ++ "/gui-switches.ppm");
-    for ([_][]const u8{ "tab", "tab", "ret" }) |k| {
-        if (!q.sendKey(k)) return false;
-        sleepMs(150);
+    for ([_][]const u8{ "tab", "tab" }) |k| {
+        if (!try input.key(k)) return false;
     }
+    // Quit has no next render; the exact final-state assertion acknowledges it.
+    if (!q.sendKey("ret")) return false;
     var m: u64 = 0;
     while (true) {
         sleepMs(poll_ms);
@@ -2947,6 +2945,10 @@ fn guiDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
                 return false;
             }
             break;
+        }
+        if (std.mem.indexOf(u8, content, "gui: done count=") != null) {
+            reportFailure(spec.name, "the gui app closed with the wrong final editing state", log_path);
+            return false;
         }
         if (std.mem.indexOf(u8, content, "KERNEL PANIC") != null or m * poll_ms / 1000 > spec.timeout_s) {
             reportFailure(spec.name, "the gui app never updated its state and closed", log_path);

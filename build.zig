@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const check_filter = @import("tools/check_filter.zig");
 
 pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
@@ -1358,6 +1359,13 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     const dt_tests = b.addTest(.{ .root_module = dt_test_mod });
+    const fbcon_test_mod = b.createModule(.{
+        .root_source_file = b.path("kernel/fbcon.zig"),
+        .target = host_target,
+        .optimize = optimize,
+    });
+    fbcon_test_mod.addImport("shared", shared_test_mod);
+    const fbcon_tests = b.addTest(.{ .root_module = fbcon_test_mod });
     // Host baseline benchmarks (`zig build bench`): primitives + the
     // mossfs core over a RAM device, ReleaseFast. `bench-soft` strips the
     // CPU's AES feature to approximate today's no-NEON moss userspace.
@@ -1494,11 +1502,18 @@ pub fn build(b: *std.Build) void {
     guieval_test_mod.addImport("mosslib", lib_test_mod);
     const guieval_tests = b.addTest(.{ .root_module = guieval_test_mod });
     const test_step = b.step("test", "Run host-side unit tests");
+    const check_filter_test_mod = b.createModule(.{
+        .root_source_file = b.path("tools/check_filter.zig"),
+        .target = host_target,
+        .optimize = optimize,
+    });
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = check_filter_test_mod })).step);
     test_step.dependOn(&b.addRunArtifact(guieval_tests).step);
     test_step.dependOn(&b.addRunArtifact(medit_tests).step);
     test_step.dependOn(&b.addRunArtifact(editorfile_tests).step);
     test_step.dependOn(&b.addRunArtifact(shared_tests).step);
     test_step.dependOn(&b.addRunArtifact(dt_tests).step);
+    test_step.dependOn(&b.addRunArtifact(fbcon_tests).step);
     test_step.dependOn(&b.addRunArtifact(lib_tests).step);
     test_step.dependOn(&b.addRunArtifact(mossfs_tests).step);
 
@@ -1570,7 +1585,7 @@ pub fn build(b: *std.Build) void {
     const Variant = struct {
         fn add(
             bb: *std.Build,
-            run: *std.Build.Step.Run,
+            run: ?*std.Build.Step.Run,
             vn: []const u8,
             label: []const u8,
             opt: std.builtin.OptimizeMode,
@@ -1603,17 +1618,17 @@ pub fn build(b: *std.Build) void {
                 .use_llvm = if (port == .x86_64) true else null,
             });
             vexe.setLinkerScript(script);
-            run.addArg(label);
+            if (run) |r| r.addArg(label);
             // x86_64 boots the ELF through Limine; aarch64 the raw Image.
             if (port == .x86_64) {
-                run.addFileArg(vexe.getEmittedBin());
+                if (run) |r| r.addFileArg(vexe.getEmittedBin());
                 return vexe.getEmittedBin();
             }
             const vbin = bb.addObjCopy(vexe.getEmittedBin(), .{
                 .format = .bin,
                 .basename = bb.fmt("moss-check-{s}.bin", .{label}),
             });
-            run.addFileArg(vbin.getOutput());
+            if (run) |r| r.addFileArg(vbin.getOutput());
             return vbin.getOutput();
         }
     };
@@ -1627,7 +1642,12 @@ pub fn build(b: *std.Build) void {
     }
     if (arch == .aarch64 and force_hvf) run_check.addArg("--hvf");
     for (variants) |vn| {
-        const vbin = Variant.add(b, run_check, vn, vn, optimize, kernel_target, shared_mod, user_blobs_src, &all_test_opts, linker_script, arch);
+        const selected = check_filter.selected(only, vn);
+        const interactive = arch == .aarch64 and (std.mem.eql(u8, vn, "shell") or std.mem.eql(u8, vn, "login"));
+        if (!selected and !interactive) continue;
+        // Interactive targets retain their own dependency without forcing
+        // those kernels into a filtered check's build or argument list.
+        const vbin = Variant.add(b, if (selected) run_check else null, vn, vn, optimize, kernel_target, shared_mod, user_blobs_src, &all_test_opts, linker_script, arch);
         if (arch != .aarch64) continue;
         // Plain `zig build run-shell` boots this variant — no flag needed.
         if (std.mem.eql(u8, vn, "shell")) {
@@ -1640,7 +1660,9 @@ pub fn build(b: *std.Build) void {
         }
     }
     for (release_variants) |vn| {
-        _ = Variant.add(b, run_check, vn, b.fmt("{s}+rs", .{vn}), .ReleaseSafe, kernel_target, shared_mod, user_blobs_src, &all_test_opts, linker_script, arch);
+        const label = b.fmt("{s}+rs", .{vn});
+        if (!check_filter.selected(only, label)) continue;
+        _ = Variant.add(b, run_check, vn, label, .ReleaseSafe, kernel_target, shared_mod, user_blobs_src, &all_test_opts, linker_script, arch);
     }
     // The gate: every drill and the +rs rows, on whichever port -Darch names.
     const check_step = b.step("check", "Run the full OS test suite in QEMU (plus host unit tests); -Darch=x86_64 runs it on the x86_64 port");

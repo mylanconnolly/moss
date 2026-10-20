@@ -2822,28 +2822,14 @@ not fix, each verified by reading:
   distinct RID_PASID per device. Adapting the port must preserve per-device
   DMA isolation. The relevant upstream check is
   `vtd_ce_pasid_0_check` in [QEMU 11.1.1](https://github.com/qemu/qemu/blob/v11.1.1/hw/i386/intel_iommu.c).
-- **AMD64 TCG interactive editing.** The new smoke run caught `gui`
-  closing cleanly with `other=MossxMossx` rather than `other=Mossx`;
-  its clipboard/password/undo/redo sequence missed a selection or duplicated
-  a paste. The complete AMD64 KVM and ARM64 TCG gates pass that assertion.
-  The failing AMD64 TCG run used two jobs; an isolated rerun passed in 47.9 s
-  with QEMU's `virtio_input_queue_full` trace empty. Evidence is in
-  `zig-out/validation/20261020T130157.804221Z-smoke/amd64-tcg/` and
-  `zig-out/validation/tcg-gui-isolated/`. Next: capture QMP key events and
-  decoded semantic commands under the two-job reproduction, locate whether
-  select-all is lost or a paste repeats, then synchronize the driver with
-  the observed edit state or fix the responsible input/edit layer. Keep the
-  exact final-state, password and dialog assertions and the watchdog.
-  The fast smoke profile uses the compositor pixel drill; `gui` remains
-  in both complete gates. This TCG residual is separate from runtime CI
-  activation and newer-QEMU VT-d support.
-- **Runtime CI activation.** The workflow and local validation helper are
-  installed (see the Framework recovery entry under Landed), but a dedicated
-  AMD Linux runner must be registered with labels `self-hosted`, `Linux`,
-  `X64`, `moss-amd64`, then the repository Actions variable
-  `MOSS_KVM_RUNNER_ENABLED=true` set. Follow tools/README's provisioning
-  checklist, dispatch Validation and inspect both architecture artifacts.
-  Until then, native host CI is available and full runtime checks are local.
+- **Full KVM CI hardware.** Native tests and dual-port TCG smoke use GitHub
+  hosted runners. The complete runtime job still needs a dedicated AMD Linux
+  runner with labels `self-hosted`, `Linux`, `X64`, `moss-amd64`, then the
+  repository Actions variable `MOSS_KVM_RUNNER_ENABLED=true`. No suitable
+  machine is currently available; the Framework stays a local development
+  host. Follow tools/README's provisioning steps when hardware is available,
+  dispatch Validation and inspect both architecture artifacts. Keep running
+  both complete gates locally until then.
 - **Next emulator/hardware work:** complete newer-QEMU VT-d compatibility
   using per-device translation contexts; prove unauthorized DMA remains
   refused and teardown/rebind invalidations work. Exercise the supported old
@@ -2896,6 +2882,32 @@ not fix, each verified by reading:
 
 ### Landed (the story, with the bugs each piece found)
 
+- ✅ **TCG editing and hosted runtime coverage (2026-10-20).** Raw QEMU
+  traces caught the 32-entry virtio-input queue overflowing around select-all;
+  buffered semantic traces showed the missing command, with either a duplicate
+  paste or a literal `v` in the final field. The gallery now opts into numbered
+  render acknowledgements and the driver waits after each key/chord, retaining
+  the exact clipboard/password/undo/redo/dialog assertions and failing wrong
+  final states immediately. Input/overflow traces are archived with the logs.
+  This exposed a second AMD64 TCG cost: firmware-console scrolling repainted a
+  whole screen per log line with interrupts masked, about 0.9 s per line. It
+  now paints only changed character cells. A native regression compares every
+  pixel with a moved rendered image, including a one-row console, padded pitch
+  and repeated blank scrolls. Queue sizes, quotas and watchdogs are unchanged.
+  The workflow adds hosted dual-port TCG smoke on Ubuntu 26.04/QEMU 10.2 with
+  distro OVMF and checksum-verified Limine 12.9.3, alongside native Debug and
+  ReleaseSafe. Build and runner share exact drill selection, so smoke compiles
+  only its selected kernels rather than two complete sets; base names retain
+  their ReleaseSafe rows and explicit `+rs` names remain exclusive. Smoke includes the compositor and interactive gallery. Full KVM
+  CI remains Open pending dedicated hardware; no local runner is installed.
+  Final gates: **83/83 AMD64 KVM, 83/83 ARM64 TCG**, all six ReleaseSafe
+  rows. Native Debug/ReleaseSafe pass 347 tests (three optional skips), shell
+  tooling 20, helper integration five. The repaired AMD64 TCG gallery passes
+  three two-worker repetitions alongside ReleaseSafe storage, about 10 s each,
+  with no QEMU queue overflow. Expanded TCG smoke passes 11/11 per port. Evidence: `20261020T140520.962134Z-full/`
+  (including `amd64-final/`) and `tcg-edit-fixed-soak3/` under
+  `zig-out/validation/`.
+
 - ✅ **Framework recovery after the ARM-only stretch (2026-10-20).**
   Revalidation started at `cf5e28b`: Ryzen 9 7940HS, Linux 7.2.6, Zig
   0.16.0, QEMU 10.2.3, Limine 12.9.3, KVM with nested AMD-V. Commit
@@ -2923,15 +2935,15 @@ not fix, each verified by reading:
   `tools/validate.py` runs native Debug/ReleaseSafe, dual-port TCG smoke,
   or full AMD64 KVM then ARM64 TCG, retaining fresh per-port evidence,
   versions, revision/dirty state, firmware hashes and actual acceleration.
-  GitHub Actions runs hosted native tests per change and offers an enabled
+  GitHub Actions defines hosted native tests per change and an opt-in
   runtime runner on main and weekly; provisioning remains Open above.
   Final gates: **83/83 AMD64 KVM and 83/83 ARM64 TCG**, all ReleaseSafe
   rows included, four jobs. Browser/chrome/relay pass three isolated runs
   per port; users pass three per mode on AMD64 and five on ARM64. Native
   Debug/ReleaseSafe each pass 345 tests with three optional skips, shell
   tooling 20, helper integration five, and compositor TCG smoke 10/10 on
-  both ports. The interactive AMD64 TCG editing residual remains Open;
-  its assertions in the complete gates are unchanged.
+  both ports. The subsequent entry above closes the interactive AMD64 TCG
+  editing residual while retaining its complete-gate assertions.
   See DESIGN's Framework sections and tools/README for the contracts and
   activation steps.
 

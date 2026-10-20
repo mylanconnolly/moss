@@ -6,7 +6,7 @@
 //! it write-combining (`mapFramebuffer`), and `attach` takes it over.
 //!
 //! Character cells are the unit: a shadow of the text keeps what is on
-//! screen, and a scroll redraws every row from it — no reads of the
+//! screen, and a scroll redraws only cells whose character changed — no reads of the
 //! framebuffer, which through a write-combining mapping are slow, and no
 //! second pixel buffer. 32 bits per pixel, RGB with byte-sized channels
 //! at any shift; other formats are declined and the serial console
@@ -170,13 +170,24 @@ fn newline() void {
     } else scroll();
 }
 
-/// Every row up by one, the last cleared, the screen redrawn from the
-/// shadow: a screenful of write-combined stores, no reads.
+/// Every row up by one, the last cleared. Compare shadow characters before
+/// overwriting them so unchanged cells (especially blanks) need no MMIO.
+/// Walking top to bottom leaves each source row intact until it is read.
+/// This runs with interrupts masked: a full redraw per log line under TCG
+/// can stall input long enough to fill its device queue.
 fn scroll() void {
-    for (1..rows) |r| text[r - 1] = text[r];
-    @memset(&text[rows - 1], ' ');
-    for (0..rows) |r| {
-        for (0..cols) |c| draw(@intCast(c), @intCast(r), text[r][c]);
+    for (0..rows - 1) |r| {
+        for (0..cols) |c| {
+            const ch = text[r + 1][c];
+            if (text[r][c] == ch) continue;
+            text[r][c] = ch;
+            draw(@intCast(c), @intCast(r), ch);
+        }
+    }
+    for (0..cols) |c| {
+        if (text[rows - 1][c] == ' ') continue;
+        text[rows - 1][c] = ' ';
+        draw(@intCast(c), rows - 1, ' ');
     }
 }
 
@@ -198,5 +209,39 @@ fn draw(c: u32, r: u32, ch: u8) void {
         const line = pixels[p..][0..font.width];
         inline for (0..font.width) |x| line[x] = if (bits & (@as(u8, 0x80) >> x) != 0) fg else bg;
         p += stride;
+    }
+}
+
+test "scroll matches moving the rendered pixels, including one row and padded pitch" {
+    // Compare the optimized character-shadow path with a framebuffer copy,
+    // through enough scrolls to clear all text and then scroll blank rows.
+    for ([_][2]u32{ .{ 1, 1 }, .{ 7, 4 } }) |size| {
+        cols = size[0];
+        rows = size[1];
+        stride = cols * font.width + 3;
+        fg = 0xffd8d8d0;
+        bg = 0xff101218;
+        const n = stride * rows * font.height;
+        var actual: [59 * 64]u32 = @splat(0xdeadbeef);
+        var expected: [59 * 64]u32 = undefined;
+        pixels = &actual;
+        for (0..rows) |r| {
+            for (0..cols) |c| {
+                const ch: u8 = if ((r + c) % 3 == 0) ' ' else @intCast('A' + (r * 7 + c) % 26);
+                text[r][c] = ch;
+                draw(@intCast(c), @intCast(r), ch);
+            }
+        }
+        @memcpy(expected[0..n], actual[0..n]);
+        for (0..rows + 2) |_| {
+            const line = stride * font.height;
+            std.mem.copyForwards(u32, expected[0 .. n - line], expected[line..n]);
+            for (0..font.height) |y| {
+                const start = n - line + y * stride;
+                @memset(expected[start..][0 .. cols * font.width], bg);
+            }
+            scroll();
+            try std.testing.expectEqualSlices(u32, expected[0..n], actual[0..n]);
+        }
     }
 }
