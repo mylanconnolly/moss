@@ -472,15 +472,18 @@ fn spillRegisters(out: *[16]usize) void {
             :
             : [o] "r" (out),
             : .{ .memory = true }),
+        // Zig's native x86 assembler needs a literal base register
+        // in memory operands. Keep the output pointer in a caller-
+        // saved register so none of the roots are displaced by it.
         .x86_64 => asm volatile (
-            \\movq %%rbx, 0(%[o])
-            \\movq %%rbp, 8(%[o])
-            \\movq %%r12, 16(%[o])
-            \\movq %%r13, 24(%[o])
-            \\movq %%r14, 32(%[o])
-            \\movq %%r15, 40(%[o])
+            \\movq %%rbx, 0(%%rax)
+            \\movq %%rbp, 8(%%rax)
+            \\movq %%r12, 16(%%rax)
+            \\movq %%r13, 24(%%rax)
+            \\movq %%r14, 32(%%rax)
+            \\movq %%r15, 40(%%rax)
             :
-            : [o] "r" (out),
+            : [o] "{rax}" (out),
             : .{ .memory = true }),
         else => {},
     }

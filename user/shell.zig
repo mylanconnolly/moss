@@ -887,11 +887,10 @@ fn cmdRun(it: *mshl.Interp, name: []const u8, path: []const u8) mshl.Error!Value
     // The tool serves side A of its boot channel; we feed it caps on B.
     const ch = usys.chanCreate();
     if (ch.err != .ok) return it.fail("run: out of channels", .{});
-    // A child we grant a spawner may offload work to its own workers, so
-    // it needs room for them (each 8M) plus the transient overlap while
-    // a finished worker's memory is still being reclaimed — 24M, against
-    // 8M for a plain program. The shell's own 40M budget hosts it.
-    const child_mb: u64 = if (flags & shared.SpawnFlags.grant_spawner != 0) 24 << 10 else 8 << 10;
+    // Tools with spawners get a larger subtree budget. Plain tools still
+    // need 12 MB for AMD64's mshrun image, stack and working allocations.
+    // Actual allocations also charge the shell's own 48 MB budget.
+    const child_mb: u64 = if (flags & shared.SpawnFlags.grant_spawner != 0) 24 << 10 else 12 << 10;
     // The last `run`'s child is reaped asynchronously and its memory is
     // charged until then: a refusal for room right after one is retried
     // for a moment before it is real (the webhost's lesson).

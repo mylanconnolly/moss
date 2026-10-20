@@ -1485,7 +1485,7 @@ fn handleFrame(p: *Peer, ftype: u8, body: []const u8) void {
                     arg,
                     ch.data[0],
                     shared.SpawnFlags.grant_log | shared.SpawnFlags.chan_side_a,
-                    usys.kbLimits(1 << 10, 8 << 10), // a remote stage is mshrun: 3.6 MB of image and a 512K stack
+                    usys.kbLimits(1 << 10, 12 << 10), // a remote mshrun stage, including its AMD64 image and 512K stack
                 );
                 if (sp.err != .ok) {
                     var l: [64]u8 = undefined;

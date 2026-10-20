@@ -2800,8 +2800,9 @@ not fix, each verified by reading:
 
 **Testing**
 
-- The gate is serial and binds fixed TCP ports (31901–31905), so two
-  cannot run on one machine at once.
+- Drills within one gate run in parallel with separate port slots.
+  Independent gate processes still share those slots and `zig-out/check`,
+  so run the two architecture gates sequentially and preserve their logs.
 - Timing races have no deterministic replay; the soak and the trace
   ring are the tools. `-Dsoak` repeats whole drills, not steps.
 - Desktop polish validation exposed an intermittent `guishell` menu-open
@@ -2814,27 +2815,80 @@ not fix, each verified by reading:
 
 **x86_64 emulator compatibility**
 
-- The installed QEMU 11.1.1 no longer accepts `x-scalable-mode` / `x-flts`.
+- The previously tested Mac QEMU 11.1.1 no longer accepts `x-scalable-mode` / `x-flts`.
   Renaming them to `scalable-mode` / `fsts` boots the CPU drills, but device
   drills fault with invalid PASID entry (0x5b): QEMU now validates the
   default PASID entry, while this port shares one PASID table and uses a
   distinct RID_PASID per device. Adapting the port must preserve per-device
   DMA isolation. The relevant upstream check is
   `vtd_ce_pasid_0_check` in [QEMU 11.1.1](https://github.com/qemu/qemu/blob/v11.1.1/hw/i386/intel_iommu.c).
-- **Outstanding (2026-09-16): the x86_64 gate has not run on anything since
-  310e3bb.** The GUI polish range 310e3bb..4f3c961 (20 commits, 2026-09-11
-  to 09-15) and the review fixes after it changed `kernel/domain.zig`
-  (domain-slot reservation), `kernel/ipc.zig`, `kernel/main.zig` and most
-  of user/ and shared/; every one of those commits only compiled for
-  x86_64. The machine that owns the port is boxed for a move, so this is
-  deliberately parked, not forgotten: when it is back, run
-  `zig build -Darch=x86_64 check` (or `-Dtcg`) on HEAD first, before any
-  new x86_64 work, and expect the QEMU property work above to be the first
-  thing in the way. (2026-09-18: the web arc's stage 0 changed the image
-  header, `kernel/domain.zig`, `kernel/syscall.zig` and the aarch64 trap
-  path too; `-Dtcg` on the M3 now gives empty logs and timeouts for every
-  row, on the previous commit as well, so it is the Framework's run that
-  will tell.)
+- **Framework revalidation (2026-10-19, baseline `cf5e28b`).** The
+  Ryzen 9 7940HS machine is available again: Linux 7.2.6, Zig 0.16.0,
+  QEMU 10.2.3, Limine 12.9.3, KVM with nested AMD-V enabled. This
+  QEMU still accepts `x-scalable-mode` / `x-flts`; the newer-QEMU work
+  above remains separate. The first runtime sweep exposed widespread
+  user-mode SIMD exceptions, stale image budgets and screenshot display
+  selection; a subsequent run reached the editor and aborted the runner
+  by sampling beyond the firmware display's height. See DESIGN's
+  "AMD64 revalidation on the Framework" for the fixes and IPC regression
+  probe. Native host tests pass in Debug and ReleaseSafe (345 passed,
+  3 optional fixture tests skipped in each); shell tooling passes 20 tests.
+  The complete AMD64 KVM gate now finishes: **80/83 passed**. The three
+  residuals are below; all six ReleaseSafe kernel rows pass. Logs and the
+  result record are preserved in `zig-out/validation/amd64-kvm/`.
+  The complete ARM64 TCG gate is **82/83 passed**, with only `webfab`
+  failing (the rendered remote page is reaped locally, but node 2 never
+  logs the close and later reaps it as stale). Its logs are preserved in
+  `zig-out/validation/aarch64-tcg/`. The browser and scale-round-trip
+  drills pass on ARM64. All three AMD64 residuals reproduce unchanged
+  with `zig build -Darch=x86_64 check
+  -Donly=browser,guishellro,webfab -Djobs=1`; contention is not required.
+  Those logs are in `zig-out/validation/amd64-isolated/`.
+- **Residuals from that complete sweep:**
+  - `browser`: first tab loads and paints; spawning the second repeatedly
+    returns `OutOfFrames`. The page image contains about 115 MB of static
+    storage, which AMD64 eagerly maps. Port the existing demand-zero
+    mechanism (page-fault dispatch, `userPagePresent`, `settleMappings`)
+    to x86. Keep the whole image charged at spawn and eager population
+    before device DMA; verify two tabs within the existing 512 MB machine,
+    touch-time exhaustion, teardown and the ReleaseSafe leak bar.
+  - `guishellro`: 1.5 -> 1.0 -> 1.5 scaling produces the same 907-pixel
+    content height, but Settings moves from y=56 to y=26. The top-bar
+    strut briefly drops to zero while chrome is recreated;
+    `settledWorkArea` accepts zero as settled, so placement races its
+    replacement. Preserve the strut during resize or add an explicit
+    chrome/work-area readiness contract. Verify window placement, chrome
+    pixels and read-only settings over repeated scale round trips.
+  - `webfab`: node 2 spawns and paints the remote page, then the relay
+    reports `bad_arg`; node 1 logs a fabric call timeout and node 2 logs
+    retransmits followed by a socket error. The first failure is the
+    transport/relay, before the watchdog. Reproduce without contention,
+    instrument bulk progress and call deadlines at both ends, and keep
+    per-node logs and packet captures. Prove remote rendering, navigation,
+    disconnect/rejoin and reclamation without relaxing the watchdog.
+- **Recovery and prevention, in order:**
+  1. Finish the complete 83-row AMD64 KVM gate and aarch64 TCG gate on
+     the same source. Reproduce residuals individually with `-Djobs=1`,
+     retain the failing logs, then soak fixes before repeating the gates.
+     Keep quota/leak and pixel assertions; a compile or serial-only pass
+     cannot substitute for them.
+  2. Make native AMD64 Debug and ReleaseSafe host tests an automated
+     per-change check, plus an x86 TCG smoke covering boot, IPC, storage,
+     DMA refusal and a graphical drill. Configure a maintained KVM runner
+     with nested AMD-V for the full gate, including guest passthrough and
+     the fabric; require that evidence for kernel/user/shared/runner
+     changes. These automation jobs are a follow-up, not installed here.
+  3. Record the tested revision, Zig/QEMU/loader/firmware versions and
+     actual accelerator with each gate result. Give architectures separate
+     artifact directories before trying concurrent gate processes: today
+     their ports and `zig-out/check` collide. Retain multi-node logs and
+     screenshots as well as single-node failed logs.
+  4. Complete newer-QEMU VT-d compatibility using per-device translation
+     contexts; prove unauthorized DMA remains refused and teardown/rebind
+     invalidations work. Exercise the supported old and new emulator
+     versions, then resume the real-hardware arc. A KVM pass on an AMD
+     host still uses emulated Intel VT-d; it does not validate AMD-Vi or
+     the Framework's physical display, storage or network devices.
 
 **Unified GUI framework and polish**
 

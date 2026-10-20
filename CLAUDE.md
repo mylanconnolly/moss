@@ -41,7 +41,7 @@ frontier — every unstarted arc and every residual, kept current; the
   No drill harness (the `interactive` cmdline key, not a `-test` flag);
   closing the window or the app's exit ends it. Kernel log:
   `zig-out/gui-run-kernel.log`. M3.
-- `zig build -Darch=x86_64 check` — the x86_64 port's gate: the same 30
+- `zig build -Darch=x86_64 check` — the x86_64 port's gate: the same 83
   rows on OVMF + Limine with VT-d and nested AMD-V under KVM, ~4 min;
   `-Dtcg` runs it without KVM (how it runs on the Mac; also passes,
   ~6 min). Run it too when kernel/, user/, shared/ or the runner

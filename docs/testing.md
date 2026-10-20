@@ -3,7 +3,7 @@
 ## In one breath
 
 Before a change lands, one command boots the whole operating system
-twenty-eight times inside an emulator, each boot running one drill —
+once per drill inside an emulator, each boot running one drill —
 scheduling under load, a filesystem on a real disk image, two users
 logging in over two consoles, three machines forming a cluster — and
 each drill ends by printing a pass line and switching the machine off.
@@ -38,7 +38,7 @@ or screenshot. The two ports the *guest* dials (the TLS server at
 
 ```mermaid
 flowchart LR
-  B["zig build check"] --> V["one kernel per drill\n(24 Debug + 6 ReleaseSafe, built in parallel)"]
+  B["zig build check"] --> V["one kernel per drill\n(77 Debug + 6 ReleaseSafe, built in parallel)"]
   B --> H["host unit tests\n(zig build test)"]
   V --> R["tools/runner.zig\nlabel + kernel.bin pairs"]
   R --> Q["QEMU per drill\nmachine config by kind:\nplain · blk · net · cluster · shell · vmnode · login"]
@@ -74,7 +74,7 @@ reference count and creating domain (`ipc.dumpShms`), then the trace
 ring, then panics with the delta. The system drills — those that boot
 root and init from unit files — also require root's exit code to be 0.
 
-### What the 23 drills prove
+### What the core drills prove
 
 | Drill | Proves | Kind |
 |---|---|---|
@@ -336,10 +336,11 @@ Verify in QEMU rather than reason from memory.
   teardown) and passed three soaks after. A failed gate that names
   `users` alone with that signature is this, not the change under
   test — rerun it, and note it on the roadmap's entry if it repeats.
-- The gate takes about two minutes on the M3 (four on an x86_64 host,
-  where aarch64 QEMU is TCG only) and cannot run drills in parallel;
-  the cluster, shell and login drills bind fixed TCP ports (31901 to
-  31905), so two gates cannot run at once on one machine.
+- Drills within a gate run in parallel using separate port slots.
+  Two gate processes still share ports and `zig-out/check`, so run
+  architecture gates sequentially and preserve the first one's logs
+  before the second. Duration depends on architecture, acceleration,
+  and whether the build cache is warm.
 - The runner is host-portable Zig (`std.Io` streams, no libc): it
   first ran on Linux on 2026-09-04, when its `std.c` socket calls,
   linked implicitly only on macOS, were replaced. `run-hvf` exists only
@@ -353,10 +354,14 @@ Verify in QEMU rather than reason from memory.
   is a scratch copy per drill (per node, for the multi-node drills,
   each labelled `<name>-nodeN`), and every boot carries
   `intel-iommu,x-scalable-mode=on,x-flts=on` ahead of its devices.
-  All twenty-nine rows run there, with the port's own fault-dump and
+  The same 83 rows run there, with the port's own fault-dump and
   DMA-refusal markers, under KVM when the host has it; `--tcg` (build:
   `-Dtcg`) leaves KVM out, which is how the gate runs on a host of
   another architecture.
+- On AMD64, firmware VGA is a second display alongside virtio-gpu.
+  The runner explicitly captures `moss-gpu` through QMP. A 1280x800
+  capture while the compositor logs 1280x1024 is evidence of selecting
+  the firmware display, not a layout failure.
 - Reproduction of a timing race depends on host conditions: several
   teardown races showed only on the first run after a build, with a
   fresh disk image, and never under added logging. The soak and the

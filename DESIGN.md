@@ -10362,6 +10362,53 @@ can exercise a tagged TLB, and an unverified TLB-tagging scheme is not
 one to ship. The design is written down in ROADMAP for the day a host
 can test it.
 
+### AMD64 revalidation on the Framework (2026-10-19)
+
+Running the port again after the ARM-only development stretch exposed
+three independent assumptions that compilation had not checked:
+
+- A fresh FXSAVE area cannot be all zero. FXRSTOR restores the x87
+  control word and MXCSR along with the registers; zero unmasks every
+  exception, including the precision exception from an ordinary inexact
+  division. Font rendering stopped at `divss`, and JavaScript failed the
+  same way. Fresh thread and vCPU state now has x87 control `0x037f`
+  and MXCSR `0x1f80`, with register contents still clear. The IPC probe
+  checks the initial MXCSR masks as well as vector survival across switches.
+- Image sizes differ between ports. The AMD64 mshrun image was 8,159,232
+  bytes before its 512 KB stack, already over an 8 MB child budget when
+  combined. Init's default, local workers, shell children and remote
+  stages now allow 12 MB. The kernel's fabric-root helper allows 2 MB,
+  and the VM-node fabric service has the same explicit 16 MB budget as
+  the ordinary fabric drill. Accounting still charges actual allocations
+  through the parent chain; a larger limit does not allocate it in advance.
+- On x86 QEMU exposes both firmware VGA and the virtio GPU. An unqualified
+  QMP screendump captures VGA, which stayed at 1280x800 while the desktop
+  rendered at 1280x1024 or changed resolution. The runner names its GPU
+  `moss-gpu` and selects that device when capturing pixels. The editor
+  also validates screenshot dimensions before sampling its window corners,
+  so a display mismatch reports a failure instead of aborting the gate.
+
+The native x86 host tests found a fourth issue before boot: Zig's native
+assembler rejected a named register inside the collector's memory operand.
+The spill uses a literal RAX base, constrained to its output pointer; RAX
+is caller-saved, leaving the callee-saved roots intact. Both Debug and
+ReleaseSafe host suites pass with that spelling.
+
+With these repairs, the complete gates finish at 80/83 on AMD64 KVM
+and 82/83 on aarch64 TCG; every ReleaseSafe kernel row passes on both.
+The remaining AMD64 browser memory exhaustion and Settings placement race,
+and the remote web-page failure on both ports, remain Open in ROADMAP.
+All three AMD64 failures reproduce with one runner worker. Native host
+Debug and ReleaseSafe each pass 345 tests with three optional fixture
+skips; shell tooling passes 20. These results do not establish native
+Framework device support.
+
+The lesson is a validation requirement: cross-compilation establishes
+neither a port's runtime state nor the host tools' native-backend behavior.
+Keep both architecture gates and both native host optimization modes in
+the validation matrix. The current recovery work and remaining emulator
+compatibility work are tracked in ROADMAP's Open list.
+
 Boot contract (Phase 0): the bootable artifact is a raw arm64 Image (Linux
 boot protocol) objcopy'd from the kernel ELF, which is kept for symbols and
 debugging. The 64-byte Image header in `kernel/arch/aarch64/boot.zig` requests loading at

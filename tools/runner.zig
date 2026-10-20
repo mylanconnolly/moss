@@ -178,7 +178,7 @@ const specs = [_]Spec{
 
 const check_dir = "zig-out/check";
 /// The display drills' GPU: the boot-time scanout the desktop starts on.
-const gpu_device = "virtio-gpu-pci,disable-legacy=on,iommu_platform=on,xres=1280,yres=1024";
+const gpu_device = "virtio-gpu-pci,id=moss-gpu,disable-legacy=on,iommu_platform=on,xres=1280,yres=1024";
 /// The launcher lists every `app:` unit of the session template
 /// (boot/conf/sessiongui): five today. A new app changes this once.
 /// The launcher's ready line, without its catalog size: adding an app is
@@ -1972,6 +1972,7 @@ fn editorDrive(spec: Spec, log_path: []const u8, polls: *u64) !bool {
     sleepMs(120);
     _ = q.screendump(check_dir ++ "/editor-flush-restored.ppm");
     const rounded = readPpm(check_dir ++ "/editor-flush-restored.ppm") orelse return sfail(spec, log_path, "read rounded Editor screenshot");
+    if (rounded.w != 1280 or rounded.h != 1024) return sfail(spec, log_path, "unexpected Editor screenshot dimensions");
     const ground = pixelAt(rounded, original[0] -| 1, original[1]);
     for ([_][2]usize{ .{ original[0], original[1] }, .{ original[0] + original[2] - 1, original[1] }, .{ original[0], original[1] + original[3] - 1 }, .{ original[0] + original[2] - 1, original[1] + original[3] - 1 } }) |corner| {
         if (!std.mem.eql(u8, &ground, &pixelAt(rounded, corner[0], corner[1]))) return sfail(spec, log_path, "rounded corner did not reveal desktop");
@@ -5859,7 +5860,9 @@ const Qmp = struct {
 
     /// Write the current scanout to `ppm_path` (QEMU's binary P6).
     fn screendump(q: *Qmp, ppm_path: []const u8) bool {
-        const cmd = std.fmt.allocPrint(gpa, "{{\"execute\":\"screendump\",\"arguments\":{{\"filename\":\"{s}\"}}}}", .{ppm_path}) catch return false;
+        // x86 also has the firmware's VGA console. QMP's default display
+        // is that console, not the virtio scanout the graphical drill uses.
+        const cmd = std.fmt.allocPrint(gpa, "{{\"execute\":\"screendump\",\"arguments\":{{\"filename\":\"{s}\",\"device\":\"moss-gpu\"}}}}", .{ppm_path}) catch return false;
         return q.execute(cmd);
     }
 

@@ -28,6 +28,19 @@ fn uPanic(_: []const u8, _: ?usize) noreturn {
 }
 
 export fn umain(log_h: u64, chan_h: u64, role: u64) callconv(.c) noreturn {
+    if (is_x86) {
+        // A fresh thread needs masked FP exceptions, not just zeroed
+        // vector registers. Fonts and JavaScript do inexact arithmetic.
+        var mxcsr: u32 = 0;
+        asm volatile ("stmxcsr (%%rax)"
+            :
+            : [p] "{rax}" (&mxcsr),
+            : .{ .memory = true });
+        if (mxcsr & 0xffc0 != 0x1f80) {
+            _ = usys.log(log_h, "pingpong: invalid initial FP control state");
+            usys.exit(42);
+        }
+    }
     switch (role) {
         1 => calc(log_h, chan_h),
         2 => askr(log_h, chan_h),

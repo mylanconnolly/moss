@@ -126,10 +126,10 @@ const Unit = struct {
     app: ?shared.apps.Record = null,
     arg: u64 = 0,
     kobj_kb: u64 = 1 << 10,
-    // 8 MB: mshrun (the biggest image) with its 512K stack and a working
-    // heap. It was 4 MB, sized when the stack was 256K; the web drill's
-    // script unit was refused at spawn the day the stack grew.
-    user_kb: u64 = 8 << 10,
+    // The AMD64 mshrun image plus its 512K stack exceeds 8 MB. Leave
+    // room for it and its working allocations on either port; units
+    // with larger needs still declare their own budget.
+    user_kb: u64 = 12 << 10,
     /// CPU budget in permille of one core per period (0 = none of its
     /// own) and a partition: cores reserved for this unit alone.
     cpu_permille: u64 = 0,

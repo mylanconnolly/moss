@@ -60,6 +60,23 @@ done without rediscovering the sharp edges.
   `help`; kernel log lands in zig-out/shell-kernel.log; the `exit`
   command powers the machine off — Ctrl-C goes to the guest, not QEMU).
 
+## Validating both ports
+
+On the Framework, run `zig build -Darch=x86_64 check` with KVM and
+nested AMD-V enabled, then `zig build check` for aarch64 under TCG.
+The gates share ports and `zig-out/check`; run them sequentially and
+preserve each architecture's logs before the next. `zig build test`
+and `zig build test -Doptimize=ReleaseSafe` exercise the native host
+compiler too: cross-compiling the OS on a Mac does not cover Zig's
+native x86 backend. A full gate includes the Debug host tests.
+
+For AMD64 failures, a user-mode SIMD exception at ordinary arithmetic
+can mean bad initial MXCSR masks, not unsupported instructions. A
+1280x800 QMP capture while virtio-gpu logs 1280x1024 can mean the wrong
+display was captured. A spawn refusal can be the child's own image
+plus stack exceeding its budget even when the parent's ledger has
+plenty of room. Check those before changing a timeout or a global pool.
+
 ## Adding things
 
 **A syscall**: number + doc in `shared/lib.zig` (`Syscall` enum) → dispatch

@@ -14,7 +14,18 @@ pub const Context = extern struct {
 };
 
 pub const FpState = extern struct {
-    area: [512]u8 align(16) = @splat(0),
+    area: [512]u8 align(16) = initial: {
+        var area: [512]u8 = @splat(0);
+        // FXRSTOR loads control words too. Zero would unmask every FP
+        // exception, so even an ordinary inexact division would fault.
+        // Start with the architectural defaults: round to nearest,
+        // exceptions masked, and no inherited register contents.
+        area[0] = 0x7f; // x87 control word = 0x037f
+        area[1] = 0x03;
+        area[24] = 0x80; // MXCSR = 0x1f80
+        area[25] = 0x1f;
+        break :initial area;
+    },
 };
 
 pub fn initContext(ctx: *Context, sp: u64, entry: u64, arg: u64) void {

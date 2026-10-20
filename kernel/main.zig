@@ -1740,6 +1740,8 @@ fn vmnodeTestWorker(_: u64) void {
         .grant_spawner = true,
         .grant_bootfs = true,
         .auto_reap = true,
+        .kobj_limit = 4 << 20,
+        .user_limit = 16 << 20,
     }) catch |e| std.debug.panic("spawn fabsvc: {t}", .{e});
     const root = spawnFabroot(false);
     const pathbuf = ipc.createShm(1) orelse @panic("shm pool empty");
@@ -2164,6 +2166,8 @@ fn spawnFabroot(bad_root: bool) FabRoot {
         .grant_debug_log = true,
         .grant_channel_a = ch,
         .auto_reap = true,
+        // The AMD64 fabric image plus its stack is larger than 1 MB.
+        .user_limit = 2 << 20,
     }) catch |e| std.debug.panic("spawn fabroot: {t}", .{e});
     const buf = ipc.createShm(1) orelse @panic("shm pool empty");
     const pb = mem.physToPtr([*]u8, buf.pages[0]);
