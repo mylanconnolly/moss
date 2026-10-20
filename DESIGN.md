@@ -10394,10 +10394,10 @@ The spill uses a literal RAX base, constrained to its output pointer; RAX
 is caller-saved, leaving the callee-saved roots intact. Both Debug and
 ReleaseSafe host suites pass with that spelling.
 
-With these repairs, the complete gates finish at 80/83 on AMD64 KVM
-and 82/83 on aarch64 TCG; every ReleaseSafe kernel row passes on both.
-The remaining AMD64 browser memory exhaustion and Settings placement race,
-and the remote web-page failure on both ports, remain Open in ROADMAP.
+At this checkpoint, the complete gates finished at 80/83 on AMD64 KVM
+and 82/83 on aarch64 TCG; every ReleaseSafe kernel row passed on both.
+The residual browser memory exhaustion, Settings placement race and shared
+remote-page failure led to the follow-up repairs described below.
 All three AMD64 failures reproduce with one runner worker. Native host
 Debug and ReleaseSafe each pass 345 tests with three optional fixture
 skips; shell tooling passes 20. These results do not establish native
@@ -10406,8 +10406,93 @@ Framework device support.
 The lesson is a validation requirement: cross-compilation establishes
 neither a port's runtime state nor the host tools' native-backend behavior.
 Keep both architecture gates and both native host optimization modes in
-the validation matrix. The current recovery work and remaining emulator
-compatibility work are tracked in ROADMAP's Open list.
+the validation matrix. The recovery story and remaining emulator compatibility work are tracked
+in ROADMAP's Landed and Open lists.
+
+### Framework residual repairs (2026-10-20)
+
+AMD64 now uses the existing demand-zero contract for image BSS. Spawn
+charges the entire image against the user budget, while untouched pages
+consume no frames. Non-present user data faults alone call `domain.faultIn`;
+protection and instruction-fetch faults still terminate the domain. The
+x86 page-table presence walk allocates nothing. Publishing a new present
+entry reloads local CR3 without a synchronous shootdown: non-present entries
+are not cached in the x86 TLB, and an IPI rendezvous can deadlock concurrent
+fault handlers with interrupts masked. Kernel user copies touch lazy ranges;
+DMA grants still populate all lazy pages before attaching the device.
+The domain drill checks a denied page-table allocation rolls the frame back,
+repeated faults allocate once, a cross-page copy touches both pages, DMA
+population consumes the reservation once, and teardown returns every frame.
+This lets the browser's second tab fit the existing 512 MB machine without
+changing its budget or the quota/leak assertions.
+
+Chrome replacement keeps the old top-bar or dock surface alive while opening
+the replacement, transfers the compositor's strut to that new surface, then
+destroys the old one. Settings cannot mistake the temporary absence of a
+strut for a settled work area. No readiness delay or wire protocol changed;
+the existing scale round-trip drill checks placement and chrome pixels.
+
+Packet captures found the fabric timeout below the relay: TCP's sliding
+window could emit more packets than the NIC's eight TX descriptors. `wireTx`
+silently refused the excess, but `tcpOutput` advanced `snd_nxt` anyway. A
+32 KB burst then recovered one missing segment per 200 ms timeout, exceeding
+the fabric's three-second call deadline on fast KVM. TX admission now returns
+through Ethernet, IP and TCP; a refused packet stays queued, and descriptor
+completion/ticks retry it. FIN waits behind queued data. Loopback still
+advances sequence bookkeeping before synchronous delivery/ACK. The lesson
+is that a queued write is not a transmitted packet: a larger ring or deadline
+would hide the accounting error, and slower TCG execution had hidden it too.
+The `webfab` runner retains both nodes' packet captures for future failures.
+The net drill now compares 32 KB wire and loopback transfers, exceeding the
+eight-descriptor TX ring while checking synchronous delivery too.
+
+A second, shared close race let a browser process exit while its pump was
+inside a relay call. `destroy` now waits, releasing the host lock, until the
+pump finishes IPC and record replay, sends the deferred goodbye and releases
+the page slot. Broker cancellation follows replay too: cancelling earlier
+would let a replayed open recreate resources after cleanup. Host deinit
+stops the pump and waits for its final access before freeing host resources;
+the pump stack remains mapped until domain exit because its thread still
+returns through it. The page's "reaped" note follows destruction, and the
+remote node must report close before logout. The existing watchdog remains.
+
+The full ARM64 sweep then caught a session-wait handoff race in the
+ReleaseSafe kernel row: the helper replied to Alice's wait before clearing
+`wait_active`, so her caller could issue Bob's wait on another core and
+receive "busy". The helper now snapshots its session and reply token,
+finishes cleanup, releases the worker slot, then replies using that snapshot.
+The next request may replace shared handoff fields as soon as it is accepted.
+The existing users drill's consecutive waits exercise the boundary; refusals
+now include their code in its diagnostic log. The lesson is that an IPC reply
+publishes completion to the caller before the replying syscall returns.
+
+`tools/validate.py` provides repeatable native, TCG smoke and full dual-port
+runs with preflight checks and separate timestamped evidence directories.
+It probes KVM acceleration and forbids fallback with `-Drequire-kvm` in
+the AMD64 full gate, and records firmware hashes, tool versions, revision,
+dirty state and commands, and preserves failed status while running the other
+port. GitHub Actions runs native AMD64 Debug/ReleaseSafe per change; a
+separately enabled, dedicated AMD KVM runner performs smoke and both full
+gates on main and weekly. Runtime registration is an explicit deployment
+step documented in tools/README; the workflow files alone do not activate it.
+
+Validation on the final OS/runner source: **83/83 AMD64 KVM and 83/83
+ARM64 TCG**, four drills at a time, including all six ReleaseSafe rows.
+Browser, chrome scale round trips and remote-page rendering/closure each
+passed three isolated repetitions on each port. Users passed three per mode
+on AMD64 and five per mode on ARM64. Native Debug and ReleaseSafe each pass
+345 tests (three optional fixture skips); shell tooling passes 20 and the
+validation helper passes five integration checks. The fast TCG smoke passes
+10/10 rows on each port, using compositor pixel assertions.
+
+The interactive `gui` drill remains in both full gates. AMD64 TCG's longer
+clipboard/editing sequence failed once under the two-job smoke, duplicating
+the pasted text, then passed in isolation with no QEMU input-queue overflow.
+That residual and the next diagnostic steps remain Open in ROADMAP; the
+final-state assertion is unchanged. Full-gate metadata, source hashes and
+per-node captures are retained in
+`zig-out/validation/20261020T124145.622370Z-full/`; the passing smoke record
+is `zig-out/validation/20261020T131404.864322Z-smoke/`.
 
 Boot contract (Phase 0): the bootable artifact is a raw arm64 Image (Linux
 boot protocol) objcopy'd from the kernel ELF, which is kept for symbols and

@@ -645,13 +645,11 @@ pub fn runBar(it: *mshl.Interp, view: Value, update: Value, init_state: Value) m
         const output_changed = wf.refreshOutput();
         if (wf.refreshFontMetrics() or output_changed) {
             dismissPopup(true);
-            wf.closeSurface();
             wf.ptr_down = false; // the old surface's queue went with it
             wf.win_w = wf.scanout_w;
             wf.win_h = barHeight();
-            if (!wf.openSurfaceFocused(false, false)) return it.fail("gui: cannot resize desktop chrome", .{});
+            if (!wf.replaceStrutSurface(core.output_control, shared.strut_top)) return it.fail("gui: cannot resize desktop chrome", .{});
             _ = usys.callTyped(shared.GpuReq, shared.GpuResp, core.output_control, .{ .menu_bar = .{ .surface = wf.surf } }, 0);
-            declareStrut(shared.strut_top, wf.win_h);
             announced = false;
             bar_dirty = true;
         }

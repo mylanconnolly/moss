@@ -871,6 +871,41 @@ pub fn testSpawnReservations() void {
     abortSpawn(after_failure);
 }
 
+/// Exercise lazy admission, failed page-table allocation, repeated faults,
+/// kernel-copy range population and the eager population required by DMA.
+pub fn testLazyPages() void {
+    if (comptime !arch.mmu.demand_zero) return;
+    const before = pmem.stats().free_bytes;
+    const d = allocSlot(null) catch @panic("reserve lazy probe");
+    d.name = "lazy-probe";
+    d.kobj.limit = 16 * mem.page_size;
+    d.user_mem.limit = 4 * mem.page_size;
+    const root = kalloc.allocPage(&d.kobj) catch @panic("lazy probe root");
+    d.user_root_pa = mem.virtToPhys(@intFromPtr(root));
+    d.lazy_base = shared.user_image_base;
+    d.lazy_end = d.lazy_base + d.user_mem.limit;
+    d.lazy_left = 4;
+    d.user_mem.charge(d.user_mem.limit) catch unreachable;
+    std.debug.assert(!faultIn(d, d.lazy_base - 1) and !faultIn(d, d.lazy_end));
+    std.debug.assert(!arch.mmu.userPagePresent(d.user_root_pa, d.lazy_base));
+    const reserved = d.user_mem.balance();
+    const unmapped = pmem.stats().free_bytes;
+    d.kobj.limit = d.kobj.balance(); // no room for an intermediate table
+    std.debug.assert(!faultIn(d, d.lazy_base));
+    std.debug.assert(d.lazy_left == 4 and d.user_mem.balance() == reserved);
+    std.debug.assert(pmem.stats().free_bytes == unmapped);
+    d.kobj.limit = 16 * mem.page_size;
+    std.debug.assert(touchRange(d, d.lazy_base + mem.page_size - 8, 16));
+    std.debug.assert(d.lazy_left == 2 and d.user_mem.balance() == reserved);
+    const touched = pmem.stats().free_bytes;
+    std.debug.assert(faultIn(d, d.lazy_base)); // a racing/repeated fault
+    std.debug.assert(pmem.stats().free_bytes == touched and d.lazy_left == 2);
+    std.debug.assert(populateLazy(d) and d.lazy_left == 0);
+    std.debug.assert(d.user_mem.balance() == reserved);
+    abortSpawn(d);
+    std.debug.assert(pmem.stats().free_bytes == before);
+}
+
 /// Kernel-thread entry for a domain's initial thread: drop to EL0 at the
 /// image entry, with the manifest's initial handle (or 0) in x0.
 /// Reserve `npages` of the window: the lowest address where nothing is

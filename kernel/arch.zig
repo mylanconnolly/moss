@@ -37,7 +37,8 @@ pub const thread = impl.thread;
 /// Page tables, kernel and user: `init`, `activate`, `mapDeviceLive`,
 /// `mapFramebuffer` (write-combining where the port has it),
 /// `UserPerms`, `mapUserPage(Tagged)`, `unmapUserPages`,
-/// `destroyUserSpace`, `switchUser`, `publishTables`.
+/// `destroyUserSpace`, `switchUser`, `publishTables`, `demand_zero`,
+/// `userPagePresent`, `settleMappings`.
 pub const mmu = impl.mmu;
 /// The one door to user memory (PAN here, SMAP on x86_64).
 pub const uaccess = impl.uaccess;

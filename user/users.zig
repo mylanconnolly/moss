@@ -74,7 +74,7 @@ export fn umain(log_h: u64, chan_h: u64, role: u64, bva: u64, blen: u64) callcon
 var glog: u64 = 0;
 
 // The KDF's work area: 128 * 2^ln * r bytes. Static, so it sizes every
-// role's domain (BSS is mapped at spawn) — the drill's records use ln 11
+// role's domain (BSS is charged at spawn) — the drill's records use ln 11
 // (2 MiB); a deployment raises the cost and this area together.
 const kdf_heap_len = (2 << 20) + (64 << 10);
 var kdf_heap: [kdf_heap_len]u8 = undefined;
@@ -1286,8 +1286,10 @@ fn waitThread(_: u64) callconv(.c) void {
     while (true) {
         _ = usys.notifyWait(wait_bell);
         if (!@atomicLoad(bool, &wait_active, .acquire)) continue;
+        const sid = wait_sid;
+        const token = wait_token;
         lock();
-        const ctl = if (sessionOf(wait_sid)) |s| s.ctl else 0;
+        const ctl = if (sessionOf(sid)) |s| s.ctl else 0;
         unlock();
         var code: u64 = 0;
         if (ctl != 0) {
@@ -1301,7 +1303,7 @@ fn waitThread(_: u64) callconv(.c) void {
                 usys.sleepMs(200);
             }
             lock();
-            if (sessionOf(wait_sid)) |still| close(still);
+            if (sessionOf(sid)) |still| close(still);
             unlock();
         }
         if ((code == shared.exit_power_off or code == shared.exit_power_restart) and init_chan != 0) {
@@ -1309,8 +1311,11 @@ fn waitThread(_: u64) callconv(.c) void {
             const action: shared.PowerAction = if (code == shared.exit_power_restart) .restart else .off;
             _ = usys.callTyped(shared.InitRequest, shared.InitReply, init_chan, .{ .power = .{ .action = @intFromEnum(action) } }, 0);
         }
-        _ = usys.replyTypedTo(shared.SessResp, svc_chan, .{ .exited = .{ .code = code } }, 0, wait_token);
+        // A reply wakes its caller on another core: the next wait may
+        // arrive before replyTypedTo returns. Release the worker slot
+        // first and use the captured token, which that wait may replace.
         @atomicStore(bool, &wait_active, false, .release);
+        _ = usys.replyTypedTo(shared.SessResp, svc_chan, .{ .exited = .{ .code = code } }, 0, token);
     }
 }
 /// Our own init's front channel (`init: self`), for forwarding a
@@ -1898,6 +1903,11 @@ fn waitSession(sid: u64) u64 {
     return switch (usys.callTyped(shared.SessReq, shared.SessResp, sess_chan, .{ .wait = .{ .sid = sid } }, 0)) {
         .ok => |rep| switch (rep) {
             .exited => |e| e.code,
+            .sess_err => |e| blk: {
+                var buf: [96]u8 = undefined;
+                _ = usys.log(glog, std.fmt.bufPrint(&buf, "users-drill: wait for session {d} refused with code {d}", .{ sid, e.code }) catch "users-drill: wait refused");
+                break :blk 255;
+            },
             else => 255,
         },
         .err => 255,

@@ -520,6 +520,8 @@ fn domainTestWorker(_: u64) void {
     const frames_before = pmem.stats().free_bytes;
     domain.testSpawnReservations();
     log.info("domain-test: concurrent reservations remain distinct; rollback recycles safely", .{});
+    domain.testLazyPages();
+    log.info("domain-test: lazy pages charged once; failed population rolls back; DMA population and teardown balanced", .{});
 
     log.info("domain-test: spawning 'hello' (debug_log granted)", .{});
     const hello = domain.spawn("hello", .{ .blob = img(.hello) }, .{

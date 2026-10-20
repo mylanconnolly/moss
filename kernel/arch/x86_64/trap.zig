@@ -449,7 +449,10 @@ fn handleUserFault(frame: *TrapFrame) void {
     const code = v | (frame.error_code << 8);
     const t = sched.thisCpu().current;
     const d: *domain.Domain = @ptrCast(@alignCast(t.user_ctx.?));
-    d.exit_code = 0xdead;
+    // Only a non-present data access may populate .bss. Protection,
+    // reserved-bit and instruction-fetch faults retain their normal fate.
+    if (v == 14 and frame.error_code & 0x1d == 4 and domain.faultIn(d, addr)) return;
+    domain.claimExit(d, 0xdead);
     if (domain.reportFaultToSupervisor(d, code, addr, frame.rip)) unreachable;
     log.warn("domain {s}: fault in user mode — {s} (vector={d} error=0x{x} addr=0x{x} rip=0x{x}); killing it", .{
         d.name, vectorName(v), v, frame.error_code, addr, frame.rip,

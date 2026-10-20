@@ -395,16 +395,16 @@ pub fn beginRender() void {
 /// tree about to be painted still names one.
 pub fn reap(present: *const fn (id: []const u8) bool) void {
     for (&slots) |*s| if (s.used and !present(s.idText())) {
-        webhost.logf(log_h, "page {s}: reaped", .{s.idText()});
         host.destroy(s.page);
+        webhost.logf(log_h, "page {s}: reaped", .{s.idText()});
         s.* = .{};
     };
 }
 
 pub fn reapAll() void {
     for (&slots) |*s| if (s.used) {
-        webhost.logf(log_h, "page {s}: reaped", .{s.idText()});
         host.destroy(s.page);
+        webhost.logf(log_h, "page {s}: reaped", .{s.idText()});
         s.* = .{};
     };
     if (thread_up) webhost.logf(log_h, "page thread: stack high-water {d} of {d} KB", .{ stackHighWater() / 1024, thread_stack.len / 1024 });

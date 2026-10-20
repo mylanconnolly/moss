@@ -17,6 +17,7 @@ pub fn build(b: *std.Build) void {
     const jobs = b.option(u16, "jobs", "check: run this many OS tests at once (default cores/4, at most 4; 1 = sequential)") orelse 0;
     const only = b.option([]const u8, "only", "check: run only these OS tests (comma-separated; `name+rs` = ReleaseSafe pass)");
     const force_tcg = b.option(bool, "tcg", "check (x86_64): software emulation even where KVM exists — QEMU's full `max` CPU (PCIDs) instead of the host's") orelse false;
+    const require_kvm = b.option(bool, "require-kvm", "check (x86_64): require KVM; fail instead of falling back to TCG") orelse false;
     const force_hvf = b.option(bool, "hvf", "check (aarch64): Hypervisor.framework instead of TCG (-cpu host, no EL2: skip the hypervisor drills with -Donly)") orelse false;
     const user_optimize = b.option(
         std.builtin.OptimizeMode,
@@ -415,6 +416,8 @@ pub fn build(b: *std.Build) void {
     // port is compiled. aarch64 is the first target (ROADMAP.md).
     const arch = b.option(std.Target.Cpu.Arch, "arch", "target architecture (aarch64, x86_64)") orelse .aarch64;
     if (arch != .aarch64 and arch != .x86_64) std.debug.panic("moss has no port for {s}", .{@tagName(arch)});
+    if (require_kvm and (arch != .x86_64 or force_tcg))
+        std.debug.panic("-Drequire-kvm needs -Darch=x86_64 without -Dtcg", .{});
     const linker_script = b.path(b.fmt("kernel/arch/{s}/linker.ld", .{@tagName(arch)}));
     // The kernel never touches FP/SIMD outside the scheduler's
     // hand-written save/restore stubs, so compiled kernel code must not
@@ -1620,6 +1623,7 @@ pub fn build(b: *std.Build) void {
     if (arch == .x86_64) {
         run_check.addArgs(&.{ "--arch", "x86_64", "--limine", limine_dir, "--ovmf", ovmf_code, "--ovmf-vars", ovmf_vars });
         if (force_tcg) run_check.addArg("--tcg");
+        if (require_kvm) run_check.addArg("--require-kvm");
     }
     if (arch == .aarch64 and force_hvf) run_check.addArg("--hvf");
     for (variants) |vn| {

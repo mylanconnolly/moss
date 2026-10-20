@@ -51,6 +51,8 @@ var limine_dir: []const u8 = "/usr/share/limine";
 /// the x86_64 drills on a CPU model the host's KVM does not offer (PCIDs
 /// on a host kernel that hid them, say).
 var force_tcg: bool = false;
+/// Validation on a KVM runner must fail rather than silently use TCG.
+var require_kvm: bool = false;
 /// `--hvf` (aarch64): Hypervisor.framework instead of TCG — `-cpu host`,
 /// no EL2 for the guest (HVF has no nested virtualization), so the
 /// hypervisor drills are not for this mode. Ten times the speed of TCG;
@@ -274,6 +276,10 @@ pub fn main(init: std.process.Init) !u8 {
             force_tcg = true;
             i += 1;
             continue;
+        } else if (std.mem.eql(u8, argv[i], "--require-kvm")) {
+            require_kvm = true;
+            i += 1;
+            continue;
         } else if (std.mem.eql(u8, argv[i], "--hvf")) {
             force_hvf = true;
             i += 1;
@@ -287,8 +293,8 @@ pub fn main(init: std.process.Init) !u8 {
         } else break;
         i += 2;
     }
-    if (repeat == 0 or jobs_n == 0 or argv.len - i < 2 or (argv.len - i) % 2 != 0) {
-        std.debug.print("usage: runner [--repeat N] [--jobs N] [--only a,b] [--arch aarch64|x86_64] [--tcg] [--limine DIR] [--ovmf FD] [--ovmf-vars FD] <name> <kernel> ...\n", .{});
+    if ((require_kvm and (target_arch != .x86_64 or force_tcg)) or repeat == 0 or jobs_n == 0 or argv.len - i < 2 or (argv.len - i) % 2 != 0) {
+        std.debug.print("usage: runner [--repeat N] [--jobs N] [--only a,b] [--arch aarch64|x86_64] [--tcg | --require-kvm] [--limine DIR] [--ovmf FD] [--ovmf-vars FD] <name> <kernel> ...\n", .{});
         return 2;
     }
     cwd.createDirPath(io, check_dir) catch {};
@@ -5309,6 +5315,7 @@ fn runWebFab(spec: Spec, bin: []const u8, polls: *u64) !bool {
     try args1.appendSlice(gpa, &.{
         "-netdev", "hubport,id=h1,hubid=0",
         "-device", "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=h1",
+        "-object", try std.fmt.allocPrint(gpa, "filter-dump,id=webfab1,netdev=h1,file={s}/webfab-node1.pcap", .{check_dir}),
         "-netdev", try std.fmt.allocPrint(gpa, "socket,id=s2,listen=127.0.0.1:{d}", .{floginPort()}),
         "-netdev", "hubport,id=h2,hubid=0,netdev=s2",
         "-device", gpu_device,
@@ -5327,6 +5334,7 @@ fn runWebFab(spec: Spec, bin: []const u8, polls: *u64) !bool {
     try args2.appendSlice(gpa, &.{
         "-netdev", try std.fmt.allocPrint(gpa, "socket,id=n0,connect=127.0.0.1:{d}", .{floginPort()}),
         "-device", "virtio-net-pci,disable-legacy=on,iommu_platform=on,netdev=n0",
+        "-object", try std.fmt.allocPrint(gpa, "filter-dump,id=webfab2,netdev=n0,file={s}/webfab-node2.pcap", .{check_dir}),
     });
     var c2 = try spawnQemu(args2.items);
     defer c2.kill(io);
@@ -6249,9 +6257,8 @@ fn appendBaseX86(args: *std.ArrayList([]const u8), log_path: []const u8, bin: []
     try cwd.copyFile(ovmf_vars, cwd, vars, io, .{});
     try args.appendSlice(gpa, &.{ "qemu-system-x86_64", "-machine", "q35" });
     if (!force_tcg) try args.appendSlice(gpa, &.{ "-accel", "kvm" });
+    if (!require_kvm) try args.appendSlice(gpa, &.{ "-accel", "tcg" });
     try args.appendSlice(gpa, &.{
-        "-accel",
-        "tcg",
         "-cpu",
         "max",
         "-smp",

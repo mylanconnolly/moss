@@ -781,18 +781,49 @@ pub fn commitSurface() bool {
 pub fn closeSurface() void {
     menu_surface = 0;
     menu_items_surface = 0; // the next surface may reuse this id; publish again
-    _ = usys.callTyped(shared.GpuReq, shared.GpuResp, chan, .{ .destroy_surface = .{ .surface = surf } }, 0);
+    releaseSurface(surf, surf_va, surf_cap);
+    surf_va = 0;
+    surf_cap = 0;
+}
+
+fn releaseSurface(id: u64, va: u64, handle: u64) void {
+    _ = usys.callTyped(shared.GpuReq, shared.GpuResp, chan, .{ .destroy_surface = .{ .surface = id } }, 0);
     // Free the surface buffer's mapping and cap — a window that reopens (the
     // settings panel recurses on each apply, a resize destroys + recreates)
     // would otherwise leak a ~win_w*win_h*4 mapping per open.
-    if (surf_va != 0) {
-        _ = usys.shmUnmap(surf_va);
-        surf_va = 0;
+    if (va != 0) _ = usys.shmUnmap(va);
+    if (handle != 0) _ = usys.capDrop(handle);
+}
+
+/// Replace resident chrome without exposing an absent strut to windows
+/// opening concurrently. The compositor transfers the edge to the new
+/// surface before the old surface (and its buffer) is released.
+pub fn replaceStrutSurface(control: u64, edge: u64) bool {
+    const old_id = surf;
+    const old_va = surf_va;
+    const old_cap = surf_cap;
+    const old_px = px;
+    const old_geom = surf_geom;
+    surf = 0;
+    surf_va = 0;
+    surf_cap = 0;
+    if (openSurfaceFocused(false, false)) {
+        const installed = switch (usys.callTyped(shared.GpuReq, shared.GpuResp, control, .{ .set_strut = .{ .surface = surf, .edge = edge, .size = win_h } }, 0)) {
+            .ok => |rep| rep == .ok,
+            .err => false,
+        };
+        if (installed) {
+            releaseSurface(old_id, old_va, old_cap);
+            return true;
+        }
     }
-    if (surf_cap != 0) {
-        _ = usys.capDrop(surf_cap);
-        surf_cap = 0;
-    }
+    closeSurface();
+    surf = old_id;
+    surf_va = old_va;
+    surf_cap = old_cap;
+    px = old_px;
+    surf_geom = old_geom;
+    return false;
 }
 
 /// Ask the compositor to move this window's surface to (nx, ny).

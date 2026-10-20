@@ -363,10 +363,9 @@ pub const Remote = struct {
     want_read: ?u64 = null,
     /// The relay said more waits: poll again at once.
     more: bool = false,
-    /// The pump is between the call and its reply: a destroy then waits
-    /// for it (`closing`), since two calls on one session would race on
-    /// its buffer.
-    in_call: bool = false,
+    /// The pump owns the buffer through both IPC and record replay.
+    /// Destroy waits (`closing`) until it releases that ownership.
+    pumping: bool = false,
     closing: bool = false,
     dead: bool = false,
 
@@ -493,6 +492,8 @@ pub const Host = struct {
     /// handshakes run on it: over 120 KB) and kept for the host's life.
     pump_up: bool = false,
     pump_stack_va: u64 = 0,
+    pump_stop: std.atomic.Value(bool) = .init(false),
+    pump_done: std.atomic.Value(bool) = .init(false),
     /// What the pump heard from the remote pages, for `step` to hand to
     /// the host program as it hands a local page's events (a thread
     /// cannot call a channel its own domain serves, so the pump cannot
@@ -758,25 +759,34 @@ pub const Host = struct {
     pub fn destroy(h: *Host, id: PageId) void {
         h.lock.acquire();
         defer h.lock.release();
+        const badge = h.pages[id].badge;
         h.destroyLocked(id);
+        // The pump owns its relay buffer through IPC and record replay.
+        // Wait without the lock so it can send bye and release the slot
+        // before the window's process exits and kills the pump thread.
+        while (h.pages[id].used and h.pages[id].badge == badge and h.pages[id].remote != null and h.pages[id].remote.?.closing) {
+            h.lock.release();
+            usys.sleepMs(10);
+            h.lock.acquire();
+        }
     }
 
     fn destroyLocked(h: *Host, id: PageId) void {
         const p = &h.pages[id];
         if (!p.used) return;
-        h.brokerCancel(&p.client);
-        h.dropParked(&p.client);
-        h.clearExitLocked(&p.client);
         if (p.remote) |*r| {
-            // The pump is mid-call on the session: it closes the page
-            // when the reply comes (the slot stays taken until then).
-            if (r.in_call) {
+            // The pump owns the session during IPC and record replay;
+            // it finishes destruction before releasing the page slot.
+            if (r.pumping) {
                 r.closing = true;
                 return;
             }
             h.remoteClose(id);
             return;
         }
+        h.brokerCancel(&p.client);
+        h.dropParked(&p.client);
+        h.clearExitLocked(&p.client);
         if (p.ctl != 0) {
             _ = usys.domainDestroy(p.ctl);
             // Its memory comes back when the kernel reaps it, which is
@@ -802,14 +812,15 @@ pub const Host = struct {
     }
 
     pub fn deinit(h: *Host) void {
-        h.lock.acquire();
-        for (0..max_pages) |i| h.destroyLocked(@intCast(i));
-        h.lock.release();
+        for (0..max_pages) |i| h.destroy(@intCast(i));
+        h.pump_stop.store(true, .release);
+        if (h.pump_up) while (!h.pump_done.load(.acquire)) usys.sleepMs(10);
         if (h.fonts_va != 0) _ = usys.shmUnmap(h.fonts_va);
         if (h.fonts_shm != 0) _ = usys.capDrop(h.fonts_shm);
         if (h.lz_va != 0) _ = usys.shmUnmap(h.lz_va);
         h.lz_va = 0;
-        // The pump's stack stays: its thread may be running on it.
+        // The pump no longer accesses this host. Its stack stays mapped
+        // until domain exit: its final return/thread-exit still uses it.
         if (h.chan_b != 0) _ = usys.capDrop(h.chan_b);
         if (h.chan != 0) _ = usys.capDrop(h.chan);
         if (h.notif != 0) _ = usys.capDrop(h.notif);
@@ -1755,6 +1766,10 @@ pub const Host = struct {
         const p = &h.pages[id];
         if (p.remote == null) return;
         const r = &p.remote.?;
+        std.debug.assert(!r.pumping);
+        h.brokerCancel(&p.client);
+        h.dropParked(&p.client);
+        h.clearExitLocked(&p.client);
         if (!r.dead) _ = usys.callTyped(wire.RelayReq, wire.RelayResp, r.chan, .{ .bye = .{ .page = r.page_id, .key = r.key } }, 0);
         if (r.chan != 0) _ = usys.capDrop(r.chan);
         if (r.buf_va != 0) _ = usys.shmUnmap(r.buf_va);
@@ -1767,13 +1782,15 @@ pub const Host = struct {
 
     fn pumpMain(arg: u64) callconv(.c) void {
         const h: *Host = @ptrFromInt(arg);
-        while (true) {
+        while (!h.pump_stop.load(.acquire)) {
             var busy = false;
             for (0..max_pages) |i| {
                 if (h.pumpOne(@intCast(i))) busy = true;
             }
             if (!busy) usys.sleepMs(pump_idle_ms);
         }
+        // Last access to h: deinit may reset it as soon as this publishes.
+        h.pump_done.store(true, .release);
     }
 
     /// One poll of a remote page: the queue and the broker's answers go
@@ -1843,12 +1860,12 @@ pub const Host = struct {
         };
         const sent = w.len;
         const had_more = r.more;
-        r.in_call = true;
+        r.pumping = true;
         h.lock.release();
         const res = usys.callTyped(wire.RelayReq, wire.RelayResp, r.chan, .{ .pump = .{ .page = r.page_id, .len = sent, .key = r.key } }, 0);
         h.lock.acquire();
-        r.in_call = false;
         if (r.closing) {
+            r.pumping = false;
             h.remoteClose(id);
             h.lock.release();
             return false;
@@ -1869,6 +1886,7 @@ pub const Host = struct {
         } orelse {
             // The page is dead to us; the host program hears it as it
             // would a local page's death.
+            r.pumping = false;
             r.dead = true;
             p.dead = true;
             h.postEvent(id, null, 0, 0);
@@ -1886,6 +1904,13 @@ pub const Host = struct {
         while (rd.next()) |rec| {
             played = true;
             h.remoteRecord(id, rec);
+        }
+        h.lock.acquire();
+        defer h.lock.release();
+        r.pumping = false;
+        if (r.closing) {
+            h.remoteClose(id);
+            return false;
         }
         return sent > 0 or had_more or played or r.more;
     }

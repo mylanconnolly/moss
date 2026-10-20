@@ -1,0 +1,59 @@
+name: Validation
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: '23 6 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  host:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@v4
+      - run: python3 -m unittest discover -s tools -p test_validate.py
+      - run: python3 tools/validate.py host
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-amd64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: zig-out/validation/
+          retention-days: 14
+
+  runtime:
+    # Enable after provisioning a dedicated runner with these labels.
+    # Self-hosted execution uses trusted default-branch code only.
+    if: >-
+      vars.MOSS_KVM_RUNNER_ENABLED == 'true' &&
+      github.event_name != 'pull_request' &&
+      github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, Linux, X64, moss-amd64]
+    timeout-minutes: 45
+    concurrency:
+      group: moss-runtime
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@v4
+      - name: TCG smoke on both ports
+        run: python3 tools/validate.py smoke
+      - name: Full AMD64 KVM and ARM64 TCG gates
+        if: ${{ !cancelled() }}
+        run: python3 tools/validate.py full
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: runtime-${{ github.run_id }}-${{ github.run_attempt }}
+          path: zig-out/validation/
+          retention-days: 14

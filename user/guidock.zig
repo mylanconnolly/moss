@@ -162,7 +162,6 @@ pub fn runDock(it: *mshl.Interp, view: Value, update: Value, init_state: Value, 
         }
         const output_changed = wf.refreshOutput();
         if (wf.refreshFontMetrics() or output_changed) {
-            wf.closeSurface();
             // A new surface has no queue: a release queued for the old one
             // is gone with it, and a button believed held would ignore
             // every press after — the pill-click flake (2026-09-24).
@@ -170,8 +169,7 @@ pub fn runDock(it: *mshl.Interp, view: Value, update: Value, init_state: Value, 
             wf.win_w = wf.scanout_w;
             wf.win_h = dockHeight();
             wf.win_y = wf.scanout_h - wf.win_h;
-            if (!wf.openSurfaceFocused(false, false)) return it.fail("gui: cannot resize desktop chrome", .{});
-            declareStrut(shared.strut_bottom, wf.win_h);
+            if (!wf.replaceStrutSurface(core.output_control, shared.strut_bottom)) return it.fail("gui: cannot resize desktop chrome", .{});
             announced = false; // hit boxes moved with the new scale
         }
         renderDock(tree);

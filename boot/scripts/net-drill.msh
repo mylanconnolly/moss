@@ -86,7 +86,8 @@ close $s4
 close $s5
 close $sl
 echo "script: pool serve ok"
-# Bulk: more than one segment in flight, both ways — the window at work.
+# Bulk: 32 KB crosses more than the NIC's eight TX descriptors.
+# Both wire and synchronous loopback must preserve every byte.
 def recv-all [s, want] {
   if $want <= 0 { ok (to-bytes "") } else {
     let b = (recv $s)?
@@ -94,7 +95,7 @@ def recv-all [s, want] {
     ok ($b + $rest)
   }
 }
-let big = (range 0 500 | map { "0123456789" } | join "")
+let big = (range 0 3200 | map { "0123456789" } | join "")
 let w = (connect 10.0.2.100 9000)?
 send $w $big
 let back = (from-bytes (recv-all $w ($big | len))?)?

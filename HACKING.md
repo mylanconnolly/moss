@@ -62,20 +62,35 @@ done without rediscovering the sharp edges.
 
 ## Validating both ports
 
-On the Framework, run `zig build -Darch=x86_64 check` with KVM and
-nested AMD-V enabled, then `zig build check` for aarch64 under TCG.
-The gates share ports and `zig-out/check`; run them sequentially and
-preserve each architecture's logs before the next. `zig build test`
-and `zig build test -Doptimize=ReleaseSafe` exercise the native host
-compiler too: cross-compiling the OS on a Mac does not cover Zig's
-native x86 backend. A full gate includes the Debug host tests.
+Use `python3 tools/validate.py host` for native Debug and ReleaseSafe,
+`python3 tools/validate.py smoke` for both ports under TCG, and
+`python3 tools/validate.py full` for the complete AMD64 KVM and ARM64 TCG
+gates. Python 3.11+ is required. The runtime modes default to two drill
+workers (`--jobs 1` for isolation). They check Zig, QEMU, loader and
+firmware first; `full` also probes actual KVM acceleration and nested AMD-V.
+Each invocation retains metadata, commands, timings, build output, serial
+logs, pixel captures and packet captures in a fresh timestamped directory
+under `zig-out/validation/`. A failed phase stays failed while the other
+architecture still runs. The helper serializes invocations: the gates share
+ports and `zig-out/check`. Do not run a raw gate alongside it.
 
+The underlying commands remain `zig build -Darch=x86_64 check` and
+`zig build check`; archive the first port's evidence before the second.
+`zig build test` and `zig build test -Doptimize=ReleaseSafe` exercise the
+native host compiler: cross-compiling on a Mac does not cover Zig's native
+x86 backend. See [tools/README.md](tools/README.md#repeatable-validation)
+for CI and runtime-runner provisioning. Smoke uses the compositor
+pixel drill; the interactive gallery remains in the full gates.
 For AMD64 failures, a user-mode SIMD exception at ordinary arithmetic
 can mean bad initial MXCSR masks, not unsupported instructions. A
 1280x800 QMP capture while virtio-gpu logs 1280x1024 can mean the wrong
 display was captured. A spawn refusal can be the child's own image
 plus stack exceeding its budget even when the parent's ledger has
 plenty of room. Check those before changing a timeout or a global pool.
+The `webfab` drill keeps `webfab-node1.pcap` and `webfab-node2.pcap`:
+a transmit-ring refusal must leave TCP bytes queued, rather than advancing
+`snd_nxt` past a packet the NIC never accepted. Hardware acceleration can
+make a burst outrun descriptor completion even when TCG hides it.
 
 ## Adding things
 

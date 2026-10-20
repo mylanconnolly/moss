@@ -2822,73 +2822,34 @@ not fix, each verified by reading:
   distinct RID_PASID per device. Adapting the port must preserve per-device
   DMA isolation. The relevant upstream check is
   `vtd_ce_pasid_0_check` in [QEMU 11.1.1](https://github.com/qemu/qemu/blob/v11.1.1/hw/i386/intel_iommu.c).
-- **Framework revalidation (2026-10-19, baseline `cf5e28b`).** The
-  Ryzen 9 7940HS machine is available again: Linux 7.2.6, Zig 0.16.0,
-  QEMU 10.2.3, Limine 12.9.3, KVM with nested AMD-V enabled. This
-  QEMU still accepts `x-scalable-mode` / `x-flts`; the newer-QEMU work
-  above remains separate. The first runtime sweep exposed widespread
-  user-mode SIMD exceptions, stale image budgets and screenshot display
-  selection; a subsequent run reached the editor and aborted the runner
-  by sampling beyond the firmware display's height. See DESIGN's
-  "AMD64 revalidation on the Framework" for the fixes and IPC regression
-  probe. Native host tests pass in Debug and ReleaseSafe (345 passed,
-  3 optional fixture tests skipped in each); shell tooling passes 20 tests.
-  The complete AMD64 KVM gate now finishes: **80/83 passed**. The three
-  residuals are below; all six ReleaseSafe kernel rows pass. Logs and the
-  result record are preserved in `zig-out/validation/amd64-kvm/`.
-  The complete ARM64 TCG gate is **82/83 passed**, with only `webfab`
-  failing (the rendered remote page is reaped locally, but node 2 never
-  logs the close and later reaps it as stale). Its logs are preserved in
-  `zig-out/validation/aarch64-tcg/`. The browser and scale-round-trip
-  drills pass on ARM64. All three AMD64 residuals reproduce unchanged
-  with `zig build -Darch=x86_64 check
-  -Donly=browser,guishellro,webfab -Djobs=1`; contention is not required.
-  Those logs are in `zig-out/validation/amd64-isolated/`.
-- **Residuals from that complete sweep:**
-  - `browser`: first tab loads and paints; spawning the second repeatedly
-    returns `OutOfFrames`. The page image contains about 115 MB of static
-    storage, which AMD64 eagerly maps. Port the existing demand-zero
-    mechanism (page-fault dispatch, `userPagePresent`, `settleMappings`)
-    to x86. Keep the whole image charged at spawn and eager population
-    before device DMA; verify two tabs within the existing 512 MB machine,
-    touch-time exhaustion, teardown and the ReleaseSafe leak bar.
-  - `guishellro`: 1.5 -> 1.0 -> 1.5 scaling produces the same 907-pixel
-    content height, but Settings moves from y=56 to y=26. The top-bar
-    strut briefly drops to zero while chrome is recreated;
-    `settledWorkArea` accepts zero as settled, so placement races its
-    replacement. Preserve the strut during resize or add an explicit
-    chrome/work-area readiness contract. Verify window placement, chrome
-    pixels and read-only settings over repeated scale round trips.
-  - `webfab`: node 2 spawns and paints the remote page, then the relay
-    reports `bad_arg`; node 1 logs a fabric call timeout and node 2 logs
-    retransmits followed by a socket error. The first failure is the
-    transport/relay, before the watchdog. Reproduce without contention,
-    instrument bulk progress and call deadlines at both ends, and keep
-    per-node logs and packet captures. Prove remote rendering, navigation,
-    disconnect/rejoin and reclamation without relaxing the watchdog.
-- **Recovery and prevention, in order:**
-  1. Finish the complete 83-row AMD64 KVM gate and aarch64 TCG gate on
-     the same source. Reproduce residuals individually with `-Djobs=1`,
-     retain the failing logs, then soak fixes before repeating the gates.
-     Keep quota/leak and pixel assertions; a compile or serial-only pass
-     cannot substitute for them.
-  2. Make native AMD64 Debug and ReleaseSafe host tests an automated
-     per-change check, plus an x86 TCG smoke covering boot, IPC, storage,
-     DMA refusal and a graphical drill. Configure a maintained KVM runner
-     with nested AMD-V for the full gate, including guest passthrough and
-     the fabric; require that evidence for kernel/user/shared/runner
-     changes. These automation jobs are a follow-up, not installed here.
-  3. Record the tested revision, Zig/QEMU/loader/firmware versions and
-     actual accelerator with each gate result. Give architectures separate
-     artifact directories before trying concurrent gate processes: today
-     their ports and `zig-out/check` collide. Retain multi-node logs and
-     screenshots as well as single-node failed logs.
-  4. Complete newer-QEMU VT-d compatibility using per-device translation
-     contexts; prove unauthorized DMA remains refused and teardown/rebind
-     invalidations work. Exercise the supported old and new emulator
-     versions, then resume the real-hardware arc. A KVM pass on an AMD
-     host still uses emulated Intel VT-d; it does not validate AMD-Vi or
-     the Framework's physical display, storage or network devices.
+- **AMD64 TCG interactive editing.** The new smoke run caught `gui`
+  closing cleanly with `other=MossxMossx` rather than `other=Mossx`;
+  its clipboard/password/undo/redo sequence missed a selection or duplicated
+  a paste. The complete AMD64 KVM and ARM64 TCG gates pass that assertion.
+  The failing AMD64 TCG run used two jobs; an isolated rerun passed in 47.9 s
+  with QEMU's `virtio_input_queue_full` trace empty. Evidence is in
+  `zig-out/validation/20261020T130157.804221Z-smoke/amd64-tcg/` and
+  `zig-out/validation/tcg-gui-isolated/`. Next: capture QMP key events and
+  decoded semantic commands under the two-job reproduction, locate whether
+  select-all is lost or a paste repeats, then synchronize the driver with
+  the observed edit state or fix the responsible input/edit layer. Keep the
+  exact final-state, password and dialog assertions and the watchdog.
+  The fast smoke profile uses the compositor pixel drill; `gui` remains
+  in both complete gates. This TCG residual is separate from runtime CI
+  activation and newer-QEMU VT-d support.
+- **Runtime CI activation.** The workflow and local validation helper are
+  installed (see the Framework recovery entry under Landed), but a dedicated
+  AMD Linux runner must be registered with labels `self-hosted`, `Linux`,
+  `X64`, `moss-amd64`, then the repository Actions variable
+  `MOSS_KVM_RUNNER_ENABLED=true` set. Follow tools/README's provisioning
+  checklist, dispatch Validation and inspect both architecture artifacts.
+  Until then, native host CI is available and full runtime checks are local.
+- **Next emulator/hardware work:** complete newer-QEMU VT-d compatibility
+  using per-device translation contexts; prove unauthorized DMA remains
+  refused and teardown/rebind invalidations work. Exercise the supported old
+  and new emulator versions, then resume the real-hardware arc. A KVM pass
+  on an AMD host still uses emulated Intel VT-d; it does not validate AMD-Vi
+  or the Framework's physical display, storage or network devices.
 
 **Unified GUI framework and polish**
 
@@ -2934,6 +2895,45 @@ not fix, each verified by reading:
   in-window drag selection, local kill/yank, and stable Tab ownership.
 
 ### Landed (the story, with the bugs each piece found)
+
+- ✅ **Framework recovery after the ARM-only stretch (2026-10-20).**
+  Revalidation started at `cf5e28b`: Ryzen 9 7940HS, Linux 7.2.6, Zig
+  0.16.0, QEMU 10.2.3, Limine 12.9.3, KVM with nested AMD-V. Commit
+  `bffb67f` restored fresh FP control masks, corrected image budgets and
+  selected the virtio GPU for screenshots; native x86 assembly needed a
+  literal constrained RAX base. Gates then reached 80/83 AMD64 and 82/83
+  ARM64. All residuals reproduced with one worker; the failing baseline
+  evidence remains under `zig-out/validation/`.
+  The follow-up ports demand-zero BSS to x86 while retaining full admission
+  charges, touch-time failure rollback and eager population before DMA.
+  The domain drill checks the accounting and teardown on both ports.
+  Resident chrome now transfers its strut before destroying the old surface,
+  so Settings retains its position across scale round trips. Packet captures
+  traced the fabric timeout to TCP counting packets refused by a full TX
+  ring as sent: refused data now stays queued and retries on completions,
+  with FIN after the queued tail. The net drill compares a 32 KB wire and
+  loopback transfer. Remote page destruction waits through the pump's IPC,
+  record replay and goodbye; host deinit stops the pump before releasing
+  its resources.
+  The complete ARM64 sweep also exposed the session wait helper replying
+  before freeing its worker slot, briefly refusing the next user's wait.
+  It now snapshots the token and releases the slot before publishing the
+  reply; the existing two-session drill covers the handoff in both modes.
+  No timeout, pixel assertion, quota check or watchdog was relaxed.
+  `tools/validate.py` runs native Debug/ReleaseSafe, dual-port TCG smoke,
+  or full AMD64 KVM then ARM64 TCG, retaining fresh per-port evidence,
+  versions, revision/dirty state, firmware hashes and actual acceleration.
+  GitHub Actions runs hosted native tests per change and offers an enabled
+  runtime runner on main and weekly; provisioning remains Open above.
+  Final gates: **83/83 AMD64 KVM and 83/83 ARM64 TCG**, all ReleaseSafe
+  rows included, four jobs. Browser/chrome/relay pass three isolated runs
+  per port; users pass three per mode on AMD64 and five on ARM64. Native
+  Debug/ReleaseSafe each pass 345 tests with three optional skips, shell
+  tooling 20, helper integration five, and compositor TCG smoke 10/10 on
+  both ports. The interactive AMD64 TCG editing residual remains Open;
+  its assertions in the complete gates are unchanged.
+  See DESIGN's Framework sections and tools/README for the contracts and
+  activation steps.
 
 - ✅ **The GUI foundations list, worked through (2026-10-08).** Four
   commits after the switches/grids/sheets one: one button painter (the

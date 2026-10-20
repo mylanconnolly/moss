@@ -60,11 +60,25 @@ extern const __requests_end: u8;
 
 pub const Error = error{OutOfFrames};
 
-/// The port maps a domain's whole image at spawn (see the aarch64 port's
-/// `demand_zero` for the lazily-populated .bss; wiring it here needs the
-/// page-fault path to call domain.faultIn and `userPagePresent` +
-/// `settleMappings` below the HAL).
-pub const demand_zero = false;
+/// Reserve .bss against the budget at spawn, then populate its pages on
+/// first touch. Devices still require the whole image before DMA attaches.
+pub const demand_zero = true;
+
+pub fn userPagePresent(root_pa_user: u64, va: u64) bool {
+    const pdpt = lookup(root_pa_user, idx(va, 39)) orelse return false;
+    const pd = lookup(pdpt, idx(va, 30)) orelse return false;
+    const pt = lookup(pd, idx(va, 21)) orelse return false;
+    return entryAt(pt, idx(va, 12)).* & present != 0;
+}
+
+/// Publish a newly present mapping before retrying a fault. Non-present
+/// entries are not cached in the x86 TLB; other cores can walk the new
+/// entry directly. Reload locally to serialize this core's table walks,
+/// without waiting for IPIs while another fault may hold IRQs masked.
+pub fn settleMappings() void {
+    publishTables();
+    cpu.writeCr3(cpu.readCr3());
+}
 
 pub fn init(regions: []const platform.MemRegion) Error!void {
     root_pa = pmem.allocZeroed() orelse return Error.OutOfFrames;

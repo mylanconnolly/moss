@@ -3,9 +3,9 @@
 //!                 TCP/IP in one userspace process. The ABI is IPv6-native
 //!                 (every address is 128 bits; IPv4 rides v4-mapped), and
 //!                 the wire speaks both families: ARP for v4, NDP/ICMPv6
-//!                 for v6. TCP is stop-and-wait (one unacked segment per
-//!                 socket), in-order receive only, fixed windows, no
-//!                 options — enough for the fabric protocol and a demo,
+//!                 for v6. TCP has a bounded sliding send window, queued
+//!                 output under NIC backpressure, bounded out-of-order
+//!                 receive and MSS negotiation — enough for the fabric,
 //!                 not an RFC museum. Network access is a badged view;
 //!                 filtered views hold a one-destination outbound allowlist
 //!                 and may not listen or derive. Local destinations (own
@@ -839,9 +839,9 @@ fn netInit(f: *Iface) void {
     f.dev.notify(@intCast(rxq.idx));
 }
 
-fn wireTx(f: *Iface, frame: []const u8) void {
+fn wireTx(f: *Iface, frame: []const u8) bool {
     if (f.tx_free == 0) drainTxUsed(f);
-    if (f.tx_free == 0) return; // drop; stop-and-wait retransmits recover
+    if (f.tx_free == 0) return false;
     var slot: u3 = 0;
     while (f.tx_free & (@as(u8, 1) << slot) == 0) slot += 1;
     f.tx_free &= ~(@as(u8, 1) << slot);
@@ -862,6 +862,7 @@ fn wireTx(f: *Iface, frame: []const u8) void {
     usys.barrier();
     f.dev.notify(@intCast(txq.idx));
     f.tx_frames += 1;
+    return true;
 }
 
 fn drainTxUsed(f: *Iface) void {
@@ -896,6 +897,11 @@ fn netTick() void {
         drainRxUsed(f);
         drainTxUsed(f);
     }
+    // A full TX ring leaves TCP data queued, rather than in flight. Retry
+    // after completions even when no ACK arrives to kick tcpOutput.
+    for (&socks) |*s| {
+        if (s.used) tcpOutput(s);
+    }
     retransmitScan();
     lookupScan();
     dhcpScan();
@@ -924,13 +930,17 @@ fn etherInput(f: *Iface, frame: []const u8) void {
 }
 
 fn ethSend(f: *Iface, dst_mac: []const u8, ethertype: u16, payload: []const u8) void {
+    _ = tryEthSend(f, dst_mac, ethertype, payload);
+}
+
+fn tryEthSend(f: *Iface, dst_mac: []const u8, ethertype: u16, payload: []const u8) bool {
     var frame: [14 + 40 + seg_max + 4]u8 = undefined;
     @memcpy(frame[0..6], dst_mac);
     @memcpy(frame[6..12], &f.mac);
     frame[12] = @truncate(ethertype >> 8);
     frame[13] = @truncate(ethertype);
     @memcpy(frame[14 .. 14 + payload.len], payload);
-    wireTx(f, frame[0 .. 14 + payload.len]);
+    return wireTx(f, frame[0 .. 14 + payload.len]);
 }
 
 // -------------------------------------------------------------- ARP (v4)
@@ -1106,11 +1116,15 @@ fn ping4(ip: u32) void {
 /// address when it has one, else the outgoing interface's. Dropped, and
 /// the neighbour asked for, when the next hop's MAC is not known yet.
 fn ipSend4(src: ?u32, dst: u32, proto: u8, payload: []const u8) void {
-    const r = route(v4Addr(dst)) orelse return;
-    const dmac = nextHopMac(r.f, r.hop) orelse return;
+    _ = tryIpSend4(src, dst, proto, payload);
+}
+
+fn tryIpSend4(src: ?u32, dst: u32, proto: u8, payload: []const u8) bool {
+    const r = route(v4Addr(dst)) orelse return false;
+    const dmac = nextHopMac(r.f, r.hop) orelse return false;
     var pkt: [20 + seg_max + 4]u8 = undefined;
     const total = 20 + payload.len;
-    if (total > pkt.len) return;
+    if (total > pkt.len) return false;
     pkt[0] = 0x45;
     pkt[1] = 0;
     pbe16(pkt[2..4], @intCast(total));
@@ -1128,18 +1142,22 @@ fn ipSend4(src: ?u32, dst: u32, proto: u8, payload: []const u8) void {
     pkt[10] = @truncate(ipsum >> 8);
     pkt[11] = @truncate(ipsum);
     @memcpy(pkt[20..total], payload);
-    ethSend(r.f, &dmac, 0x0800, pkt[0..total]);
+    return tryEthSend(r.f, &dmac, 0x0800, pkt[0..total]);
 }
 
 /// An IPv6 packet to `dst` by the route. `checksum_icmp`: the payload is
 /// ICMPv6 whose checksum (over the pseudo-header) is computed here once
 /// the source is known.
 fn ipSend6(src: ?Addr, dst: Addr, proto: u8, hop_limit: u8, payload: []const u8, checksum_icmp: bool) void {
-    const r = route(dst) orelse return;
-    const dmac = nextHopMac(r.f, r.hop) orelse return;
+    _ = tryIpSend6(src, dst, proto, hop_limit, payload, checksum_icmp);
+}
+
+fn tryIpSend6(src: ?Addr, dst: Addr, proto: u8, hop_limit: u8, payload: []const u8, checksum_icmp: bool) bool {
+    const r = route(dst) orelse return false;
+    const dmac = nextHopMac(r.f, r.hop) orelse return false;
     var pkt: [40 + seg_max + 4]u8 = undefined;
     const total = 40 + payload.len;
-    if (total > pkt.len) return;
+    if (total > pkt.len) return false;
     pkt[0] = 0x60;
     pkt[1] = 0;
     pkt[2] = 0;
@@ -1164,7 +1182,7 @@ fn ipSend6(src: ?Addr, dst: Addr, proto: u8, hop_limit: u8, payload: []const u8,
         pkt[42] = @truncate(c >> 8);
         pkt[43] = @truncate(c);
     }
-    ethSend(r.f, &dmac, 0x86dd, pkt[0..total]);
+    return tryEthSend(r.f, &dmac, 0x86dd, pkt[0..total]);
 }
 
 // ------------------------------------------------------------- IP input
@@ -2030,6 +2048,10 @@ fn armTimer(s: *Sock) void {
 /// Build one TCP segment for either family; loopback feeds the stack.
 /// `opts` are TCP options (the SYN's MSS), already padded to 4 bytes.
 fn tcpEmit(s: *Sock, seq: u32, flags: u8, opts: []const u8, payload: []const u8) void {
+    _ = tryTcpEmit(s, seq, flags, opts, payload);
+}
+
+fn tryTcpEmit(s: *Sock, seq: u32, flags: u8, opts: []const u8, payload: []const u8) bool {
     var t: [seg_max + 4]u8 = undefined;
     const doff = 20 + opts.len;
     const tcp_len = doff + payload.len;
@@ -2054,7 +2076,7 @@ fn tcpEmit(s: *Sock, seq: u32, flags: u8, opts: []const u8, payload: []const u8)
     // A connection keeps the address it was made with (its interface's,
     // or the one the peer reached); loopback speaks as the peer.
     const src_addr: Addr = if (local) s.raddr else if (!addrIsZero(s.laddr)) s.laddr else blk: {
-        const r = route(s.raddr) orelse return;
+        const r = route(s.raddr) orelse return false;
         break :blk if (v4) v4Addr(r.f.ip4) else r.f.ip6;
     };
 
@@ -2082,9 +2104,9 @@ fn tcpEmit(s: *Sock, seq: u32, flags: u8, opts: []const u8, payload: []const u8)
 
     if (local) {
         tcpInput(src_addr, s.raddr, t[0..tcp_len]);
-        return;
+        return true;
     }
-    if (v4) ipSend4(v4Of(src_addr), v4Of(s.raddr), 6, t[0..tcp_len]) else ipSend6(src_addr, s.raddr, 6, 64, t[0..tcp_len], false);
+    return if (v4) tryIpSend4(v4Of(src_addr), v4Of(s.raddr), 6, t[0..tcp_len]) else tryIpSend6(src_addr, s.raddr, 6, 64, t[0..tcp_len], false);
 }
 
 /// The MSS option we announce.
@@ -2110,7 +2132,7 @@ fn tcpSendSyn(s: *Sock, flags: u8) void {
 
 /// Send the FIN once everything queued has gone out.
 fn tcpSendFin(s: *Sock) void {
-    if (s.fin_sent) return;
+    if (s.fin_sent or s.unsent() != 0) return;
     s.fin_sent = true;
     s.fin_seq = s.snd_nxt;
     s.snd_nxt +%= 1;
@@ -2161,8 +2183,16 @@ fn tcpOutput(s: *Sock) void {
             s.rto = 0;
             armTimer(s);
         }
-        tcpEmit(s, seq, F_PSH | F_ACK, "", data);
+        if (!tryTcpEmit(s, seq, F_PSH | F_ACK, "", data)) {
+            // Advance before emit for synchronous loopback ACKs, but a
+            // packet refused by the NIC/route has never been in flight.
+            s.snd_nxt = seq;
+            break;
+        }
     }
+    // close() can arrive while descriptors or the peer's window are full.
+    // Keep the queued tail ahead of FIN, including on later tick retries.
+    if (s.lingering and s.unsent() == 0) tcpSendFin(s);
 }
 
 /// Retransmit the oldest unacknowledged thing on every socket whose
